@@ -1029,7 +1029,24 @@ void Field::make_sort_key(uchar *buff,uint length)
 }
 
 
-uchar* Field::make_sort_key(uchar *buff)
+uchar* Field::make_packed_sort_key(uchar *buff,uint length)
+{
+  if (maybe_null())
+  {
+    if (is_null())
+    {
+      *buff++= 0;
+      return buff;
+    }
+    *buff++=1;
+  }
+  sort_string(buff, length);
+  return buff+length;
+}
+
+
+uchar* Field_longstr::make_packed_sort_key(uchar *buff,
+                                           uint length __attribute__((unused)))
 {
   if (maybe_null())
   {

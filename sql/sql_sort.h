@@ -262,7 +262,7 @@ public:
   SORT_FIELD *end()   const { return sortorder.end(); }
   size_t size()       const { return sortorder.size(); }
 
-  bool using_packed_sortkeys() { return m_using_packed_sortkeys; }
+  bool using_packed_sortkeys() const { return m_using_packed_sortkeys; }
   void set_using_packed_sortkeys(bool val)
   {
     m_using_packed_sortkeys= val;

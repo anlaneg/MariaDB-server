@@ -775,6 +775,7 @@ static ha_rows find_all_keys(THD *thd, Sort_param *param, SQL_SELECT *select,
   Item *sort_cond;
   ha_rows num_records= 0;
   const bool packed_addon_fields= param->using_packed_addons();
+  const bool packed_sort_keys= param->using_packed_sortkeys();
   DBUG_ENTER("find_all_keys");
   DBUG_PRINT("info",("using: %s",
                      (select ? select->quick ? "ranges" : "where":
@@ -898,7 +899,8 @@ static ha_rows find_all_keys(THD *thd, Sort_param *param, SQL_SELECT *select,
         uchar *start_of_rec= fs_info->get_next_record_pointer();
 
         const uint rec_sz= make_sortkey(param, start_of_rec, ref_pos);
-        if (packed_addon_fields && rec_sz != param->rec_length)
+        if ((packed_addon_fields || packed_sort_keys) &&
+            rec_sz != param->rec_length)
           fs_info->adjust_next_record_pointer(rec_sz);
         idx++;
       }
@@ -1288,7 +1290,7 @@ Type_handler_string_result::make_sort_key_ext(uchar *to, Item *item,
                                            const SORT_FIELD_ATTR *sort_field,
                                            Sort_param *param) const
 {
-
+  return NULL;
 }
 
 
@@ -1386,8 +1388,10 @@ static uint make_sortkey(Sort_param *param, uchar *to, uchar *ref_pos)
   SORT_FIELD *sort_field;
   uint length;
   uchar *orig_to= to;
+  uchar *end;
 
-  if (param->using_packed_sortkeys())
+  const bool using_packed_sortkeys= param->using_packed_sortkeys();
+  if (using_packed_sortkeys)
     to+= Sort_keys::size_of_length_field;
 
   for (sort_field=param->local_sortorder.begin() ;
@@ -1397,23 +1401,41 @@ static uint make_sortkey(Sort_param *param, uchar *to, uchar *ref_pos)
     bool maybe_null=0;
     if ((field=sort_field->field))
     {						// Field
-      field->make_sort_key(to, sort_field->length);
-      if ((maybe_null = field->maybe_null()))
-        to++;
+      if (using_packed_sortkeys)
+        end= field->make_packed_sort_key(to, sort_field->length);
+      else
+      {
+        field->make_sort_key(to, sort_field->length);
+        if ((maybe_null = field->maybe_null()))
+          to++;
+      }
     }
     else
     {						// Item
-      sort_field->item->type_handler()->make_sort_key(to, sort_field->item,
-                                                      sort_field, param);
-      if ((maybe_null= sort_field->item->maybe_null))
-        to++;
+      Item *item= sort_field->item;
+      if (using_packed_sortkeys)
+        end= item->type_handler()->make_sort_key_ext(to, sort_field->item,
+                                                     sort_field, param);
+      else
+      {
+        item->type_handler()->make_sort_key(to, sort_field->item,
+                                            sort_field, param);
+        if ((maybe_null= sort_field->item->maybe_null))
+          to++;
+      }
     }
-    if (sort_field->reverse)
-      reverse_key(to, maybe_null, sort_field);
-    to+= sort_field->length;
+
+    if (using_packed_sortkeys)
+      to= end;
+    else
+    {
+      if (sort_field->reverse)
+        reverse_key(to, maybe_null, sort_field);
+      to+= sort_field->length;
+    }
   }
 
-  if (param->using_packed_sortkeys())
+  if (using_packed_sortkeys)
   {
     length= static_cast<int>(to - orig_to);
     Sort_keys::store_sortkey_length(orig_to, length);
@@ -2586,35 +2608,39 @@ int native_compare2(size_t *length, unsigned char **a, unsigned char **b)
                 *length);
 }
 
-int packed_keys_comparison(void *sortorder, unsigned char **a, unsigned char **b)
+int packed_keys_comparison(void *sortorder,
+                           unsigned char **a_ptr, unsigned char **b_ptr)
 {
   int retval= 0;
   size_t a_len, b_len;
-  size_t length_a=0, length_b=0;
   Sort_keys *sort_keys= (Sort_keys*)sortorder;
+  uchar *a= *a_ptr;
+  uchar *b= *b_ptr;
+  
+  a+= Sort_keys::size_of_length_field;
+  b+= Sort_keys::size_of_length_field;
   for (SORT_FIELD *sort_field= sort_keys->begin();
        sort_field != sort_keys->end(); sort_field++)
   {
-    a_len= 0, b_len= 0;
     if (sort_field->field)
     {
-      retval= sort_field->field->compare_packed_keys(*a + length_a, &a_len,
-                                                     *b + length_b, &b_len,
+      retval= sort_field->field->compare_packed_keys(a, &a_len,
+                                                     b, &b_len,
                                                      sort_field);
     }
     else
     {
       Item *item= sort_field->item;
-      retval= item->type_handler()->compare_packed_keys(*a + length_a, &a_len,
-                                                        *b + length_b, &b_len,
+      retval= item->type_handler()->compare_packed_keys(a, &a_len,
+                                                        b, &b_len,
                                                         sort_field);
     }
 
     if (retval)
-        return sort_field->reverse == ORDER::ORDER_ASC? retval : -retval;
+        return sort_field->reverse ? -retval : retval;
 
-    length_a+= a_len;
-    length_b+= b_len;
+    a+= a_len;
+    b+= b_len;
 
   }
   return retval;
@@ -2634,10 +2660,10 @@ int compare_packed_keys_ext(CHARSET_INFO *cs, uchar *a, size_t *a_len,
   size_t a_length, b_length;
   if (maybe_null)
   {
+    *a_len= *b_len= 1;
     if (*a != *b)
     {
-      *a_len++;
-      *b_len++;
+
       if (*a == 0)
       {
         *b_len+= read_length(b, sortorder->length_bytes);
@@ -2654,7 +2680,12 @@ int compare_packed_keys_ext(CHARSET_INFO *cs, uchar *a, size_t *a_len,
       if (*a == 0)
         return 0;
     }
+    a++;
+    b++;
   }
+  else
+    *a_len= *b_len= 0;
+
 
   a_length= read_length(a, sortorder->length_bytes);
   b_length= read_length(b, sortorder->length_bytes);
@@ -2673,10 +2704,10 @@ int compare_packed_keys_ext(uchar *a, size_t *a_len,
 {
   if (maybe_null)
   {
+    *a_len=1;
+    *b_len=1;
     if (*a != *b)
     {
-      *a_len++;
-      *b_len++;
       if (*a == 0)
       {
         *b_len+= sortorder->length;
@@ -2693,7 +2724,12 @@ int compare_packed_keys_ext(uchar *a, size_t *a_len,
       if (*a == 0)
         return 0;
     }
+    a++;
+    b++;
   }
+  else
+    *a_len= *b_len= 0;
+
   *a_len+= sortorder->length;
   *b_len+= sortorder->length;
   return memcmp(a,b, sortorder->length);
