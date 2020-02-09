@@ -218,8 +218,8 @@ bool setup_tables_and_check_access(THD *thd,
                                    TABLE_LIST *tables,
                                    List<TABLE_LIST> &leaves, 
                                    bool select_insert,
-                                   ulong want_access_first,
-                                   ulong want_access,
+                                   Access want_access_first,
+                                   Access want_access,
                                    bool full_table_list);
 bool wait_while_table_is_used(THD *thd, TABLE *table,
                               enum ha_extra_function function);

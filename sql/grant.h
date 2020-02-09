@@ -18,6 +18,7 @@
 #define SQL_GRANT_INCLUDED
 
 #include "lex_string.h"
+#include "sql_access.h"
 
 class LEX_COLUMN;
 class Lex_ident_sys;
@@ -50,7 +51,7 @@ public:
     m_table_ident(NULL),
     m_type(type)
   { }
-  uint all_privileges_by_type() const;
+  Access all_privileges_by_type() const;
 };
 
 
@@ -65,30 +66,32 @@ class Grant_privilege
 protected:
   List<LEX_COLUMN> m_columns;
   Lex_cstring m_db;
-  uint m_object_privilege;
-  uint m_column_privilege_total;
+  Access m_object_privilege;
+  Access m_column_privilege_total;
   bool m_all_privileges;
 public:
   Grant_privilege()
-   :m_object_privilege(0), m_column_privilege_total(0), m_all_privileges(false)
+   :m_object_privilege(NO_ACL),
+    m_column_privilege_total(NO_ACL),
+    m_all_privileges(false)
   { }
-  Grant_privilege(uint privilege, bool all_privileges)
+  Grant_privilege(Access privilege, bool all_privileges)
    :m_object_privilege(privilege),
-    m_column_privilege_total(0),
+    m_column_privilege_total(NO_ACL),
     m_all_privileges(all_privileges)
   { }
-  void add_object_privilege(uint privilege)
+  void add_object_privilege(Access privilege)
   {
     m_object_privilege|= privilege;
   }
   bool add_column_privilege(THD *thd, const Lex_ident_sys &col,
-                            uint privilege);
+                            Access privilege);
   bool add_column_list_privilege(THD *thd, List<Lex_ident_sys> &list,
-                                 uint privilege);
+                                 Access privilege);
   bool set_object_name(THD *thd,
                        const Grant_object_name &ident,
                        SELECT_LEX *sel,
-                       uint with_grant_option);
+                       Access with_grant_option);
   const List<LEX_COLUMN> & columns() const { return m_columns; }
 };
 

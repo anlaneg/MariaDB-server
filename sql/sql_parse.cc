@@ -998,7 +998,7 @@ int bootstrap(MYSQL_FILE *file)
   thd->bootstrap=1;
   my_net_init(&thd->net,(st_vio*) 0, thd, MYF(0));
   thd->max_client_packet_length= thd->net.max_packet;
-  thd->security_ctx->master_access= ~(ulong)0;
+  thd->security_ctx->master_access= ALL_KNOWN_ACL;
 
 #ifndef EMBEDDED_LIBRARY
   mysql_thread_set_psi_id(thd->thread_id);
@@ -1404,8 +1404,7 @@ static bool deny_updates_if_read_only_option(THD *thd, TABLE_LIST *all_tables)
   LEX *lex= thd->lex;
 
   /* Super user is allowed to do changes */
-  if (((ulong)(thd->security_ctx->master_access & SUPER_ACL) ==
-       (ulong)SUPER_ACL))
+  if ((thd->security_ctx->master_access & SUPER_ACL) == SUPER_ACL)
     DBUG_RETURN(FALSE);
 
   /* Check if command doesn't update anything */
@@ -1445,7 +1444,7 @@ static bool deny_updates_if_read_only_option(THD *thd, TABLE_LIST *all_tables)
 static my_bool wsrep_read_only_option(THD *thd, TABLE_LIST *all_tables)
 {
   int opt_readonly_saved = opt_readonly;
-  ulong flag_saved = (ulong)(thd->security_ctx->master_access & SUPER_ACL);
+  Access flag_saved= thd->security_ctx->master_access & SUPER_ACL;
 
   opt_readonly = 0;
   thd->security_ctx->master_access &= ~SUPER_ACL;
@@ -3170,7 +3169,7 @@ wsrep_error_label:
   from other cases: bad database error, no access error.
   This can be done by testing thd->is_error().
 */
-static bool prepare_db_action(THD *thd, ulong want_access, LEX_CSTRING *dbname)
+static bool prepare_db_action(THD *thd, Access want_access, LEX_CSTRING *dbname)
 {
   if (check_db_name((LEX_STRING*)dbname))
   {
@@ -3890,7 +3889,7 @@ mysql_execute_command(THD *thd)
       lex->exchange != NULL implies SELECT .. INTO OUTFILE and this
       requires FILE_ACL access.
     */
-    ulong privileges_requested= lex->exchange ? SELECT_ACL | FILE_ACL :
+    Access privileges_requested= lex->exchange ? SELECT_ACL | FILE_ACL :
       SELECT_ACL;
 
     if (all_tables)
@@ -4928,9 +4927,9 @@ mysql_execute_command(THD *thd)
   case SQLCOM_LOAD:
   {
     DBUG_ASSERT(first_table == all_tables && first_table != 0);
-    uint privilege= (lex->duplicates == DUP_REPLACE ?
-		     INSERT_ACL | DELETE_ACL : INSERT_ACL) |
-                    (lex->local_file ? 0 : FILE_ACL);
+    Access privilege= (lex->duplicates == DUP_REPLACE ?
+                      INSERT_ACL | DELETE_ACL : INSERT_ACL) |
+                      (lex->local_file ? NO_ACL : FILE_ACL);
 
     if (lex->local_file)
     {
@@ -6521,7 +6520,7 @@ wsrep_error_label:
 */
 
 bool
-check_access(THD *thd, ulong want_access, const char *db, ulong *save_priv,
+check_access(THD *thd, Access want_access, const char *db, Access *save_priv,
              GRANT_INTERNAL_INFO *grant_internal_info,
              bool dont_check_global_grants, bool no_errors)
 {
@@ -6531,7 +6530,7 @@ check_access(THD *thd, ulong want_access, const char *db, ulong *save_priv,
   return false;
 #else
   Security_context *sctx= thd->security_ctx;
-  ulong db_access;
+  Access db_access(NO_ACL);
 
   /*
     GRANT command:
@@ -6543,17 +6542,19 @@ check_access(THD *thd, ulong want_access, const char *db, ulong *save_priv,
     set db_is_pattern according to 'dont_check_global_grants' value.
   */
   bool  db_is_pattern= ((want_access & GRANT_ACL) && dont_check_global_grants);
-  ulong dummy;
+  Access dummy(NO_ACL);
   DBUG_ENTER("check_access");
-  DBUG_PRINT("enter",("db: %s  want_access: %lu  master_access: %lu",
-                      db ? db : "", want_access, sctx->master_access));
+  DBUG_PRINT("enter",("db: %s  want_access: %llx  master_access: %llx",
+                      db ? db : "",
+                      (longlong) want_access,
+                      (longlong) sctx->master_access));
 
   if (save_priv)
-    *save_priv=0;
+    *save_priv= NO_ACL;
   else
   {
     save_priv= &dummy;
-    dummy= 0;
+    dummy= NO_ACL;
   }
 
   /* check access may be called twice in a row. Don't change to same stage */
@@ -6671,8 +6672,8 @@ check_access(THD *thd, ulong want_access, const char *db, ulong *save_priv,
   }
   else
     db_access= sctx->db_access;
-  DBUG_PRINT("info",("db_access: %lu  want_access: %lu",
-                     db_access, want_access));
+  DBUG_PRINT("info",("db_access: %llx  want_access: %llx",
+                     (longlong) db_access, (longlong) want_access));
 
   /*
     Save the union of User-table and the intersection between Db-table and
@@ -6740,7 +6741,7 @@ check_access(THD *thd, ulong want_access, const char *db, ulong *save_priv,
     1   access denied, error is sent to client
 */
 
-bool check_single_table_access(THD *thd, ulong privilege, 
+bool check_single_table_access(THD *thd, Access privilege, 
                                TABLE_LIST *all_tables, bool no_errors)
 {
   Switch_to_definer_security_ctx backup_sctx(thd, all_tables);
@@ -6781,7 +6782,7 @@ bool check_single_table_access(THD *thd, ulong privilege,
     1   access denied, error is sent to client
 */
 
-bool check_one_table_access(THD *thd, ulong privilege, TABLE_LIST *all_tables)
+bool check_one_table_access(THD *thd, Access privilege, TABLE_LIST *all_tables)
 {
   if (check_single_table_access (thd,privilege,all_tables, FALSE))
     return 1;
@@ -6933,7 +6934,7 @@ static bool check_show_access(THD *thd, TABLE_LIST *table)
 */
 
 bool
-check_table_access(THD *thd, ulong requirements,TABLE_LIST *tables,
+check_table_access(THD *thd, Access requirements, TABLE_LIST *tables,
 		   bool any_combination_of_privileges_will_do,
                    uint number, bool no_errors)
 {
@@ -6952,7 +6953,7 @@ check_table_access(THD *thd, ulong requirements,TABLE_LIST *tables,
       tables->correspondent_table : tables;
     Switch_to_definer_security_ctx backup_ctx(thd, table_ref);
 
-    ulong want_access= requirements;
+    Access want_access(requirements);
 
     /*
        Register access for view underlying table.
@@ -6995,7 +6996,7 @@ check_table_access(THD *thd, ulong requirements,TABLE_LIST *tables,
 
 
 bool
-check_routine_access(THD *thd, ulong want_access, const LEX_CSTRING *db,
+check_routine_access(THD *thd, Access want_access, const LEX_CSTRING *db,
                      const LEX_CSTRING *name,
                      const Sp_handler *sph, bool no_errors)
 {
@@ -7017,7 +7018,7 @@ check_routine_access(THD *thd, ulong want_access, const LEX_CSTRING *db,
     as long as this code path is not abused to create routines.
     The assert enforce that.
   */
-  DBUG_ASSERT((want_access & CREATE_PROC_ACL) == 0);
+  DBUG_ASSERT((want_access & CREATE_PROC_ACL) == NO_ACL);
   if ((thd->security_ctx->master_access & want_access) == want_access)
     tables->grant.privilege= want_access;
   else if (check_access(thd, want_access, db->str,
@@ -7046,7 +7047,7 @@ check_routine_access(THD *thd, ulong want_access, const LEX_CSTRING *db,
 bool check_some_routine_access(THD *thd, const char *db, const char *name,
                                const Sp_handler *sph)
 {
-  ulong save_priv;
+  Access save_priv(NO_ACL);
   /*
     The following test is just a shortcut for check_access() (to avoid
     calculating db_access)
@@ -7077,16 +7078,15 @@ bool check_some_routine_access(THD *thd, const char *db, const char *name,
     1  error
 */
 
-bool check_some_access(THD *thd, ulong want_access, TABLE_LIST *table)
+bool check_some_access(THD *thd, Access want_access, TABLE_LIST *table)
 {
-  ulong access;
   DBUG_ENTER("check_some_access");
 
-  /* This loop will work as long as we have less than 32 privileges */
-  for (access= 1; access < want_access ; access<<= 1)
+  for (ulonglong bit= 1; bit < (ulonglong) want_access ; bit<<= 1)
   {
-    if (access & want_access)
+    if (bit & want_access)
     {
+      Access access= ALL_KNOWN_ACL & bit;
       if (!check_access(thd, access, table->db.str,
                         &table->grant.privilege,
                         &table->grant.m_internal,
@@ -7120,7 +7120,7 @@ bool check_some_access(THD *thd, ulong want_access, TABLE_LIST *table)
     1	Access denied.  In this case an error is sent to the client
 */
 
-bool check_global_access(THD *thd, ulong want_access, bool no_errors)
+bool check_global_access(THD *thd, Access want_access, bool no_errors)
 {
 #ifndef NO_EMBEDDED_ACCESS_CHECKS
   char command[128];
@@ -7172,8 +7172,8 @@ bool check_fk_parent_table_access(THD *thd,
       LEX_CSTRING db_name;
       LEX_CSTRING table_name= { fk_key->ref_table.str,
                                fk_key->ref_table.length };
-      const ulong privileges= (SELECT_ACL | INSERT_ACL | UPDATE_ACL |
-                               DELETE_ACL | REFERENCES_ACL);
+      const Access privileges(SELECT_ACL | INSERT_ACL | UPDATE_ACL |
+                              DELETE_ACL | REFERENCES_ACL);
 
       // Check if tablename is valid or not.
       DBUG_ASSERT(table_name.str != NULL);
@@ -9365,7 +9365,7 @@ bool multi_update_precheck(THD *thd, TABLE_LIST *tables)
               check_grant(thd, SELECT_ACL, table, FALSE, 1, FALSE)))
       DBUG_RETURN(TRUE);
 
-    table->grant.orig_want_privilege= 0;
+    table->grant.orig_want_privilege= NO_ACL;
     table->table_in_first_from_clause= 1;
   }
   /*
@@ -9626,9 +9626,9 @@ bool insert_precheck(THD *thd, TABLE_LIST *tables)
     Check that we have modify privileges for the first table and
     select privileges for the rest
   */
-  ulong privilege= (INSERT_ACL |
-                    (lex->duplicates == DUP_REPLACE ? DELETE_ACL : 0) |
-                    (lex->value_list.elements ? UPDATE_ACL : 0));
+  Access privilege= (INSERT_ACL |
+                    (lex->duplicates == DUP_REPLACE ? DELETE_ACL : NO_ACL) |
+                    (lex->value_list.elements ? UPDATE_ACL : NO_ACL));
 
   if (check_one_table_access(thd, privilege, tables))
     DBUG_RETURN(TRUE);
@@ -9688,7 +9688,7 @@ bool create_table_precheck(THD *thd, TABLE_LIST *tables,
 {
   LEX *lex= thd->lex;
   SELECT_LEX *select_lex= lex->first_select_lex();
-  ulong want_priv;
+  Access want_priv(NO_ACL);
   bool error= TRUE;                                 // Error message is given
   DBUG_ENTER("create_table_precheck");
 
@@ -9697,8 +9697,8 @@ bool create_table_precheck(THD *thd, TABLE_LIST *tables,
     CREATE TABLE ... SELECT, also require INSERT.
   */
 
-  want_priv= lex->tmp_table() ?  CREATE_TMP_ACL :
-             (CREATE_ACL | (select_lex->item_list.elements ? INSERT_ACL : 0));
+  want_priv= lex->tmp_table() ? CREATE_TMP_ACL :
+             (CREATE_ACL | (select_lex->item_list.elements ? INSERT_ACL : NO_ACL));
 
   /* CREATE OR REPLACE on not temporary tables require DROP_ACL */
   if (lex->create_info.or_replace() && !lex->tmp_table())

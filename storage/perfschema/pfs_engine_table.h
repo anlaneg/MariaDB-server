@@ -266,7 +266,7 @@ public:
   ~PFS_readonly_acl()
   {}
 
-  virtual ACL_internal_access_result check(ulong want_access, ulong *save_priv) const;
+  virtual ACL_internal_access_result check(Access want_access, Access *save_priv) const;
 };
 
 /** Singleton instance of PFS_readonly_acl. */
@@ -285,7 +285,7 @@ public:
   ~PFS_truncatable_acl()
   {}
 
-  ACL_internal_access_result check(ulong want_access, ulong *save_priv) const;
+  ACL_internal_access_result check(Access want_access, Access *save_priv) const;
 };
 
 /** Singleton instance of PFS_truncatable_acl. */
@@ -304,7 +304,7 @@ public:
   ~PFS_updatable_acl()
   {}
 
-  ACL_internal_access_result check(ulong want_access, ulong *save_priv) const;
+  ACL_internal_access_result check(Access want_access, Access *save_priv) const;
 };
 
 /** Singleton instance of PFS_updatable_acl. */
@@ -323,7 +323,7 @@ public:
   ~PFS_editable_acl()
   {}
 
-  ACL_internal_access_result check(ulong want_access, ulong *save_priv) const;
+  ACL_internal_access_result check(Access want_access, Access *save_priv) const;
 };
 
 /** Singleton instance of PFS_editable_acl. */
@@ -341,7 +341,7 @@ public:
   ~PFS_unknown_acl()
   {}
 
-  ACL_internal_access_result check(ulong want_access, ulong *save_priv) const;
+  ACL_internal_access_result check(Access want_access, Access *save_priv) const;
 };
 
 /** Singleton instance of PFS_unknown_acl. */
