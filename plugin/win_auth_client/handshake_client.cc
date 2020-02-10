@@ -11,7 +11,7 @@
 
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
-   Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA */
+   Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1335  USA */
 
 #include "handshake.h"
 
@@ -160,7 +160,7 @@ int Handshake_client::write_packet(Blob &data)
       Store in byte 255 the number of 512b blocks that are needed to
       keep all the data.
     */
-    unsigned block_count= data.len()/512 + ((data.len() % 512) ? 1 : 0);
+    unsigned block_count= (uint)(data.len()/512) + ((data.len() % 512) ? 1 : 0);
 
 #if !defined(DBUG_OFF) && defined(WINAUTH_USE_DBUG_LIB)
 

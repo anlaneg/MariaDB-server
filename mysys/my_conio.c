@@ -12,7 +12,7 @@
 
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
-   Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA */
+   Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1335  USA */
 
 
 #include "mysys_priv.h"
@@ -47,7 +47,7 @@ static HANDLE my_coninpfh= 0;     /* console input */
 static
 int my_pthread_auto_mutex_lock(HANDLE* ph, const char* name, int id, int time)
 {
-  int res;
+  DWORD res;
   char tname[FN_REFLEN];
   
   sprintf(tname, "%s-%08X", name, id);
@@ -203,7 +203,7 @@ char* my_cgets(char *buffer, size_t clen, size_t* plen)
       if (*plen > 0 && buffer[*plen - 1] == '\r')
       {
         char tmp[3];
-        int  tmplen= sizeof(tmp);
+        DWORD  tmplen= (DWORD)sizeof(tmp);
 
         *plen= *plen - 1;
         /* read /n left in the buffer */

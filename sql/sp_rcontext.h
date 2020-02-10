@@ -12,7 +12,7 @@
 
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
-   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA */
+   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1335  USA */
 
 #ifndef _SP_RCONTEXT_H_
 #define _SP_RCONTEXT_H_
@@ -31,6 +31,7 @@
 class sp_cursor;
 class sp_lex_keeper;
 class sp_instr_cpush;
+class sp_instr_hpush_jump;
 class Query_arena;
 class sp_head;
 class Item_cache;
@@ -86,27 +87,6 @@ private:
   // Prevent use of copying constructor and operator.
   sp_rcontext(const sp_rcontext &);
   void operator=(sp_rcontext &);
-
-private:
-  /// This is an auxillary class to store entering instruction pointer for an
-  /// SQL-handler.
-  class sp_handler_entry : public Sql_alloc
-  {
-  public:
-    /// Handler definition (from parsing context).
-    const sp_handler *handler;
-
-    /// Instruction pointer to the first instruction.
-    uint first_ip;
-
-    /// The constructor.
-    ///
-    /// @param _handler   sp_handler object.
-    /// @param _first_ip  first instruction pointer.
-    sp_handler_entry(const sp_handler *_handler, uint _first_ip)
-     :handler(_handler), first_ip(_first_ip)
-    { }
-  };
 
 public:
   /// This class stores basic information about SQL-condition, such as:
@@ -183,7 +163,8 @@ public:
   uint instr_ptr;
 
   /// The stored program for which this runtime context is created. Used for
-  /// checking if correct runtime context is used for variable handling.
+  /// checking if correct runtime context is used for variable handling,
+  /// and to access the package run-time context.
   /// Also used by slow log.
   const sp_head *m_sp;
 
@@ -191,16 +172,39 @@ public:
   // SP-variables.
   /////////////////////////////////////////////////////////////////////////
 
+  uint argument_count() const
+  {
+    return m_root_parsing_ctx->context_var_count();
+  }
+
   int set_variable(THD *thd, uint var_idx, Item **value);
-  void set_variable_row_field_to_null(THD *thd, uint var_idx, uint field_idx);
   int set_variable_row_field(THD *thd, uint var_idx, uint field_idx,
                              Item **value);
+  int set_variable_row_field_by_name(THD *thd, uint var_idx,
+                                     const LEX_CSTRING &field_name,
+                                     Item **value);
   int set_variable_row(THD *thd, uint var_idx, List<Item> &items);
-  Item *get_item(uint var_idx) const
+
+  int set_parameter(THD *thd, uint var_idx, Item **value)
+  {
+    DBUG_ASSERT(var_idx < argument_count());
+    return set_variable(thd, var_idx, value);
+  }
+
+  Item_field *get_variable(uint var_idx) const
   { return m_var_items[var_idx]; }
 
-  Item **get_item_addr(uint var_idx) const
-  { return m_var_items.array() + var_idx; }
+  Item **get_variable_addr(uint var_idx) const
+  { return ((Item **) m_var_items.array()) + var_idx; }
+
+  Item_field *get_parameter(uint var_idx) const
+  {
+    DBUG_ASSERT(var_idx < argument_count());
+    return get_variable(var_idx);
+  }
+
+  bool find_row_field_by_name_or_error(uint *field_idx, uint var_idx,
+                                       const LEX_CSTRING &field_name);
 
   bool set_return_value(THD *thd, Item **return_value_item);
 
@@ -211,18 +215,16 @@ public:
   // SQL-handlers.
   /////////////////////////////////////////////////////////////////////////
 
-  /// Create a new sp_handler_entry instance and push it to the handler call
-  /// stack.
+  /// Push an sp_instr_hpush_jump instance to the handler call stack.
   ///
-  /// @param handler  SQL-handler object.
-  /// @param first_ip First instruction pointer of the handler.
+  /// @param entry    The condition handler entry
   ///
   /// @return error flag.
   /// @retval false on success.
   /// @retval true on error.
-  bool push_handler(sp_handler *handler, uint first_ip);
+  bool push_handler(sp_instr_hpush_jump *entry);
 
-  /// Pop and delete given number of sp_handler_entry instances from the handler
+  /// Pop and delete given number of instances from the handler
   /// call stack.
   ///
   /// @param count Number of handler entries to pop & delete.
@@ -269,23 +271,20 @@ public:
   // Cursors.
   /////////////////////////////////////////////////////////////////////////
 
-  /// Create a new sp_cursor instance and push it to the cursor stack.
+  /// Push a cursor to the cursor stack.
   ///
-  /// @param lex_keeper SP-instruction execution helper.
-  /// @param i          Cursor-push instruction.
+  /// @param cursor The cursor
   ///
-  /// @return error flag.
-  /// @retval false on success.
-  /// @retval true on error.
-  bool push_cursor(THD *thd, sp_lex_keeper *lex_keeper);
+  void push_cursor(sp_cursor *cur);
 
+  void pop_cursor(THD *thd);
   /// Pop and delete given number of sp_cursor instance from the cursor stack.
   ///
   /// @param count Number of cursors to pop & delete.
-  void pop_cursors(uint count);
+  void pop_cursors(THD *thd, size_t count);
 
-  void pop_all_cursors()
-  { pop_cursors(m_ccount); }
+  void pop_all_cursors(THD *thd)
+  { pop_cursors(thd, m_ccount); }
 
   sp_cursor *get_cursor(uint i) const
   { return m_cstack[i]; }
@@ -365,6 +364,8 @@ private:
   /// @return Pointer to valid object on success, or NULL in case of error.
   Item_cache *create_case_expr_holder(THD *thd, const Item *item) const;
 
+  Virtual_tmp_table *virtual_tmp_table_for_row(uint idx);
+
 private:
   /// Top-level (root) parsing context for this runtime context.
   const sp_pcontext *m_root_parsing_ctx;
@@ -374,7 +375,7 @@ private:
 
   /// Collection of Item_field proxies, each of them points to the
   /// corresponding field in m_var_table.
-  Bounds_checked_array<Item *> m_var_items;
+  Bounds_checked_array<Item_field *> m_var_items;
 
   /// This is a pointer to a field, which should contain return value for
   /// stored functions (only). For stored procedures, this pointer is NULL.
@@ -388,7 +389,7 @@ private:
   bool m_in_sub_stmt;
 
   /// Stack of visible handlers.
-  Dynamic_array<sp_handler_entry *> m_handlers;
+  Dynamic_array<sp_instr_hpush_jump *> m_handlers;
 
   /// Stack of caught SQL conditions.
   Dynamic_array<Handler_call_frame *> m_handler_call_stack;
@@ -402,75 +403,5 @@ private:
   /// Array of CASE expression holders.
   Bounds_checked_array<Item_cache *> m_case_expr_holders;
 }; // class sp_rcontext : public Sql_alloc
-
-///////////////////////////////////////////////////////////////////////////
-// sp_cursor declaration.
-///////////////////////////////////////////////////////////////////////////
-
-class Server_side_cursor;
-typedef class st_select_lex_unit SELECT_LEX_UNIT;
-
-/* A mediator between stored procedures and server side cursors */
-
-class sp_cursor : public Sql_alloc
-{
-private:
-  /// An interceptor of cursor result set used to implement
-  /// FETCH <cname> INTO <varlist>.
-  class Select_fetch_into_spvars: public select_result_interceptor
-  {
-    List<sp_variable> *spvar_list;
-    uint field_count;
-    bool send_data_to_variable_list(List<sp_variable> &vars, List<Item> &items);
-  public:
-    Select_fetch_into_spvars(THD *thd_arg): select_result_interceptor(thd_arg) {}
-    uint get_field_count() { return field_count; }
-    void set_spvar_list(List<sp_variable> *vars) { spvar_list= vars; }
-
-    virtual bool send_eof() { return FALSE; }
-    virtual int send_data(List<Item> &items);
-    virtual int prepare(List<Item> &list, SELECT_LEX_UNIT *u);
-};
-
-public:
-  sp_cursor(THD *thd_arg, sp_lex_keeper *lex_keeper);
-
-  virtual ~sp_cursor()
-  { destroy(); }
-
-  sp_lex_keeper *get_lex_keeper() { return m_lex_keeper; }
-
-  int open(THD *thd);
-
-  int open_view_structure_only(THD *thd);
-
-  int close(THD *thd);
-
-  my_bool is_open()
-  { return MY_TEST(server_side_cursor); }
-
-  bool found() const
-  { return m_found; }
-
-  ulonglong row_count() const
-  { return m_row_count; }
-
-  ulonglong fetch_count() const
-  { return m_fetch_count; }
-
-  int fetch(THD *, List<sp_variable> *vars, bool error_on_no_data);
-
-  bool export_structure(THD *thd, Row_definition_list *list);
-
-private:
-  Select_fetch_into_spvars result;
-  sp_lex_keeper *m_lex_keeper;
-  Server_side_cursor *server_side_cursor;
-  ulonglong m_fetch_count; // Number of FETCH commands since last OPEN
-  ulonglong m_row_count;   // Number of successful FETCH since last OPEN
-  bool m_found;            // If last FETCH fetched a row
-  void destroy();
-
-}; // class sp_cursor : public Sql_alloc
 
 #endif /* _SP_RCONTEXT_H_ */

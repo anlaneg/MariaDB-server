@@ -12,7 +12,7 @@
 
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
-   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA */
+   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1335  USA */
 
 #include "mariadb.h"
 #include "sql_reload.h"
@@ -30,6 +30,7 @@
 #include "sql_show.h"
 #include "debug_sync.h"
 #include "des_key_file.h"
+#include "transaction.h"
 
 static void disable_checkpoints(THD *thd);
 
@@ -73,13 +74,13 @@ bool reload_acl_and_cache(THD *thd, unsigned long long options,
       If reload_acl_and_cache() is called from SIGHUP handler we have to
       allocate temporary THD for execution of acl_reload()/grant_reload().
     */
-    if (!thd && (thd= (tmp_thd= new THD(0))))
+    if (unlikely(!thd) && (thd= (tmp_thd= new THD(0))))
     {
       thd->thread_stack= (char*) &tmp_thd;
       thd->store_globals();
     }
 
-    if (thd)
+    if (likely(thd))
     {
       bool reload_acl_failed= acl_reload(thd);
       bool reload_grants_failed= grant_reload(thd);
@@ -97,7 +98,7 @@ bool reload_acl_and_cache(THD *thd, unsigned long long options,
     }
     opt_noacl= 0;
 
-    if (tmp_thd)
+    if (unlikely(tmp_thd))
     {
       delete tmp_thd;
       thd= 0;
@@ -122,15 +123,8 @@ bool reload_acl_and_cache(THD *thd, unsigned long long options,
   }
 
   if (options & REFRESH_ERROR_LOG)
-    if (flush_error_log())
-    {
-      /*
-        When flush_error_log() failed, my_error() has not been called.
-        So, we have to do it here to keep the protocol.
-      */
-      my_error(ER_UNKNOWN_ERROR, MYF(0));
+    if (unlikely(flush_error_log()))
       result= 1;
-    }
 
   if ((options & REFRESH_SLOW_LOG) && global_system_variables.sql_log_slow)
     logger.flush_slow_log();
@@ -288,9 +282,18 @@ bool reload_acl_and_cache(THD *thd, unsigned long long options,
         */
         if (tables)
         {
+          int err;
           for (TABLE_LIST *t= tables; t; t= t->next_local)
-            if (!find_table_for_mdl_upgrade(thd, t->db, t->table_name, false))
-              return 1;
+            if (!find_table_for_mdl_upgrade(thd, t->db.str, t->table_name.str, &err))
+            {
+              if (is_locked_view(thd, t))
+                t->next_local= t->next_global;
+              else
+              {
+                my_error(err, MYF(0), t->table_name.str);
+                return 1;
+              }
+            }
         }
         else
         {
@@ -412,11 +415,11 @@ bool reload_acl_and_cache(THD *thd, unsigned long long options,
    reset_mqh((LEX_USER *) NULL, 0);             /* purecov: inspected */
  if (options & REFRESH_GENERIC)
  {
-   List_iterator_fast<LEX_STRING> li(thd->lex->view_list);
-   LEX_STRING *ls;
+   List_iterator_fast<LEX_CSTRING> li(thd->lex->view_list);
+   LEX_CSTRING *ls;
    while ((ls= li++))
    {
-     ST_SCHEMA_TABLE *table= find_schema_table(thd, ls->str);
+     ST_SCHEMA_TABLE *table= find_schema_table(thd, ls);
      if (table->reset_table())
        result= 1;
    }
@@ -540,8 +543,8 @@ bool flush_tables_with_read_lock(THD *thd, TABLE_LIST *all_tables)
     {
       /* Request removal of table from cache. */
       tdc_remove_table(thd, TDC_RT_REMOVE_UNUSED,
-                       table_list->db,
-                       table_list->table_name, FALSE);
+                       table_list->db.str,
+                       table_list->table_name.str, FALSE);
       /* Reset ticket to satisfy asserts in open_tables(). */
       table_list->mdl_request.ticket= NULL;
     }
@@ -573,7 +576,7 @@ bool flush_tables_with_read_lock(THD *thd, TABLE_LIST *all_tables)
       if (!(table_list->table->file->ha_table_flags() & HA_CAN_EXPORT))
       {
         my_error(ER_ILLEGAL_HA, MYF(0),table_list->table->file->table_type(),
-                 table_list->db, table_list->table_name);
+                 table_list->db.str, table_list->table_name.str);
         goto error_reset_bits;
       }
     }
@@ -593,6 +596,7 @@ bool flush_tables_with_read_lock(THD *thd, TABLE_LIST *all_tables)
   return FALSE;
 
 error_reset_bits:
+  trans_rollback_stmt(thd);
   close_thread_tables(thd);
   thd->variables.option_bits&= ~OPTION_TABLE_LOCK;
 error:
@@ -614,4 +618,3 @@ static void disable_checkpoints(THD *thd)
       ha_checkpoint_state(1);                   // Disable checkpoints
   }
 }
-

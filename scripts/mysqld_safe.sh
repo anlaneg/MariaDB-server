@@ -22,6 +22,7 @@ flush_caches=0
 numa_interleave=0
 wsrep_on=0
 dry_run=0
+defaults_group_suffix=
 
 # Initial logging status: error log is not open, and not using syslog
 logging=init
@@ -101,35 +102,6 @@ All other options are passed to the mysqld program.
 
 EOF
         exit 1
-}
-
-my_which ()
-{
-  save_ifs="${IFS-UNSET}"
-  IFS=:
-  ret=0
-  for file
-  do
-    for dir in $PATH
-    do
-      if [ -f "$dir/$file" ]
-      then
-        echo "$dir/$file"
-        continue 2
-      fi
-    done
-
-	ret=1  #signal an error
-	break
-  done
-
-  if [ "$save_ifs" = UNSET ]
-  then
-    unset IFS
-  else
-    IFS="$save_ifs"
-  fi
-  return $ret  # Success
 }
 
 find_in_bin() {
@@ -220,7 +192,8 @@ wsrep_pick_url() {
 
   log_error "WSREP: 'wsrep_urls' is DEPRECATED! Use wsrep_cluster_address to specify multiple addresses instead."
 
-  if ! which nc >/dev/null; then
+  if ! command -v nc >/dev/null
+  then
     log_error "ERROR: nc tool not found in PATH! Make sure you have it installed."
     return 1
   fi
@@ -376,6 +349,8 @@ parse_arguments() {
         fi
         append_arg_to_args "$arg"
         ;;
+
+      --defaults-group-suffix=*) defaults_group_suffix="$arg" ;;
 
       --help) usage ;;
 
@@ -646,8 +621,7 @@ plugin_dir="${plugin_dir}${PLUGIN_VARIANT}"
 # Ensure that 'logger' exists, if it's requested
 if [ $want_syslog -eq 1 ]
 then
-  my_which logger > /dev/null 2>&1
-  if [ $? -ne 0 ]
+  if ! command -v logger > /dev/null
   then
     log_error "--syslog requested, but no 'logger' program found.  Please ensure that 'logger' is in your PATH, or do not specify the --syslog option to mysqld_safe."
     exit 1
@@ -740,9 +714,9 @@ fi
 safe_mysql_unix_port=${mysql_unix_port:-${MYSQL_UNIX_PORT:-@MYSQL_UNIX_ADDR@}}
 # Make sure that directory for $safe_mysql_unix_port exists
 mysql_unix_port_dir=`dirname $safe_mysql_unix_port`
-if [ ! -d $mysql_unix_port_dir ]
+if [ ! -d $mysql_unix_port_dir -a $dry_run -eq 0 ]
 then
-  if ! `mkdir -p $mysql_unix_port_dir`
+  if ! mkdir -p $mysql_unix_port_dir
   then
     log_error "Fatal error Can't create database directory '$mysql_unix_port'"
     exit 1
@@ -878,7 +852,7 @@ fi
 if @TARGET_LINUX@ && test $flush_caches -eq 1
 then
   # Locate sync, ensure it exists.
-  if ! my_which sync > /dev/null 2>&1
+  if ! command -v sync > /dev/null
   then
     log_error "sync command not found, required for --flush-caches"
     exit 1
@@ -890,7 +864,7 @@ then
   fi
 
   # Locate sysctl, ensure it exists.
-  if ! my_which sysctl > /dev/null 2>&1
+  if ! command -v sysctl > /dev/null
   then
     log_error "sysctl command not found, required for --flush-caches"
     exit 1
@@ -934,7 +908,7 @@ cmd="`mysqld_ld_preload_text`$NOHUP_NICENESS"
 if @TARGET_LINUX@ && test $numa_interleave -eq 1
 then
   # Locate numactl, ensure it exists.
-  if ! my_which numactl > /dev/null 2>&1
+  if ! command -v numactl > /dev/null
   then
     log_error "numactl command not found, required for --numa-interleave"
     exit 1
@@ -952,13 +926,19 @@ then
   exit 1
 fi
 
-for i in  "$ledir/$MYSQLD" "$defaults" "--basedir=$MY_BASEDIR_VERSION" \
+for i in  "$ledir/$MYSQLD" "$defaults_group_suffix" "$defaults" "--basedir=$MY_BASEDIR_VERSION" \
   "--datadir=$DATADIR" "--plugin-dir=$plugin_dir" "$USER_OPTION"
 do
   cmd="$cmd "`shell_quote_string "$i"`
 done
 cmd="$cmd $args"
-[ $dry_run -eq 1 ] && return
+
+if [ $dry_run -eq 1 ]
+then
+  # RETURN or EXIT depending if the script is being sourced or not.
+  (return 2> /dev/null) && return || exit
+fi
+
 
 # Avoid 'nohup: ignoring input' warning
 test -n "$NOHUP_NICENESS" && cmd="$cmd < /dev/null"

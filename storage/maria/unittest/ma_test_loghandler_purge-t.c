@@ -11,7 +11,7 @@
 
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
-   Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02111-1301 USA */
+   Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1335 USA */
 
 #include "../maria_def.h"
 #include <stdio.h>
@@ -36,7 +36,7 @@ static const char *default_dbug_option;
 int main(int argc __attribute__((unused)), char *argv[])
 {
   ulong i;
-  uint pagen;
+  size_t pagen;
   uchar long_tr_id[6];
   PAGECACHE pagecache;
   LSN lsn;

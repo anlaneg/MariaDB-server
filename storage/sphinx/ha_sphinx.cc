@@ -17,7 +17,7 @@
 #pragma implementation // gcc: Class implementation
 #endif
 
-#if _MSC_VER>=1400
+#if defined(_MSC_VER) && _MSC_VER>=1400
 #define _CRT_SECURE_NO_DEPRECATE 1
 #define _CRT_NONSTDC_NO_DEPRECATE 1
 #endif
@@ -65,7 +65,7 @@
 #define MSG_WAITALL 0
 #endif
 
-#if _MSC_VER>=1400
+#if defined(_MSC_VER) && _MSC_VER>=1400
 #pragma warning(push,4)
 #endif
 
@@ -1042,8 +1042,8 @@ static bool ParseUrl ( CSphSEShare * share, TABLE * table, bool bCreate )
 	bool bOk = true;
 	bool bQL = false;
 	char * sScheme = NULL;
-	char * sHost = SPHINXAPI_DEFAULT_HOST;
-	char * sIndex = SPHINXAPI_DEFAULT_INDEX;
+	char * sHost = (char*) SPHINXAPI_DEFAULT_HOST;
+	char * sIndex = (char*) SPHINXAPI_DEFAULT_INDEX;
 	int iPort = SPHINXAPI_DEFAULT_PORT;
 
 	// parse connection string, if any
@@ -1069,12 +1069,12 @@ static bool ParseUrl ( CSphSEShare * share, TABLE * table, bool bCreate )
 			sHost--; // reuse last slash
 			iPort = 0;
 			if (!( sIndex = strrchr ( sHost, ':' ) ))
-				sIndex = SPHINXAPI_DEFAULT_INDEX;
+                          sIndex = (char*) SPHINXAPI_DEFAULT_INDEX;
 			else
 			{
 				*sIndex++ = '\0';
 				if ( !*sIndex )
-					sIndex = SPHINXAPI_DEFAULT_INDEX;
+                                  sIndex = (char*) SPHINXAPI_DEFAULT_INDEX;
 			}
 			bOk = true;
 			break;
@@ -1096,11 +1096,11 @@ static bool ParseUrl ( CSphSEShare * share, TABLE * table, bool bCreate )
 					if ( sIndex )
 						*sIndex++ = '\0';
 					else
-						sIndex = SPHINXAPI_DEFAULT_INDEX;
+                                          sIndex = (char*) SPHINXAPI_DEFAULT_INDEX;
 
 					iPort = atoi(sPort);
 					if ( !iPort )
-						iPort = SPHINXAPI_DEFAULT_PORT;
+                                          iPort = SPHINXAPI_DEFAULT_PORT;
 				}
 			} else
 			{
@@ -1108,7 +1108,7 @@ static bool ParseUrl ( CSphSEShare * share, TABLE * table, bool bCreate )
 				if ( sIndex )
 					*sIndex++ = '\0';
 				else
-					sIndex = SPHINXAPI_DEFAULT_INDEX;
+                                  sIndex = (char*) SPHINXAPI_DEFAULT_INDEX;
 			}
 			bOk = true;
 			break;
@@ -1159,7 +1159,7 @@ static bool ParseUrl ( CSphSEShare * share, TABLE * table, bool bCreate )
 	if ( !bOk )
 	{
 		my_error ( bCreate ? ER_FOREIGN_DATA_STRING_INVALID_CANT_CREATE : ER_FOREIGN_DATA_STRING_INVALID,
-			MYF(0), table->s->connect_string );
+			MYF(0), table->s->connect_string.str);
 	} else
 	{
 		if ( share )
@@ -1304,8 +1304,8 @@ CSphSEQuery::CSphSEQuery ( const char * sQuery, int iLength, const char * sIndex
 	, m_sGeoLongAttr ( "" )
 	, m_fGeoLatitude ( 0.0f )
 	, m_fGeoLongitude ( 0.0f )
-	, m_sComment ( "" )
-	, m_sSelect ( "*" )
+	, m_sComment ( (char*) "" )
+	, m_sSelect ( (char*) "*" )
 
 	, m_pBuf ( NULL )
 	, m_pCur ( NULL )
@@ -2163,7 +2163,7 @@ int ha_sphinx::Connect ( const char * sHost, ushort uPort )
 #if MYSQL_VERSION_ID>=50515
 			struct addrinfo *hp = NULL;
 			tmp_errno = getaddrinfo ( sHost, NULL, NULL, &hp );
-			if ( !tmp_errno || !hp || !hp->ai_addr )
+			if ( tmp_errno || !hp || !hp->ai_addr )
 			{
 				bError = true;
 				if ( hp )
@@ -2190,8 +2190,9 @@ int ha_sphinx::Connect ( const char * sHost, ushort uPort )
 			}
 
 #if MYSQL_VERSION_ID>=50515
-			memcpy ( &sin.sin_addr, hp->ai_addr, Min ( sizeof(sin.sin_addr), (size_t)hp->ai_addrlen ) );
-			freeaddrinfo ( hp );
+			struct sockaddr_in *in = (sockaddr_in *)hp->ai_addr;
+			memcpy ( &sin.sin_addr, &in->sin_addr, Min ( sizeof(sin.sin_addr), sizeof(in->sin_addr) ) );
+ 			freeaddrinfo ( hp );
 #else
 			memcpy ( &sin.sin_addr, hp->h_addr, Min ( sizeof(sin.sin_addr), (size_t)hp->h_length ) );
 			my_gethostbyname_r_free();
@@ -2292,7 +2293,8 @@ int ha_sphinx::HandleMysqlError ( MYSQL * pConn, int iErrCode )
 	CSphSEThreadTable * pTable = GetTls ();
 	if ( pTable )
 	{
-		strncpy ( pTable->m_tStats.m_sLastMessage, mysql_error ( pConn ), sizeof ( pTable->m_tStats.m_sLastMessage ) );
+		strncpy ( pTable->m_tStats.m_sLastMessage, mysql_error ( pConn ), sizeof pTable->m_tStats.m_sLastMessage - 1 );
+		pTable->m_tStats.m_sLastMessage[sizeof pTable->m_tStats.m_sLastMessage - 1] = '\0';
 		pTable->m_tStats.m_bLastError = true;
 	}
 
@@ -2539,12 +2541,6 @@ char * ha_sphinx::UnpackString ()
 }
 
 
-static inline const char * FixNull ( const char * s )
-{
-	return s ? s : "(null)";
-}
-
-
 bool ha_sphinx::UnpackSchema ()
 {
 	SPH_ENTER_METHOD();
@@ -2565,7 +2561,8 @@ bool ha_sphinx::UnpackSchema ()
 		CSphSEThreadTable * pTable = GetTls ();
 		if ( pTable )
 		{
-			strncpy ( pTable->m_tStats.m_sLastMessage, sMessage, sizeof(pTable->m_tStats.m_sLastMessage) );
+			strncpy ( pTable->m_tStats.m_sLastMessage, sMessage, sizeof pTable->m_tStats.m_sLastMessage - 1 );
+			pTable->m_tStats.m_sLastMessage[sizeof pTable->m_tStats.m_sLastMessage - 1] = '\0';
 			pTable->m_tStats.m_bLastError = ( uStatus==SEARCHD_ERROR );
 		}
 
@@ -2989,7 +2986,8 @@ int ha_sphinx::index_read ( byte * buf, const byte * key, uint key_len, enum ha_
 			SPH_RET ( HA_ERR_END_OF_FILE );
 		}
 
-		strncpy ( pTable->m_tStats.m_sLastMessage, sMessage, sizeof(pTable->m_tStats.m_sLastMessage) );
+		strncpy ( pTable->m_tStats.m_sLastMessage, sMessage, sizeof pTable->m_tStats.m_sLastMessage - 1 );
+		pTable->m_tStats.m_sLastMessage[sizeof pTable->m_tStats.m_sLastMessage - 1] = '\0';
 		SafeDeleteArray ( sMessage );
 
 		if ( uRespStatus!=SEARCHD_WARNING )
@@ -3353,7 +3351,7 @@ int ha_sphinx::delete_table ( const char * )
 // Renames a table from one name to another from alter table call.
 //
 // If you do not implement this, the default rename_table() is called from
-// handler.cc and it will delete all files with the file extentions returned
+// handler.cc and it will delete all files with the file extensions returned
 // by bas_ext().
 //
 // Called from sql_table.cc by mysql_rename_table().
@@ -3447,10 +3445,10 @@ int ha_sphinx::create ( const char * name, TABLE * table_arg, HA_CREATE_INFO * )
 		if (
 			table_arg->s->keys!=1 ||
 			table_arg->key_info[0].user_defined_key_parts!=1 ||
-			strcasecmp ( table_arg->key_info[0].key_part[0].field->field_name.str, table->field[2]->field_name.str ) )
+			strcasecmp ( table_arg->key_info[0].key_part[0].field->field_name.str, table_arg->field[2]->field_name.str ) )
 		{
 			my_snprintf ( sError, sizeof(sError), "%s: there must be an index on '%s' column",
-				name, table->field[2]->field_name.str );
+				name, table_arg->field[2]->field_name.str );
 			break;
 		}
 
@@ -3508,8 +3506,11 @@ int ha_sphinx::create ( const char * name, TABLE * table_arg, HA_CREATE_INFO * )
 	// report and bail
 	if ( sError[0] )
 	{
-		my_error ( ER_CANT_CREATE_TABLE, MYF(0),
-		table_arg->s->db.str, table_arg->s->table_name, sError );
+		my_printf_error(ER_CANT_CREATE_TABLE,
+                                "Can\'t create table %s.%s (Error: %s)",
+                                MYF(0),
+                                table_arg->s->db.str,
+                                table_arg->s->table_name.str, sError);
 		SPH_RET(-1);
 	}
 

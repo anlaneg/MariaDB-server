@@ -12,7 +12,7 @@
 
   You should have received a copy of the GNU General Public License
   along with this program; if not, write to the Free Software Foundation,
-  51 Franklin Street, Suite 500, Boston, MA 02110-1335 USA */
+  51 Franklin Street, Fifth Floor, Boston, MA 02110-1335 USA */
 
 /*
   This code needs extra visibility in the lexer structures
@@ -32,7 +32,7 @@
 #include "sql_get_diagnostics.h"
 
 /* Generated code */
-#include "sql_yacc.h"
+#include "sql_yacc.hh"
 #define LEX_TOKEN_WITH_DEFINITION
 #include "lex_token.h"
 
@@ -149,7 +149,7 @@ inline void store_token_identifier(sql_digest_storage* digest_storage,
     /* Write the string data */
     if (id_length > 0)
       memcpy((char *)(dest + 4), id_name, id_length);
-    digest_storage->m_byte_count+= bytes_needed;
+    digest_storage->m_byte_count+= (uint)bytes_needed;
   }
   else
   {

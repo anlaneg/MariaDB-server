@@ -12,7 +12,7 @@
 
  You should have received a copy of the GNU General Public License
  along with this program; if not, write to the Free Software
- Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA */
+ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1335  USA */
 
 /*
   The very minimal subset of OpenSSL's EVP* functions.
@@ -26,6 +26,7 @@
 #include "aes.hpp"
 
 using yaSSL::yaERR_remove_state;
+using yaSSL::yaRAND_bytes;
 
 #define EVP_CIPH_ECB_MODE     0x1U
 #define EVP_CIPH_CBC_MODE     0x2U

@@ -15,7 +15,7 @@
 
   You should have received a copy of the GNU General Public License
   along with this program; if not, write to the Free Software
-  Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA */
+  Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1335  USA */
 
 #ifdef USE_PRAGMA_INTERFACE
 #pragma interface				/* gcc class implementation */
@@ -57,8 +57,8 @@ typedef struct st_lock_param_type
   Alter_info *alter_info;
   TABLE *table;
   KEY *key_info_buffer;
-  const char *db;
-  const char *table_name;
+  LEX_CSTRING db;
+  LEX_CSTRING table_name;
   uchar *pack_frm_data;
   uint key_count;
   uint db_options;
@@ -87,12 +87,8 @@ bool check_reorganise_list(partition_info *new_part_info,
                            partition_info *old_part_info,
                            List<char> list_part_names);
 handler *get_ha_partition(partition_info *part_info);
-int get_parts_for_update(const uchar *old_data, const uchar *new_data,
-                         const uchar *rec0, partition_info *part_info,
-                         uint32 *old_part_id, uint32 *new_part_id,
-                         longlong *func_value);
-int get_part_for_delete(const uchar *buf, const uchar *rec0,
-                        partition_info *part_info, uint32 *part_id);
+int get_part_for_buf(const uchar *buf, const uchar *rec0,
+                     partition_info *part_info, uint32 *part_id);
 void prune_partition_set(const TABLE *table, part_id_range *part_spec);
 bool check_partition_info(partition_info *part_info,handlerton **eng_type,
                           TABLE *table, handler *file, HA_CREATE_INFO *info);
@@ -137,7 +133,6 @@ Item* convert_charset_partition_constant(Item *item, CHARSET_INFO *cs);
   @param[in]     table Table containing read_set and fields for the row.
 */
 void append_row_to_str(String &str, const uchar *row, TABLE *table);
-void mem_alloc_error(size_t size);
 void truncate_partition_filename(char *path);
 
 /*
@@ -267,8 +262,8 @@ uint fast_alter_partition_table(THD *thd, TABLE *table,
                                 Alter_info *alter_info,
                                 HA_CREATE_INFO *create_info,
                                 TABLE_LIST *table_list,
-                                const char *db,
-                                const char *table_name);
+                                const LEX_CSTRING *db,
+                                const LEX_CSTRING *table_name);
 bool set_part_state(Alter_info *alter_info, partition_info *tab_part_info,
                     enum partition_state part_state);
 uint prep_alter_part_table(THD *thd, TABLE *table, Alter_info *alter_info,
@@ -281,6 +276,10 @@ char *generate_partition_syntax(THD *thd, partition_info *part_info,
                                 bool show_partition_options,
                                 HA_CREATE_INFO *create_info,
                                 Alter_info *alter_info);
+char *generate_partition_syntax_for_frm(THD *thd, partition_info *part_info,
+                                        uint *buf_length,
+                                        HA_CREATE_INFO *create_info,
+                                        Alter_info *alter_info);
 bool verify_data_with_partition(TABLE *table, TABLE *part_table,
                                 uint32 part_id);
 bool compare_partition_options(HA_CREATE_INFO *table_create_info,

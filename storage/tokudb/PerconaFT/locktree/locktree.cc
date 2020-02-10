@@ -32,6 +32,20 @@ Copyright (c) 2006, 2015, Percona and/or its affiliates. All rights reserved.
 
     You should have received a copy of the GNU Affero General Public License
     along with PerconaFT.  If not, see <http://www.gnu.org/licenses/>.
+
+----------------------------------------
+
+   Licensed under the Apache License, Version 2.0 (the "License");
+   you may not use this file except in compliance with the License.
+   You may obtain a copy of the License at
+
+       http://www.apache.org/licenses/LICENSE-2.0
+
+   Unless required by applicable law or agreed to in writing, software
+   distributed under the License is distributed on an "AS IS" BASIS,
+   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+   See the License for the specific language governing permissions and
+   limitations under the License.
 ======= */
 
 #ident "Copyright (c) 2006, 2015, Percona and/or its affiliates. All rights reserved."
@@ -50,7 +64,6 @@ Copyright (c) 2006, 2015, Percona and/or its affiliates. All rights reserved.
 // and "defines" the implementation, so we do it here in
 // the locktree source file instead of the header.
 #include "concurrent_tree.h"
-
 
 namespace toku {
 
@@ -87,12 +100,13 @@ void lt_lock_request_info::init(void) {
     pending_lock_requests.create();
     pending_is_empty = true;
     ZERO_STRUCT(mutex);
-    toku_mutex_init(&mutex, nullptr);
+    toku_mutex_init(*locktree_request_info_mutex_key, &mutex, nullptr);
     retry_want = retry_done = 0;
     ZERO_STRUCT(counters);
     ZERO_STRUCT(retry_mutex);
-    toku_mutex_init(&retry_mutex, nullptr);
-    toku_cond_init(&retry_cv, nullptr);
+    toku_mutex_init(
+        *locktree_request_info_retry_mutex_key, &retry_mutex, nullptr);
+    toku_cond_init(*locktree_request_info_retry_cv_key, &retry_cv, nullptr);
     running_retry = false;
 
     TOKU_VALGRIND_HG_DISABLE_CHECKING(&pending_is_empty,

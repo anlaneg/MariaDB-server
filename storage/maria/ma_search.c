@@ -11,7 +11,7 @@
 
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
-   Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02111-1301 USA */
+   Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1335 USA */
 
 /* key handling functions */
 
@@ -949,7 +949,7 @@ uint _ma_get_static_key(MARIA_KEY *key, uint page_flag, uint nod_flag,
                         register uchar **page)
 {
   register MARIA_KEYDEF *keyinfo= key->keyinfo;
-  size_t key_length= keyinfo->keylength;
+  uint key_length= keyinfo->keylength;
 
   key->ref_length=  keyinfo->share->rec_reflength;
   key->data_length= key_length - key->ref_length;

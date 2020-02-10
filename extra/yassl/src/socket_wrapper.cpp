@@ -13,7 +13,7 @@
    You should have received a copy of the GNU General Public License
    along with this program; see the file COPYING. If not, write to the
    Free Software Foundation, Inc., 51 Franklin St, Fifth Floor, Boston,
-   MA  02110-1301  USA.
+   MA  02110-1335  USA.
 */
 
 
@@ -42,7 +42,6 @@
 #endif
 
 #ifdef _WIN32
-    const int SOCKET_EINVAL = WSAEINVAL;
     const int SOCKET_EWOULDBLOCK = WSAEWOULDBLOCK;
     const int SOCKET_EAGAIN = WSAEWOULDBLOCK;
 #else
@@ -58,7 +57,7 @@ namespace {
 extern "C" long system_recv(void *ptr, void *buf, size_t count, int flags)
 {
   yaSSL::socket_t *socket = (yaSSL::socket_t *) ptr;
-  return ::recv(*socket, reinterpret_cast<char *>(buf), count, flags);
+  return ::recv(*socket, reinterpret_cast<char *>(buf), (int)count, flags);
 }
 
 
@@ -66,7 +65,7 @@ extern "C" long system_send(void *ptr, const void *buf, size_t count,
                             int flags)
 {
   yaSSL::socket_t *socket = (yaSSL::socket_t *) ptr;
-  return ::send(*socket, reinterpret_cast<const char *>(buf), count, flags);
+  return ::send(*socket, reinterpret_cast<const char *>(buf), (int)count, flags);
 }
 
 

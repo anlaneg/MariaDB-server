@@ -13,7 +13,7 @@
 #
 # You should have received a copy of the GNU General Public License
 # along with this program; if not, write to the Free Software
-# Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA */
+# Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1335  USA */
 
 
 # This script is intended to be executed by systemd. It starts mysqld with
@@ -68,7 +68,7 @@ parse_arguments() {
 
 wsrep_recover_position() {
   # Redirect server's error log to the log file.
-  eval /usr/sbin/mysqld $cmdline_args --user=$user --wsrep_recover \
+  eval @sbindir@/mysqld $cmdline_args --user=$user --wsrep_recover \
     --disable-log-error 2> "$log_file"
   ret=$?
   if [ $ret -ne 0 ]; then
@@ -107,8 +107,7 @@ else
   log "WSREP: mktemp failed"
 fi
 
-parse_arguments `$print_defaults $cmdline_args --loose-verbose \
- mariadb mariadb_safe mysqld mysqld_safe safe_mysqld galera`
+parse_arguments `$print_defaults $cmdline_args --loose-verbose --mysqld`
 
 # Perform wsrep position recovery if wsrep_on=1, skip otherwise.
 if [ "$wsrep_on" -eq 1 ]; then

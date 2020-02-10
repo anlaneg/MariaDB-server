@@ -1,5 +1,5 @@
-# Copyright (c) 2006, 2016, Oracle and/or its affiliates. All rights reserved.
-# Copyright (c) 2014, 2017, MariaDB Corporation
+# Copyright (c) 2006, 2017, Oracle and/or its affiliates. All rights reserved.
+# Copyright (c) 2014, 2019, MariaDB Corporation.
 #
 # This program is free software; you can redistribute it and/or modify
 # it under the terms of the GNU General Public License as published by
@@ -12,7 +12,7 @@
 #
 # You should have received a copy of the GNU General Public License
 # along with this program; if not, write to the Free Software
-# Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301 USA
+# Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1335 USA
 
 # This is the CMakeLists for InnoDB
 
@@ -136,7 +136,6 @@ SET(INNOBASE_SOURCES
 	trx/trx0sys.cc
 	trx/trx0trx.cc
 	trx/trx0undo.cc
-	usr/usr0sess.cc
 	ut/ut0crc32.cc
 	ut/ut0dbg.cc
 	ut/ut0list.cc
@@ -146,14 +145,14 @@ SET(INNOBASE_SOURCES
 	ut/ut0rnd.cc
 	ut/ut0ut.cc
 	ut/ut0vec.cc
-	ut/ut0wqueue.cc
-	ut/ut0timer.cc)
+	ut/ut0wqueue.cc)
 
 MYSQL_ADD_PLUGIN(innobase ${INNOBASE_SOURCES} STORAGE_ENGINE
+  MODULE_OUTPUT_NAME ha_innodb
   DEFAULT RECOMPILE_FOR_EMBEDDED
   LINK_LIBRARIES
 	${ZLIB_LIBRARY}
-	${CRC32_VPMSUM_LIBRARY}
+	${CRC32_LIBRARY}
 	${NUMA_LIBRARY}
 	${LIBSYSTEMD}
 	${LINKER_SCRIPT})
@@ -162,27 +161,36 @@ IF(NOT TARGET innobase)
   RETURN()
 ENDIF()
 
-INCLUDE(${MYSQL_CMAKE_SCRIPT_DIR}/compile_flags.cmake)
 # A GCC bug causes crash when compiling these files on ARM64 with -O1+
 # Compile them with -O0 as a workaround.
-IF(CMAKE_COMPILER_IS_GNUCXX AND CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64")
-  # Bug was fixed in GCC 5.2, so workaround only needed < 5.2
-  EXECUTE_PROCESS(COMMAND ${CMAKE_C_COMPILER} -dumpversion
-                  OUTPUT_VARIABLE GCC_VERSION)
-  IF(GCC_VERSION VERSION_LESS 5.2)
-    ADD_COMPILE_FLAGS(
+IF(CMAKE_COMPILER_IS_GNUCXX AND CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64"
+   AND CMAKE_C_COMPILER_VERSION VERSION_LESS "5.2.0")
+  ADD_COMPILE_FLAGS(
       btr/btr0btr.cc
       btr/btr0cur.cc
       buf/buf0buf.cc
+      fts/fts0fts.cc
       gis/gis0sea.cc
+      handler/handler0alter.cc
+      mtr/mtr0mtr.cc
+      row/row0merge.cc
+      row/row0mysql.cc
+      row/row0trunc.cc
+      srv/srv0srv.cc
       COMPILE_FLAGS "-O0"
       )
-  ENDIF()
 ENDIF()
 IF(MSVC)
+  IF(CMAKE_SIZEOF_VOID_P EQUAL 8)
+   ADD_COMPILE_FLAGS(
+      pars/lexyy.cc
+      COMPILE_FLAGS "/wd4267")
+  ENDIF()
   # silence "switch statement contains 'default' but no 'case' label
   # on generated file.
   TARGET_COMPILE_OPTIONS(innobase PRIVATE "/wd4065")
 ENDIF()
 
-ADD_SUBDIRECTORY(${CMAKE_SOURCE_DIR}/extra/mariabackup ${CMAKE_BINARY_DIR}/extra/mariabackup)
+IF(NOT (PLUGIN_INNOBASE STREQUAL DYNAMIC))
+  ADD_SUBDIRECTORY(${CMAKE_SOURCE_DIR}/extra/mariabackup ${CMAKE_BINARY_DIR}/extra/mariabackup)
+ENDIF()

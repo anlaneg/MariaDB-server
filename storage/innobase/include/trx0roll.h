@@ -1,7 +1,7 @@
 /*****************************************************************************
 
 Copyright (c) 1996, 2016, Oracle and/or its affiliates. All Rights Reserved.
-Copyright (c) 2015, 2017, MariaDB Corporation.
+Copyright (c) 2015, 2019, MariaDB Corporation.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License as published by the Free Software
@@ -13,7 +13,7 @@ FOR A PARTICULAR PURPOSE. See the GNU General Public License for more details.
 
 You should have received a copy of the GNU General Public License along with
 this program; if not, write to the Free Software Foundation, Inc.,
-51 Franklin Street, Suite 500, Boston, MA 02110-1335 USA
+51 Franklin Street, Fifth Floor, Boston, MA 02110-1335 USA
 
 *****************************************************************************/
 
@@ -27,13 +27,11 @@ Created 3/26/1996 Heikki Tuuri
 #ifndef trx0roll_h
 #define trx0roll_h
 
-#include "univ.i"
 #include "trx0trx.h"
-#include "trx0types.h"
 #include "mtr0mtr.h"
 #include "trx0sys.h"
 
-extern bool		trx_rollback_or_clean_is_active;
+extern bool		trx_rollback_is_active;
 extern const trx_t*	trx_roll_crash_recv_trx;
 
 /*******************************************************************//**
@@ -63,20 +61,17 @@ trx_undo_rec_t*
 trx_roll_pop_top_rec_of_trx(trx_t* trx, roll_ptr_t* roll_ptr, mem_heap_t* heap)
 	MY_ATTRIBUTE((nonnull, warn_unused_result));
 
-/** Report progress when rolling back a row of a recovered transaction.
-@return	whether the rollback should be aborted due to pending shutdown */
-bool
-trx_roll_must_shutdown();
+/** Report progress when rolling back a row of a recovered transaction. */
+void trx_roll_report_progress();
 /*******************************************************************//**
 Rollback or clean up any incomplete transactions which were
 encountered in crash recovery.  If the transaction already was
 committed, then we clean up a possible insert undo log. If the
-transaction was not yet committed, then we roll it back. */
+transaction was not yet committed, then we roll it back.
+@param all true=roll back all recovered active transactions;
+false=roll back any incomplete dictionary transaction */
 void
-trx_rollback_or_clean_recovered(
-/*============================*/
-	ibool	all);	/*!< in: FALSE=roll back dictionary transactions;
-			TRUE=roll back all non-PREPARED transactions */
+trx_rollback_recovered(bool all);
 /*******************************************************************//**
 Rollback or clean up any incomplete transactions which were
 encountered in crash recovery.  If the transaction already was
@@ -86,11 +81,7 @@ Note: this is done in a background thread.
 @return a dummy parameter */
 extern "C"
 os_thread_ret_t
-DECLARE_THREAD(trx_rollback_or_clean_all_recovered)(
-/*================================================*/
-	void*	arg MY_ATTRIBUTE((unused)));
-			/*!< in: a dummy parameter required by
-			os_thread_create */
+DECLARE_THREAD(trx_rollback_all_recovered)(void*);
 /*********************************************************************//**
 Creates a rollback command node struct.
 @return own: rollback node struct */
@@ -202,9 +193,7 @@ enum roll_node_state {
 struct roll_node_t{
 	que_common_t		common;	/*!< node type: QUE_NODE_ROLLBACK */
 	enum roll_node_state	state;	/*!< node execution state */
-	bool			partial;/*!< TRUE if we want a partial
-					rollback */
-	trx_savept_t		savept;	/*!< savepoint to which to
+	const trx_savept_t*	savept;	/*!< savepoint to which to
 					roll back, in the case of a
 					partial rollback */
 	que_thr_t*		undo_thr;/*!< undo query graph */
@@ -224,7 +213,5 @@ struct trx_named_savept_t{
 			trx_savepoints;	/*!< the list of savepoints of a
 					transaction */
 };
-
-#include "trx0roll.ic"
 
 #endif

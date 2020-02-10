@@ -11,7 +11,7 @@
 
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
-   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA */
+   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1335  USA */
 
 #include "mariadb.h"
 #include "sql_priv.h"
@@ -418,7 +418,7 @@ int emb_load_querycache_result(THD *thd, Querycache_stream *src)
 
   if (!data)
     goto err;
-  init_alloc_root(&data->alloc, 8192,0,MYF(0));
+  init_alloc_root(&data->alloc, "embedded_query_cache", 8192,0,MYF(0));
   f_alloc= &data->alloc;
 
   data->fields= src->load_int();

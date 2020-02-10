@@ -1,6 +1,6 @@
 /*
-   Copyright (c) 2000, 2014, Oracle and/or its affiliates.
-   Copyright (c) 2009, 2017, MariaDB
+   Copyright (c) 2000, 2018, Oracle and/or its affiliates.
+   Copyright (c) 2009, 2019, MariaDB Corporation.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -13,7 +13,7 @@
 
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
-   Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02111-1301 USA */
+   Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1335 USA */
 
 /* mysql command tool
  * Commands compatible with mSQL by David J. Hughes
@@ -40,6 +40,7 @@
 #include "my_readline.h"
 #include <signal.h>
 #include <violite.h>
+#include <my_sys.h>
 #include <source_revision.h>
 #if defined(USE_LIBEDIT_INTERFACE) && defined(HAVE_LOCALE_H)
 #include <locale.h>
@@ -1059,13 +1060,13 @@ extern "C" int write_history(const char *command);
 extern "C" HIST_ENTRY *history_get(int num);
 extern "C" int history_length;
 static int not_in_history(const char *line);
-static void initialize_readline (char *name);
+static void initialize_readline ();
 static void fix_history(String *final_command);
 #endif
 
 static COMMANDS *find_command(char *name);
 static COMMANDS *find_command(char cmd_name);
-static bool add_line(String &, char *, ulong, char *, bool *, bool);
+static bool add_line(String &, char *, size_t line_length, char *, bool *, bool);
 static void remove_cntrl(String &buffer);
 static void print_table_data(MYSQL_RES *result);
 static void print_table_data_html(MYSQL_RES *result);
@@ -1138,6 +1139,7 @@ int main(int argc,char *argv[])
   current_prompt = my_strdup(default_prompt,MYF(MY_WME));
   prompt_counter=0;
   aborted= 0;
+  sf_leaking_memory= 1; /* no memory leak reports yet */
 
   outfile[0]=0;			// no (default) outfile
   strmov(pager, "stdout");	// the default, if --pager wasn't given
@@ -1173,11 +1175,7 @@ int main(int argc,char *argv[])
       close(stdout_fileno_copy);             /* Clean up dup(). */
   }
 
-  if (load_defaults("my",load_default_groups,&argc,&argv))
-  {
-    my_end(0);
-    exit(1);
-  }
+  load_defaults_or_exit("my", load_default_groups, &argc, &argv);
   defaults_argv=argv;
   if ((status.exit_status= get_options(argc, (char **) argv)))
   {
@@ -1203,9 +1201,10 @@ int main(int argc,char *argv[])
     my_end(0);
     exit(1);
   }
+  sf_leaking_memory= 0;
   glob_buffer.realloc(512);
   completion_hash_init(&ht, 128);
-  init_alloc_root(&hash_mem_root, 16384, 0, MYF(0));
+  init_alloc_root(&hash_mem_root, "hash", 16384, 0, MYF(0));
   if (sql_connect(current_host,current_db,current_user,opt_password,
 		  opt_silent))
   {
@@ -1229,18 +1228,20 @@ int main(int argc,char *argv[])
   window_resize(0);
 #endif
 
-  put_info("Welcome to the MariaDB monitor.  Commands end with ; or \\g.",
-	   INFO_INFO);
-  my_snprintf((char*) glob_buffer.ptr(), glob_buffer.alloced_length(),
-	  "Your %s connection id is %lu\nServer version: %s\n",
-          mysql_get_server_name(&mysql),
-	  mysql_thread_id(&mysql), server_version_string(&mysql));
-  put_info((char*) glob_buffer.ptr(),INFO_INFO);
-
-  put_info(ORACLE_WELCOME_COPYRIGHT_NOTICE("2000"), INFO_INFO);
+  if (!status.batch)
+  {
+    put_info("Welcome to the MariaDB monitor.  Commands end with ; or \\g.",
+             INFO_INFO);
+    my_snprintf((char*) glob_buffer.ptr(), glob_buffer.alloced_length(),
+            "Your %s connection id is %lu\nServer version: %s\n",
+            mysql_get_server_name(&mysql),
+            mysql_thread_id(&mysql), server_version_string(&mysql));
+    put_info((char*) glob_buffer.ptr(),INFO_INFO);
+    put_info(ORACLE_WELCOME_COPYRIGHT_NOTICE("2000"), INFO_INFO);
+  }
 
 #ifdef HAVE_READLINE
-  initialize_readline((char*) my_progname);
+  initialize_readline();
   if (!status.batch && !quick && !opt_html && !opt_xml)
   {
     /* read-history from file, default ~/.mysql_history*/
@@ -1493,7 +1494,7 @@ static struct my_option my_long_options[] =
   {"batch", 'B',
    "Don't use history file. Disable interactive behavior. (Enables --silent.)",
    0, 0, 0, GET_NO_ARG, NO_ARG, 0, 0, 0, 0, 0, 0},
-  {"binary-as-hex", 'b', "Print binary data as hex", &opt_binhex, &opt_binhex,
+  {"binary-as-hex", 0, "Print binary data as hex", &opt_binhex, &opt_binhex,
    0, GET_BOOL, NO_ARG, 0, 0, 0, 0, 0, 0},
   {"character-sets-dir", OPT_CHARSETS_DIR,
    "Directory for character set files.", &charsets_dir,
@@ -1707,13 +1708,12 @@ static struct my_option my_long_options[] =
 
 static void usage(int version)
 {
+#ifdef HAVE_READLINE
 #if defined(USE_LIBEDIT_INTERFACE)
   const char* readline= "";
 #else
   const char* readline= "readline";
 #endif
-
-#ifdef HAVE_READLINE
   printf("%s  Ver %s Distrib %s, for %s (%s) using %s %s\n",
 	 my_progname, VER, MYSQL_SERVER_VERSION, SYSTEM_TYPE, MACHINE_TYPE,
          readline, rl_library_version);
@@ -1797,10 +1797,7 @@ get_one_option(int optid, const struct my_option *opt __attribute__((unused)),
 #ifndef EMBEDDED_LIBRARY
     if ((opt_protocol= find_type_with_warning(argument, &sql_protocol_typelib,
                                               opt->name)) <= 0)
-    {
-      sf_leaking_memory= 1; /* no memory leak reports here */
       exit(1);
-    }
 #endif
     break;
   case OPT_SERVER_ARG:
@@ -1987,7 +1984,7 @@ static int read_and_execute(bool interactive)
   ulong line_number=0;
   bool ml_comment= 0;  
   COMMANDS *com;
-  ulong line_length= 0;
+  size_t line_length= 0;
   status.exit_status=1;
   
   real_binary_mode= !interactive && opt_binary_mode;
@@ -2281,7 +2278,7 @@ static COMMANDS *find_command(char *name)
 }
 
 
-static bool add_line(String &buffer, char *line, ulong line_length,
+static bool add_line(String &buffer, char *line, size_t line_length,
                      char *in_string, bool *ml_comment, bool truncated)
 {
   uchar inchar;
@@ -2671,10 +2668,11 @@ static int fake_magic_space(const char *, int)
 }
 
 
-static void initialize_readline (char *name)
+static void initialize_readline ()
 {
   /* Allow conditional parsing of the ~/.inputrc file. */
-  rl_readline_name = name;
+  rl_readline_name= (char *) "mysql";
+  rl_terminal_name= getenv("TERM");
 
   /* Tell the completer that we want a crack first. */
 #if defined(USE_NEW_READLINE_INTERFACE)
@@ -2989,12 +2987,12 @@ static void get_current_db()
  The different commands
 ***************************************************************************/
 
-int mysql_real_query_for_lazy(const char *buf, int length)
+int mysql_real_query_for_lazy(const char *buf, size_t length)
 {
   for (uint retry=0;; retry++)
   {
     int error;
-    if (!mysql_real_query(&mysql,buf,length))
+    if (!mysql_real_query(&mysql,buf,(ulong)length))
       return 0;
     error= put_error(&mysql);
     if (mysql_errno(&mysql) != CR_SERVER_GONE_ERROR || retry > 1 ||
@@ -3134,7 +3132,7 @@ static int
 com_help(String *buffer __attribute__((unused)),
 	 char *line __attribute__((unused)))
 {
-  reg1 int i, j;
+  int i, j;
   char * help_arg= strchr(line,' '), buff[32], *end;
   if (help_arg)
   {
@@ -3213,7 +3211,7 @@ static int
 com_go(String *buffer,char *line __attribute__((unused)))
 {
   char		buff[200]; /* about 110 chars used so far */
-  char          time_buff[53+3+1]; /* time max + space&parens + NUL */
+  char		time_buff[53+3+1]; /* time max + space & parens + NUL */
   MYSQL_RES	*result;
   ulonglong	timer;
   ulong		warnings= 0;
@@ -3233,7 +3231,7 @@ com_go(String *buffer,char *line __attribute__((unused)))
 
   if (buffer->is_empty())
   {
-    if (status.batch)				// Ignore empty quries
+    if (status.batch)				// Ignore empty queries.
       return 0;
     return put_info("No query specified\n",INFO_ERROR);
 
@@ -3298,7 +3296,7 @@ com_go(String *buffer,char *line __attribute__((unused)))
     else
       time_buff[0]= '\0';
 
-    /* Every branch must truncate  buff . */
+    /* Every branch must truncate buff. */
     if (result)
     {
       if (!mysql_num_rows(result) && ! quick && !column_types_flag)
@@ -3565,10 +3563,10 @@ is_binary_field(MYSQL_FIELD *field)
 /* Print binary value as hex literal (0x ...) */
 
 static void
-print_as_hex(FILE *output_file, const char *str, ulong len, ulong total_bytes_to_send)
+print_as_hex(FILE *output_file, const char *str, size_t len, size_t total_bytes_to_send)
 {
   const char *ptr= str, *end= ptr+len;
-  ulong i;
+  size_t i;
   fprintf(output_file, "0x");
   for(; ptr < end; ptr++)
     fprintf(output_file, "%02X", *((uchar*)ptr));
@@ -3618,11 +3616,11 @@ print_table_data(MYSQL_RES *result)
     (void) tee_fputs("|", PAGER);
     for (uint off=0; (field = mysql_fetch_field(result)) ; off++)
     {
-      uint name_length= (uint) strlen(field->name);
-      uint numcells= charset_info->cset->numcells(charset_info,
+      size_t name_length= (uint) strlen(field->name);
+      size_t numcells= charset_info->cset->numcells(charset_info,
                                                   field->name,
                                                   field->name + name_length);
-      uint display_length= field->max_length + name_length - numcells;
+      size_t display_length= field->max_length + name_length - numcells;
       tee_fprintf(PAGER, " %-*s |",(int) MY_MIN(display_length,
                                                 MAX_COLUMN_LENGTH),
                   field->name);
@@ -3643,7 +3641,6 @@ print_table_data(MYSQL_RES *result)
       const char *buffer;
       uint data_length;
       uint field_max_length;
-      uint visible_length;
       uint extra_padding;
 
       if (off)
@@ -3671,7 +3668,7 @@ print_table_data(MYSQL_RES *result)
        We need to find how much screen real-estate we will occupy to know how 
        many extra padding-characters we should send with the printing function.
       */
-      visible_length= charset_info->cset->numcells(charset_info, buffer, buffer + data_length);
+      size_t visible_length= charset_info->cset->numcells(charset_info, buffer, buffer + data_length);
       extra_padding= (uint) (data_length - visible_length);
 
       if (opt_binhex && is_binary_field(field))
@@ -3791,9 +3788,10 @@ print_table_data_html(MYSQL_RES *result)
   MYSQL_FIELD	*field;
 
   mysql_field_seek(result,0);
-  (void) tee_fputs("<TABLE BORDER=1><TR>", PAGER);
+  (void) tee_fputs("<TABLE BORDER=1>", PAGER);
   if (column_names)
   {
+    (void) tee_fputs("<TR>", PAGER);
     while((field = mysql_fetch_field(result)))
     {
       tee_fputs("<TH>", PAGER);
@@ -4210,8 +4208,7 @@ com_edit(String *buffer,char *line __attribute__((unused)))
   const char *editor;
   MY_STAT stat_arg;
 
-  if ((fd=create_temp_file(filename,NullS,"sql", O_CREAT | O_WRONLY,
-			   MYF(MY_WME))) < 0)
+  if ((fd= create_temp_file(filename,NullS,"sql", 0, MYF(MY_WME))) < 0)
     goto err;
   if (buffer->is_empty() && !old_buffer.is_empty())
     (void) my_write(fd,(uchar*) old_buffer.ptr(),old_buffer.length(),
@@ -4596,8 +4593,11 @@ static char *get_arg(char *line, get_arg_mode mode)
   }
   for (start=ptr ; *ptr; ptr++)
   {
-    if ((*ptr == '\\' && ptr[1]) ||  // escaped character
-        (!short_cmd && qtype && *ptr == qtype && ptr[1] == qtype)) // quote
+    /* if short_cmd use historical rules (only backslash) otherwise SQL rules */
+    if (short_cmd
+        ? (*ptr == '\\' && ptr[1])                     // escaped character
+        : (*ptr == '\\' && ptr[1] && qtype != '`') ||  // escaped character
+          (qtype && *ptr == qtype && ptr[1] == qtype)) // quote
     {
       // Remove (or skip) the backslash (or a second quote)
       if (mode != CHECK)
@@ -4699,7 +4699,8 @@ sql_real_connect(char *host,char *database,char *user,char *password,
 	    select_limit,max_join_size);
     mysql_options(&mysql, MYSQL_INIT_COMMAND, init_command);
   }
-
+  if (!strcmp(default_charset,MYSQL_AUTODETECT_CHARSET_NAME))
+    default_charset= (char *)my_default_csname();
   mysql_options(&mysql, MYSQL_SET_CHARSET_NAME, default_charset);
 
   if (!do_connect(&mysql, host, user, password, database,

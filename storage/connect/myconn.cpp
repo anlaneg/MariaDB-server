@@ -177,7 +177,7 @@ PQRYRES MyColumns(PGLOBAL g, THD *thd, const char *host, const char *db,
       return NULL;
       } // endif b
 
-    if (trace)
+    if (trace(1))
       htrc("MyColumns: cmd='%s'\n", cmd.GetStr());
 
     if ((n = myc.GetResultSize(g, cmd.GetStr())) < 0) {
@@ -472,7 +472,7 @@ int MYSQLC::Open(PGLOBAL g, const char *host, const char *db,
                             int pt, const char *csname)
   {
   const char *pipe = NULL;
-  uint        cto = 10, nrt = 20;
+  //uint      cto = 10, nrt = 20;
   my_bool     my_true= 1;
 
   m_DB = mysql_init(NULL);
@@ -482,14 +482,14 @@ int MYSQLC::Open(PGLOBAL g, const char *host, const char *db,
     return RC_FX;
     } // endif m_DB
 
-	if (trace)
+	if (trace(1))
 		htrc("MYSQLC Open: m_DB=%.4X size=%d\n", m_DB, (int)sizeof(*m_DB));
 
-	// Removed to do like FEDERATED do
+	// Removed to do like FEDERATED does
 //mysql_options(m_DB, MYSQL_READ_DEFAULT_GROUP, "client-mariadb");
-  mysql_options(m_DB, MYSQL_OPT_USE_REMOTE_CONNECTION, NULL);
-  mysql_options(m_DB, MYSQL_OPT_CONNECT_TIMEOUT, &cto);
-  mysql_options(m_DB, MYSQL_OPT_READ_TIMEOUT, &nrt);
+//mysql_options(m_DB, MYSQL_OPT_USE_REMOTE_CONNECTION, NULL);
+//mysql_options(m_DB, MYSQL_OPT_CONNECT_TIMEOUT, &cto);
+//mysql_options(m_DB, MYSQL_OPT_READ_TIMEOUT, &nrt);
 //mysql_options(m_DB, MYSQL_OPT_WRITE_TIMEOUT, ...);
 
 #if defined(__WIN__)
@@ -744,7 +744,7 @@ int MYSQLC::ExecSQL(PGLOBAL g, const char *query, int *w)
       m_Fields = mysql_num_fields(m_Res);
       m_Rows = (!m_Use) ? (int)mysql_num_rows(m_Res) : 0;
 
-			if (trace)
+			if (trace(1))
 				htrc("ExecSQL: m_Res=%.4X size=%d m_Fields=%d m_Rows=%d\n",
 				               m_Res, sizeof(*m_Res), m_Fields, m_Rows);
 
@@ -879,7 +879,7 @@ MYSQL_FIELD *MYSQLC::GetNextField(void)
 PQRYRES MYSQLC::GetResult(PGLOBAL g, bool pdb)
   {
 	PCSZ         fmt;
-  char        *name, v;
+  char        *name, v= 0;
   int          n;
   bool         uns;
   PCOLRES     *pcrp, crp;
@@ -933,8 +933,9 @@ PQRYRES MYSQLC::GetResult(PGLOBAL g, bool pdb)
 
     crp->Prec = (crp->Type == TYPE_DOUBLE || crp->Type == TYPE_DECIM)
               ? fld->decimals : 0;
-    crp->Length = MY_MAX(fld->length, fld->max_length);
-    crp->Clen = GetTypeSize(crp->Type, crp->Length);
+    CHARSET_INFO *cs= get_charset(fld->charsetnr, MYF(0));
+    crp->Clen = GetTypeSize(crp->Type, fld->length);
+    crp->Length = fld->length / (cs ? cs->mbmaxlen : 1);
     uns = (fld->flags & (UNSIGNED_FLAG | ZEROFILL_FLAG)) ? true : false;
 
     if (!(crp->Kdata = AllocValBlock(g, NULL, crp->Type, m_Rows,
@@ -1067,7 +1068,7 @@ void MYSQLC::Close(void)
   {
   FreeResult();
 
-	if (trace)
+	if (trace(1))
 		htrc("MYSQLC Close: m_DB=%.4X\n", m_DB);
 
 	mysql_close(m_DB);

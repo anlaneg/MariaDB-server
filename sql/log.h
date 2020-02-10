@@ -1,5 +1,5 @@
 /* Copyright (c) 2005, 2016, Oracle and/or its affiliates.
-   Copyright (c) 2009, 2017, MariaDB Corporation.
+   Copyright (c) 2009, 2020, MariaDB Corporation.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -12,7 +12,7 @@
 
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
-   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA */
+   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1335  USA */
 
 #ifndef LOG_H
 #define LOG_H
@@ -26,6 +26,7 @@ class Relay_log_info;
 
 class Format_description_log_event;
 
+bool reopen_fstreams(const char *filename, FILE *outstream, FILE *errstream);
 void setup_log_handling();
 bool trans_has_updated_trans_table(const THD* thd);
 bool stmt_has_updated_trans_table(const THD *thd);
@@ -359,14 +360,13 @@ class MYSQL_QUERY_LOG: public MYSQL_LOG
 public:
   MYSQL_QUERY_LOG() : last_time(0) {}
   void reopen_file();
-  bool write(time_t event_time, const char *user_host,
-             uint user_host_len, my_thread_id thread_id,
-             const char *command_type, uint command_type_len,
-             const char *sql_text, uint sql_text_len);
+  bool write(time_t event_time, const char *user_host, size_t user_host_len, my_thread_id thread_id,
+             const char *command_type, size_t command_type_len,
+             const char *sql_text, size_t sql_text_len);
   bool write(THD *thd, time_t current_time,
-             const char *user_host, uint user_host_len,
+             const char *user_host, size_t user_host_len,
              ulonglong query_utime, ulonglong lock_utime, bool is_command,
-             const char *sql_text, uint sql_text_len);
+             const char *sql_text, size_t sql_text_len);
   bool open_slow_log(const char *log_name)
   {
     char buf[FN_REFLEN];
@@ -600,7 +600,18 @@ public:
     long notify_count;
     /* For linking in requests to the binlog background thread. */
     xid_count_per_binlog *next_in_queue;
-    xid_count_per_binlog();   /* Give link error if constructor used. */
+    xid_count_per_binlog(char *log_file_name, uint log_file_name_len)
+      :binlog_id(0), xid_count(0), notify_count(0)
+    {
+      binlog_name_len= log_file_name_len;
+      binlog_name= (char *) my_malloc(binlog_name_len, MYF(MY_ZEROFILL));
+      if (binlog_name)
+        memcpy(binlog_name, log_file_name, binlog_name_len);
+    }
+    ~xid_count_per_binlog()
+    {
+      my_free(binlog_name);
+    }
   };
   I_List<xid_count_per_binlog> binlog_xid_count_list;
   mysql_mutex_t LOCK_binlog_background_thread;
@@ -950,16 +961,14 @@ public:
   virtual void cleanup()= 0;
 
   virtual bool log_slow(THD *thd, my_hrtime_t current_time,
-                        const char *user_host,
-                        uint user_host_len, ulonglong query_utime,
+                        const char *user_host, size_t user_host_len, ulonglong query_utime,
                         ulonglong lock_utime, bool is_command,
-                        const char *sql_text, uint sql_text_len)= 0;
+                        const char *sql_text, size_t sql_text_len)= 0;
   virtual bool log_error(enum loglevel level, const char *format,
                          va_list args)= 0;
-  virtual bool log_general(THD *thd, my_hrtime_t event_time, const char *user_host,
-                           uint user_host_len, my_thread_id thread_id,
-                           const char *command_type, uint command_type_len,
-                           const char *sql_text, uint sql_text_len,
+  virtual bool log_general(THD *thd, my_hrtime_t event_time, const char *user_host, size_t user_host_len, my_thread_id thread_id,
+                           const char *command_type, size_t command_type_len,
+                           const char *sql_text, size_t sql_text_len,
                            CHARSET_INFO *client_cs)= 0;
   virtual ~Log_event_handler() {}
 };
@@ -979,16 +988,14 @@ public:
   virtual void cleanup();
 
   virtual bool log_slow(THD *thd, my_hrtime_t current_time,
-                        const char *user_host,
-                        uint user_host_len, ulonglong query_utime,
+                        const char *user_host, size_t user_host_len, ulonglong query_utime,
                         ulonglong lock_utime, bool is_command,
-                        const char *sql_text, uint sql_text_len);
+                        const char *sql_text, size_t sql_text_len);
   virtual bool log_error(enum loglevel level, const char *format,
                          va_list args);
-  virtual bool log_general(THD *thd, my_hrtime_t event_time, const char *user_host,
-                           uint user_host_len, my_thread_id thread_id,
-                           const char *command_type, uint command_type_len,
-                           const char *sql_text, uint sql_text_len,
+  virtual bool log_general(THD *thd, my_hrtime_t event_time, const char *user_host, size_t user_host_len, my_thread_id thread_id,
+                           const char *command_type, size_t command_type_len,
+                           const char *sql_text, size_t sql_text_len,
                            CHARSET_INFO *client_cs);
 
   int activate_log(THD *thd, uint log_type);
@@ -1011,16 +1018,14 @@ public:
   virtual void cleanup();
 
   virtual bool log_slow(THD *thd, my_hrtime_t current_time,
-                        const char *user_host,
-                        uint user_host_len, ulonglong query_utime,
+                        const char *user_host, size_t user_host_len, ulonglong query_utime,
                         ulonglong lock_utime, bool is_command,
-                        const char *sql_text, uint sql_text_len);
+                        const char *sql_text, size_t sql_text_len);
   virtual bool log_error(enum loglevel level, const char *format,
                          va_list args);
-  virtual bool log_general(THD *thd, my_hrtime_t event_time, const char *user_host,
-                           uint user_host_len, my_thread_id thread_id,
-                           const char *command_type, uint command_type_len,
-                           const char *sql_text, uint sql_text_len,
+  virtual bool log_general(THD *thd, my_hrtime_t event_time, const char *user_host, size_t user_host_len, my_thread_id thread_id,
+                           const char *command_type, size_t command_type_len,
+                           const char *sql_text, size_t sql_text_len,
                            CHARSET_INFO *client_cs);
   void flush();
   void init_pthread_objects();
@@ -1074,12 +1079,12 @@ public:
   void cleanup_end();
   bool error_log_print(enum loglevel level, const char *format,
                       va_list args);
-  bool slow_log_print(THD *thd, const char *query, uint query_length,
+  bool slow_log_print(THD *thd, const char *query, size_t query_length,
                       ulonglong current_utime);
   bool general_log_print(THD *thd,enum enum_server_command command,
                          const char *format, va_list args);
   bool general_log_write(THD *thd, enum enum_server_command command,
-                         const char *query, uint query_length);
+                         const char *query, size_t query_length);
 
   /* we use this function to setup all enabled log event handlers */
   int set_handlers(ulonglong error_log_printer,
@@ -1118,6 +1123,7 @@ int vprint_msg_to_log(enum loglevel level, const char *format, va_list args);
 void sql_print_error(const char *format, ...);
 void sql_print_warning(const char *format, ...);
 void sql_print_information(const char *format, ...);
+void sql_print_information_v(const char *format, va_list ap);
 typedef void (*sql_print_message_func)(const char *format, ...);
 extern sql_print_message_func sql_print_message_handlers[];
 
@@ -1131,7 +1137,7 @@ bool general_log_print(THD *thd, enum enum_server_command command,
                        const char *format,...);
 
 bool general_log_write(THD *thd, enum enum_server_command command,
-                       const char *query, uint query_length);
+                       const char *query, size_t query_length);
 
 void binlog_report_wait_for(THD *thd, THD *other_thd);
 void sql_perror(const char *message);

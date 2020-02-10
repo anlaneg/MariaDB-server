@@ -11,7 +11,7 @@
 
    You should have received a copy of the GNU General Public License along
    with this program; if not, write to the Free Software Foundation, Inc.,
-   51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA. */
+   51 Franklin Street, Fifth Floor, Boston, MA 02110-1335 USA. */
 
 #include <my_config.h>
 
@@ -27,9 +27,12 @@
 #define WSREP_SST_OPT_AUTH     "--auth"
 #define WSREP_SST_OPT_DATA     "--datadir"
 #define WSREP_SST_OPT_CONF     "--defaults-file"
-#define WSREP_SST_OPT_EXTRA_CONF "--defaults-extra-file"
+#define WSREP_SST_OPT_CONF_SUFFIX "--defaults-group-suffix"
+#define WSREP_SST_OPT_CONF_EXTRA  "--defaults-extra-file"
 #define WSREP_SST_OPT_PARENT   "--parent"
 #define WSREP_SST_OPT_BINLOG   "--binlog"
+#define WSREP_SST_OPT_BINLOG_INDEX "--binlog-index"
+#define WSREP_SST_OPT_MYSQLD   "--mysqld-args"
 
 // mysqldump-specific options
 #define WSREP_SST_OPT_USER     "--user"
@@ -47,6 +50,9 @@
 #define WSREP_SST_MYSQLDUMP    "mysqldump"
 #define WSREP_SST_RSYNC        "rsync"
 #define WSREP_SST_SKIP         "skip"
+#define WSREP_SST_MARIABACKUP  "mariabackup"
+#define WSREP_SST_XTRABACKUP   "xtrabackup"
+#define WSREP_SST_XTRABACKUPV2 "xtrabackupv2"
 #define WSREP_SST_DEFAULT      WSREP_SST_RSYNC
 #define WSREP_SST_ADDRESS_AUTO "AUTO"
 #define WSREP_SST_AUTH_MASK    "********"

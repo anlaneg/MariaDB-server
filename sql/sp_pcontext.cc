@@ -11,7 +11,7 @@
 
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
-   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA */
+   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1335  USA */
 
 #include "mariadb.h"
 #include "sql_priv.h"
@@ -171,12 +171,12 @@ uint sp_pcontext::diff_handlers(const sp_pcontext *ctx, bool exclusive) const
 
   while (pctx && pctx != ctx)
   {
-    n+= pctx->m_handlers.elements();
+    n+= (uint)pctx->m_handlers.elements();
     last_ctx= pctx;
     pctx= pctx->parent_context();
   }
   if (pctx)
-    return (exclusive && last_ctx ? n - last_ctx->m_handlers.elements() : n);
+    return (exclusive && last_ctx ? n -(uint) last_ctx->m_handlers.elements() : n);
   return 0;			// Didn't find ctx
 }
 
@@ -189,12 +189,12 @@ uint sp_pcontext::diff_cursors(const sp_pcontext *ctx, bool exclusive) const
 
   while (pctx && pctx != ctx)
   {
-    n+= pctx->m_cursors.elements();
+    n+= (uint)pctx->m_cursors.elements();
     last_ctx= pctx;
     pctx= pctx->parent_context();
   }
   if (pctx)
-    return  (exclusive && last_ctx ? n - last_ctx->m_cursors.elements() : n);
+    return  (exclusive && last_ctx ? (uint)(n - last_ctx->m_cursors.elements()) : n);
   return 0;			// Didn't find ctx
 }
 
@@ -202,7 +202,7 @@ uint sp_pcontext::diff_cursors(const sp_pcontext *ctx, bool exclusive) const
 sp_variable *sp_pcontext::find_variable(const LEX_CSTRING *name,
                                         bool current_scope_only) const
 {
-  uint i= m_vars.elements() - m_pboundary;
+  size_t i= m_vars.elements() - m_pboundary;
 
   while (i--)
   {
@@ -392,7 +392,7 @@ bool sp_pcontext::add_condition(THD *thd,
 sp_condition_value *sp_pcontext::find_condition(const LEX_CSTRING *name,
                                                 bool current_scope_only) const
 {
-  uint i= m_conditions.elements();
+  size_t i= m_conditions.elements();
 
   while (i--)
   {
@@ -409,6 +409,19 @@ sp_condition_value *sp_pcontext::find_condition(const LEX_CSTRING *name,
     NULL;
 }
 
+sp_condition_value *
+sp_pcontext::find_declared_or_predefined_condition(THD *thd,
+                                                   const LEX_CSTRING *name)
+                                                   const
+{
+  sp_condition_value *p= find_condition(name, false);
+  if (p)
+    return p;
+  if (thd->variables.sql_mode & MODE_ORACLE)
+    return find_predefined_condition(name);
+  return NULL;
+}
+
 
 static sp_condition_value
   // Warnings
@@ -423,12 +436,12 @@ static sp_condition_value
 static sp_condition sp_predefined_conditions[]=
 {
   // Warnings
-  sp_condition(C_STRING_WITH_LEN("NO_DATA_FOUND"), &cond_no_data_found),
+  sp_condition(STRING_WITH_LEN("NO_DATA_FOUND"), &cond_no_data_found),
   // Errors
-  sp_condition(C_STRING_WITH_LEN("INVALID_CURSOR"), &cond_invalid_cursor),
-  sp_condition(C_STRING_WITH_LEN("DUP_VAL_ON_INDEX"), &cond_dup_val_on_index),
-  sp_condition(C_STRING_WITH_LEN("DUP_VAL_ON_INDEX"), &cond_dup_val_on_index2),
-  sp_condition(C_STRING_WITH_LEN("TOO_MANY_ROWS"), &cond_too_many_rows)
+  sp_condition(STRING_WITH_LEN("INVALID_CURSOR"), &cond_invalid_cursor),
+  sp_condition(STRING_WITH_LEN("DUP_VAL_ON_INDEX"), &cond_dup_val_on_index),
+  sp_condition(STRING_WITH_LEN("DUP_VAL_ON_INDEX"), &cond_dup_val_on_index2),
+  sp_condition(STRING_WITH_LEN("TOO_MANY_ROWS"), &cond_too_many_rows)
 };
 
 
@@ -605,7 +618,7 @@ const sp_pcursor *sp_pcontext::find_cursor(const LEX_CSTRING *name,
                                            uint *poff,
                                            bool current_scope_only) const
 {
-  uint i= m_cursors.elements();
+  uint i= (uint)m_cursors.elements();
 
   while (i--)
   {

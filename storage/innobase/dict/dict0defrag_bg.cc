@@ -1,6 +1,6 @@
 /*****************************************************************************
 
-Copyright (c) 2016, 2017, MariaDB Corporation.
+Copyright (c) 2016, 2019, MariaDB Corporation.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License as published by the Free Software
@@ -12,7 +12,7 @@ FOR A PARTICULAR PURPOSE. See the GNU General Public License for more details.
 
 You should have received a copy of the GNU General Public License along with
 this program; if not, write to the Free Software Foundation, Inc.,
-51 Franklin Street, Suite 500, Boston, MA 02110-1335 USA
+51 Franklin Street, Fifth Floor, Boston, MA 02110-1335 USA
 
 *****************************************************************************/
 
@@ -27,12 +27,8 @@ Created 25/08/2016 Jan Lindström
 #include "dict0stats.h"
 #include "dict0stats_bg.h"
 #include "dict0defrag_bg.h"
-#include "row0mysql.h"
+#include "btr0btr.h"
 #include "srv0start.h"
-#include "trx0roll.h"
-#include "ut0new.h"
-
-#include <vector>
 
 static ib_mutex_t		defrag_pool_mutex;
 
@@ -40,27 +36,13 @@ static ib_mutex_t		defrag_pool_mutex;
 static mysql_pfs_key_t		defrag_pool_mutex_key;
 #endif
 
-/** Indices whose defrag stats need to be saved to persistent storage.*/
-struct defrag_pool_item_t {
-	table_id_t	table_id;
-	index_id_t	index_id;
-};
-
-/** Allocator type, used by std::vector */
-typedef ut_allocator<defrag_pool_item_t>
-	defrag_pool_allocator_t;
-
-/** The multitude of tables to be defragmented- an STL vector */
-typedef std::vector<defrag_pool_item_t, defrag_pool_allocator_t>
-	defrag_pool_t;
-
 /** Iterator type for iterating over the elements of objects of type
 defrag_pool_t. */
 typedef defrag_pool_t::iterator		defrag_pool_iterator_t;
 
 /** Pool where we store information on which tables are to be processed
 by background defragmentation. */
-static defrag_pool_t*			defrag_pool;
+defrag_pool_t			defrag_pool;
 
 extern bool dict_stats_start_shutdown;
 
@@ -71,14 +53,6 @@ dict_defrag_pool_init(void)
 /*=======================*/
 {
 	ut_ad(!srv_read_only_mode);
-	/* JAN: TODO: MySQL 5.7 PSI
-	const PSI_memory_key	key2 = mem_key_dict_defrag_pool_t;
-
-	defrag_pool = UT_NEW(defrag_pool_t(defrag_pool_allocator_t(key2)), key2);
-
-	recalc_pool->reserve(RECALC_POOL_INITIAL_SLOTS);
-	*/
-	defrag_pool = new std::vector<defrag_pool_item_t, defrag_pool_allocator_t>();
 
 	/* We choose SYNC_STATS_DEFRAG to be below SYNC_FSP_PAGE. */
 	mutex_create(LATCH_ID_DEFRAGMENT_MUTEX, &defrag_pool_mutex);
@@ -93,10 +67,7 @@ dict_defrag_pool_deinit(void)
 {
 	ut_ad(!srv_read_only_mode);
 
-	defrag_pool->clear();
 	mutex_free(&defrag_pool_mutex);
-
-	UT_DELETE(defrag_pool);
 }
 
 /*****************************************************************//**
@@ -116,16 +87,16 @@ dict_stats_defrag_pool_get(
 
 	mutex_enter(&defrag_pool_mutex);
 
-	if (defrag_pool->empty()) {
+	if (defrag_pool.empty()) {
 		mutex_exit(&defrag_pool_mutex);
 		return(false);
 	}
 
-	defrag_pool_item_t& item = defrag_pool->back();
+	defrag_pool_item_t& item = defrag_pool.back();
 	*table_id = item.table_id;
 	*index_id = item.index_id;
 
-	defrag_pool->pop_back();
+	defrag_pool.pop_back();
 
 	mutex_exit(&defrag_pool_mutex);
 
@@ -150,8 +121,8 @@ dict_stats_defrag_pool_add(
 	mutex_enter(&defrag_pool_mutex);
 
 	/* quit if already in the list */
-	for (defrag_pool_iterator_t iter = defrag_pool->begin();
-	     iter != defrag_pool->end();
+	for (defrag_pool_iterator_t iter = defrag_pool.begin();
+	     iter != defrag_pool.end();
 	     ++iter) {
 		if ((*iter).table_id == index->table->id
 		    && (*iter).index_id == index->id) {
@@ -162,7 +133,7 @@ dict_stats_defrag_pool_add(
 
 	item.table_id = index->table->id;
 	item.index_id = index->id;
-	defrag_pool->push_back(item);
+	defrag_pool.push_back(item);
 
 	mutex_exit(&defrag_pool_mutex);
 
@@ -184,14 +155,14 @@ dict_stats_defrag_pool_del(
 
 	mutex_enter(&defrag_pool_mutex);
 
-	defrag_pool_iterator_t iter = defrag_pool->begin();
-	while (iter != defrag_pool->end()) {
+	defrag_pool_iterator_t iter = defrag_pool.begin();
+	while (iter != defrag_pool.end()) {
 		if ((table && (*iter).table_id == table->id)
 		    || (index
 			&& (*iter).table_id == index->table->id
 			&& (*iter).index_id == index->id)) {
 			/* erase() invalidates the iterator */
-			iter = defrag_pool->erase(iter);
+			iter = defrag_pool.erase(iter);
 			if (index)
 				break;
 		} else {
@@ -202,18 +173,17 @@ dict_stats_defrag_pool_del(
 	mutex_exit(&defrag_pool_mutex);
 }
 
-/** Get the first index that has been added for updating persistent defrag
-stats and eventually save its stats.
-@param[in,out]	trx	transaction that will be started and committed  */
+/*****************************************************************//**
+Get the first index that has been added for updating persistent defrag
+stats and eventually save its stats. */
 static
 void
-dict_stats_process_entry_from_defrag_pool(trx_t* trx)
+dict_stats_process_entry_from_defrag_pool()
 {
 	table_id_t	table_id;
 	index_id_t	index_id;
 
 	ut_ad(!srv_read_only_mode);
-	ut_ad(trx->persistent_stats);
 
 	/* pop the first index from the auto defrag pool */
 	if (!dict_stats_defrag_pool_get(&table_id, &index_id)) {
@@ -234,7 +204,7 @@ dict_stats_process_entry_from_defrag_pool(trx_t* trx)
 		? dict_table_find_index_on_id(table, index_id)
 		: NULL;
 
-	if (!index || dict_index_is_corrupted(index)) {
+	if (!index || index->is_corrupted()) {
 		if (table) {
 			dict_table_close(table, TRUE, FALSE);
 		}
@@ -243,63 +213,61 @@ dict_stats_process_entry_from_defrag_pool(trx_t* trx)
 	}
 
 	mutex_exit(&dict_sys->mutex);
-	trx->error_state = DB_SUCCESS;
-	++trx->will_lock;
-	dberr_t err = dict_stats_save_defrag_stats(index, trx);
-
-	if (err != DB_SUCCESS) {
-		trx_rollback_to_savepoint(trx, NULL);
-		ib::error() << "Saving defragmentation status for table "
-			    << index->table->name
-			    << " index " << index->name
-			    << " failed " << err;
-	} else if (trx->state != TRX_STATE_NOT_STARTED) {
-		trx_commit_for_mysql(trx);
-	}
-
+	dict_stats_save_defrag_stats(index);
 	dict_table_close(table, FALSE, FALSE);
 }
 
-/** Process indexes that have been scheduled for defragmenting.
-@param[in,out]	trx	transaction that will be started and committed  */
+/*****************************************************************//**
+Get the first index that has been added for updating persistent defrag
+stats and eventually save its stats. */
 void
-dict_defrag_process_entries_from_defrag_pool(trx_t* trx)
+dict_defrag_process_entries_from_defrag_pool()
+/*==========================================*/
 {
-	while (defrag_pool->size() && !dict_stats_start_shutdown) {
-		dict_stats_process_entry_from_defrag_pool(trx);
+	while (defrag_pool.size() && !dict_stats_start_shutdown) {
+		dict_stats_process_entry_from_defrag_pool();
 	}
 }
 
-/** Save defragmentation result.
-@param[in]	index	index that was defragmented
-@param[in,out]	trx	transaction
+/*********************************************************************//**
+Save defragmentation result.
 @return DB_SUCCESS or error code */
 dberr_t
-dict_stats_save_defrag_summary(dict_index_t* index, trx_t* trx)
+dict_stats_save_defrag_summary(
+/*============================*/
+	dict_index_t*	index)	/*!< in: index */
 {
-	ut_ad(trx->persistent_stats);
+	dberr_t	ret=DB_SUCCESS;
 
 	if (dict_index_is_ibuf(index)) {
 		return DB_SUCCESS;
 	}
 
-	return dict_stats_save_index_stat(index, ut_time(), "n_pages_freed",
-					  index->stat_defrag_n_pages_freed,
-					  NULL,
-					  "Number of pages freed during"
-					  " last defragmentation run.",
-					  trx);
+	rw_lock_x_lock(&dict_operation_lock);
+	mutex_enter(&dict_sys->mutex);
+
+	ret = dict_stats_save_index_stat(index, time(NULL), "n_pages_freed",
+					 index->stat_defrag_n_pages_freed,
+					 NULL,
+					 "Number of pages freed during"
+					 " last defragmentation run.",
+					 NULL);
+
+	mutex_exit(&dict_sys->mutex);
+	rw_lock_x_unlock(&dict_operation_lock);
+
+	return (ret);
 }
 
-/** Save defragmentation stats for a given index.
-@param[in]	index	index that is being defragmented
-@param[in,out]	trx	transaction
+/*********************************************************************//**
+Save defragmentation stats for a given index.
 @return DB_SUCCESS or error code */
 dberr_t
-dict_stats_save_defrag_stats(dict_index_t* index, trx_t* trx)
+dict_stats_save_defrag_stats(
+/*============================*/
+	dict_index_t*	index)	/*!< in: index */
 {
-	ut_ad(trx->error_state == DB_SUCCESS);
-	ut_ad(trx->persistent_stats);
+	dberr_t	ret;
 
 	if (dict_index_is_ibuf(index)) {
 		return DB_SUCCESS;
@@ -309,14 +277,15 @@ dict_stats_save_defrag_stats(dict_index_t* index, trx_t* trx)
 		return dict_stats_report_error(index->table, true);
 	}
 
+	const time_t now = time(NULL);
 	mtr_t	mtr;
 	ulint	n_leaf_pages;
 	ulint	n_leaf_reserved;
-	mtr_start(&mtr);
-	mtr_s_lock(dict_index_get_lock(index), &mtr);
+	mtr.start();
+	mtr_s_lock_index(index, &mtr);
 	n_leaf_reserved = btr_get_size_and_reserved(index, BTR_N_LEAF_PAGES,
 						    &n_leaf_pages, &mtr);
-	mtr_commit(&mtr);
+	mtr.commit();
 
 	if (n_leaf_reserved == ULINT_UNDEFINED) {
 		// The index name is different during fast index creation,
@@ -325,33 +294,40 @@ dict_stats_save_defrag_stats(dict_index_t* index, trx_t* trx)
 		return DB_SUCCESS;
 	}
 
-	ib_time_t now = ut_time();
-	dberr_t err = dict_stats_save_index_stat(
-		index, now, "n_page_split",
-		index->stat_defrag_n_page_split,
+	rw_lock_x_lock(&dict_operation_lock);
+
+	mutex_enter(&dict_sys->mutex);
+	ret = dict_stats_save_index_stat(index, now, "n_page_split",
+					 index->stat_defrag_n_page_split,
+					 NULL,
+					 "Number of new page splits on leaves"
+					 " since last defragmentation.",
+					 NULL);
+	if (ret != DB_SUCCESS) {
+		goto end;
+	}
+
+	ret = dict_stats_save_index_stat(
+		index, now, "n_leaf_pages_defrag",
+		n_leaf_pages,
 		NULL,
-		"Number of new page splits on leaves"
-		" since last defragmentation.",
-		trx);
-	if (err == DB_SUCCESS) {
-		err = dict_stats_save_index_stat(
-			index, now, "n_leaf_pages_defrag",
-			n_leaf_pages,
-			NULL,
-			"Number of leaf pages when this stat is saved to disk",
-			trx);
+		"Number of leaf pages when this stat is saved to disk",
+		NULL);
+	if (ret != DB_SUCCESS) {
+		goto end;
 	}
 
-	if (err == DB_SUCCESS) {
-		err = dict_stats_save_index_stat(
-			index, now, "n_leaf_pages_reserved",
-			n_leaf_reserved,
-			NULL,
-			"Number of pages reserved for this "
-			"index leaves when this stat "
-			"is saved to disk",
-			trx);
-	}
+	ret = dict_stats_save_index_stat(
+		index, now, "n_leaf_pages_reserved",
+		n_leaf_reserved,
+		NULL,
+		"Number of pages reserved for this index leaves when this stat "
+		"is saved to disk",
+		NULL);
 
-	return err;
+end:
+	mutex_exit(&dict_sys->mutex);
+	rw_lock_x_unlock(&dict_operation_lock);
+
+	return (ret);
 }

@@ -11,7 +11,7 @@
 
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
-   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA */
+   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1335  USA */
 
 #ifndef INJECTOR_H
 #define INJECTOR_H
@@ -302,7 +302,7 @@ public:
     void        new_trans(THD *, transaction *);
 
     int record_incident(THD*, Incident incident);
-    int record_incident(THD*, Incident incident, LEX_STRING const message);
+    int record_incident(THD*, Incident incident, const LEX_CSTRING *message);
 
 private:
     explicit injector();

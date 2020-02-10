@@ -6,12 +6,19 @@ IF(HAVE_WVLA)
   SET(CMAKE_C_FLAGS_DEBUG "${CMAKE_C_FLAGS_DEBUG} -Wno-vla")
 ENDIF()
 
+IF(MSVC)
+  # Temporarily disable "conversion from size_t .."
+  IF(CMAKE_SIZEOF_VOID_P EQUAL 8)
+    SET(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /wd4267")
+  ENDIF()
+ENDIF()
+
 SET(SPIDER_SOURCES
   spd_param.cc spd_sys_table.cc spd_trx.cc spd_db_conn.cc spd_conn.cc
   spd_table.cc spd_direct_sql.cc spd_udf.cc spd_ping_table.cc
   spd_copy_tables.cc spd_i_s.cc spd_malloc.cc ha_spider.cc spd_udf.def
   spd_db_mysql.cc spd_db_handlersocket.cc spd_db_oracle.cc
-  spd_group_by_handler.cc
+  spd_group_by_handler.cc spd_db_include.cc
   hs_client/config.cpp hs_client/escape.cpp hs_client/fatal.cpp
   hs_client/hstcpcli.cpp hs_client/socket.cpp hs_client/string_util.cpp
 )
@@ -38,6 +45,8 @@ IF(EXISTS ${PROJECT_SOURCE_DIR}/storage/mysql_storage_engine.cmake)
     ${CMAKE_SOURCE_DIR}/regex)
 
   MYSQL_STORAGE_ENGINE(SPIDER)
+ELSEIF(PLUGIN_PARTITION MATCHES "^NO$")
+  MESSAGE(STATUS "Spider is skipped because partitioning is disabled")
 ELSE()
   INCLUDE_DIRECTORIES(${CMAKE_SOURCE_DIR}/storage/spider/hs_client)
 
@@ -46,6 +55,9 @@ ELSE()
     DESTINATION ${INSTALL_MYSQLSHAREDIR} COMPONENT Server
   )
   MYSQL_ADD_PLUGIN(spider ${SPIDER_SOURCES} STORAGE_ENGINE MODULE_ONLY MODULE_OUTPUT_NAME "ha_spider")
+  IF(NOT TARGET spider)
+    RETURN()
+  ENDIF()
 ENDIF()
 
 IF(ORACLE_INCLUDE_DIR AND ORACLE_OCI_LIBRARY)

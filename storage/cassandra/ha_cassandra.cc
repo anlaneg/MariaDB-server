@@ -12,7 +12,7 @@
 
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
-   Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02111-1301 USA */
+   Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1335 USA */
 
 #ifdef USE_PRAGMA_IMPLEMENTATION
 #pragma implementation        // gcc: Class implementation
@@ -866,7 +866,7 @@ static void alloc_strings_memroot(MEM_ROOT *mem_root)
       The mem_root used to allocate UUID (of length 36 + \0) so make
       appropriate allocated size
     */
-    init_alloc_root(mem_root,
+    init_alloc_root(mem_root, "cassandra",
                     (36 + 1 + ALIGN_SIZE(sizeof(USED_MEM))) * 10 +
                     ALLOC_ROOT_MIN_BLOCK_SIZE,
                     (36 + 1 + ALIGN_SIZE(sizeof(USED_MEM))) * 10 +
@@ -2360,7 +2360,7 @@ public:
 };
 
 
-int ha_cassandra::update_row(const uchar *old_data, uchar *new_data)
+int ha_cassandra::update_row(const uchar *old_data, const uchar *new_data)
 {
   DYNAMIC_COLUMN_VALUE *oldvals, *vals;
   LEX_STRING *oldnames, *names;

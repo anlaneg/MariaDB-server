@@ -12,7 +12,7 @@
 
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
-   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA */
+   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1335  USA */
 
 /*
   Functions to handle space-packed-records and blobs
@@ -95,7 +95,7 @@ my_bool mi_dynmap_file(MI_INFO *info, my_off_t size)
 #if defined(HAVE_MADVISE)
   madvise((char*) info->s->file_map, size, MADV_RANDOM);
 #endif
-  info->s->mmaped_length= size;
+  info->s->mmaped_length= (size_t) size;
   info->s->file_read= mi_mmap_pread;
   info->s->file_write= mi_mmap_pwrite;
   DBUG_RETURN(0);
@@ -118,8 +118,7 @@ int mi_munmap_file(MI_INFO *info)
 {
   int ret;
   DBUG_ENTER("mi_unmap_file");
-  if ((ret= my_munmap((void*) info->s->file_map,
-                      (size_t) info->s->mmaped_length)))
+  if ((ret= my_munmap((void*) info->s->file_map, info->s->mmaped_length)))
     DBUG_RETURN(ret);
   info->s->file_read= mi_nommap_pread;
   info->s->file_write= mi_nommap_pwrite;
@@ -886,8 +885,8 @@ static int update_dynamic_record(MI_INFO *info, my_off_t filepos, uchar *record,
 	  /*
 	    Check if next block is a deleted block
 	    Above we have MI_MIN_BLOCK_LENGTH to avoid the problem where
-	    the next block is so small it can't be splited which could
-	    casue problems
+	    the next block is so small it can't be split which could
+	    cause problems
 	  */
 
 	  MI_BLOCK_INFO del_block;
@@ -1217,7 +1216,7 @@ err:
 	/* Returns -1 and my_errno =HA_ERR_RECORD_DELETED if reclength isn't */
 	/* right. Returns reclength (>0) if ok */
 
-ulong _mi_rec_unpack(register MI_INFO *info, register uchar *to, uchar *from,
+size_t _mi_rec_unpack(register MI_INFO *info, register uchar *to, uchar *from,
 		     ulong found_length)
 {
   uint flag,bit,length,rec_length,min_pack_length;

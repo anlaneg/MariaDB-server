@@ -13,7 +13,7 @@
 
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
-   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA
+   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1335  USA
 */
 
 /* Common defines for all clients */
@@ -61,6 +61,7 @@ enum options_client
   OPT_USE_THREADS,
   OPT_IMPORT_USE_THREADS,
   OPT_MYSQL_NUMBER_OF_QUERY,
+  OPT_IGNORE_DATABASE,
   OPT_IGNORE_TABLE,OPT_INSERT_IGNORE,OPT_SHOW_WARNINGS,OPT_DROP_DATABASE,
   OPT_TZ_UTC, OPT_CREATE_SLAP_SCHEMA,
   OPT_MYSQLDUMP_SLAVE_APPLY,

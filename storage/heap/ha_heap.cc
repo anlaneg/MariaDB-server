@@ -12,7 +12,7 @@
 
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
-   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA */
+   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1335  USA */
 
 
 #ifdef USE_PRAGMA_IMPLEMENTATION
@@ -430,6 +430,10 @@ int ha_heap::reset_auto_increment(ulonglong value)
 
 int ha_heap::external_lock(THD *thd, int lock_type)
 {
+#ifndef DBUG_OFF
+  if (lock_type == F_UNLCK && file->s->changed && heap_check_heap(file, 0))
+    return HA_ERR_CRASHED;
+#endif
   return 0;					// No external locking
 }
 
@@ -704,7 +708,7 @@ heap_prepare_hp_create_info(TABLE *table_arg, bool internal_table,
       }
     }
   }
-  mem_per_row+= MY_ALIGN(share->reclength + 1, sizeof(char*));
+  mem_per_row+= MY_ALIGN(MY_MAX(share->reclength, sizeof(char*)) + 1, sizeof(char*));
   if (table_arg->found_next_number_field)
   {
     keydef[share->next_number_index].flag|= HA_AUTO_KEY;

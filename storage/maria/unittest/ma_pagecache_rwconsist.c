@@ -11,7 +11,7 @@
 
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
-   Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02111-1301 USA */
+   Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1335 USA */
 
 /*
   TODO: use pthread_join instead of wait_for_thread_count_to_be_zero, like in
@@ -181,7 +181,7 @@ char *create_tmpdir(const char *progname)
 {
   static char test_dirname[FN_REFLEN];
   char tmp_name[FN_REFLEN];
-  uint length;
+  size_t length;
 
   /* Create a temporary directory of name TMP-'executable', but without the -t extension */
   fn_format(tmp_name, progname, "", "", MY_REPLACE_DIR | MY_REPLACE_EXT);
@@ -204,7 +204,8 @@ int main(int argc __attribute__((unused)),
 {
   pthread_t tid;
   pthread_attr_t thr_attr;
-  int *param, error, pagen;
+  int *param, error;
+  size_t pagen;
 
   MY_INIT(argv[0]);
 
@@ -282,7 +283,7 @@ int main(int argc __attribute__((unused)),
             errno);
     exit(1);
   }
-  DBUG_PRINT("info", ("Page cache %d pages", pagen));
+  DBUG_PRINT("info", ("Page cache %zu pages", pagen));
   {
     unsigned char *buffr= malloc(TEST_PAGE_SIZE);
     memset(buffr, '\0', TEST_PAGE_SIZE);

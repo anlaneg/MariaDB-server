@@ -12,7 +12,7 @@
 
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
-   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA */
+   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1335  USA */
 
 
 /**
@@ -284,11 +284,10 @@ QUERY_PROFILE::~QUERY_PROFILE()
 /**
   @todo  Provide a way to include the full text, as in  SHOW PROCESSLIST.
 */
-void QUERY_PROFILE::set_query_source(char *query_source_arg,
-                                     uint query_length_arg)
+void QUERY_PROFILE::set_query_source(char *query_source_arg, size_t query_length_arg)
 {
   /* Truncate to avoid DoS attacks. */
-  uint length= MY_MIN(MAX_QUERY_LENGTH, query_length_arg);
+  size_t length= MY_MIN(MAX_QUERY_LENGTH, query_length_arg);
 
   DBUG_ASSERT(query_source == NULL); /* we don't leak memory */
   if (query_source_arg != NULL)

@@ -12,7 +12,7 @@
 
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
-   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA */
+   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1335  USA */
 
 /*****************************************************************************
 ** The following is a simple implementation of posix conditions
@@ -98,9 +98,10 @@ int pthread_attr_init(pthread_attr_t *connect_att)
   return 0;
 }
 
-int pthread_attr_setstacksize(pthread_attr_t *connect_att,DWORD stack)
+int pthread_attr_setstacksize(pthread_attr_t *connect_att,size_t stack)
 {
-  connect_att->dwStackSize=stack;
+  DBUG_ASSERT(stack < UINT_MAX);
+  connect_att->dwStackSize=(DWORD)stack;
   return 0;
 }
 

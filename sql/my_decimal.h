@@ -12,7 +12,7 @@
 
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
-   Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA */
+   Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1335  USA */
 
 /**
   @file
@@ -288,7 +288,7 @@ int my_decimal_set_zero(my_decimal *d)
 {
   /*
     We need the up-cast here, since my_decimal has sign() member functions,
-    which conflicts with decimal_t::size
+    which conflicts with decimal_t::sign
     (and decimal_make_zero is a macro, rather than a funcion).
   */
   decimal_make_zero(static_cast<decimal_t*>(d));
@@ -348,7 +348,7 @@ my_decimal *seconds2my_decimal(bool sign, ulonglong sec, ulong microsec,
                         (TIME)->second_part, (DECIMAL))
 
 int my_decimal2int(uint mask, const decimal_t *d, bool unsigned_flag,
-		   longlong *l);
+		   longlong *l, decimal_round_mode round_type= HALF_UP);
 
 inline
 int my_decimal2double(uint, const decimal_t *d, double *result)
@@ -365,11 +365,11 @@ int str2my_decimal(uint mask, const char *str, my_decimal *d, char **end)
 }
 
 
-int str2my_decimal(uint mask, const char *from, uint length,
+int str2my_decimal(uint mask, const char *from, size_t length,
                    CHARSET_INFO *charset, my_decimal *decimal_value,
                    const char **end);
 
-inline int str2my_decimal(uint mask, const char *from, uint length,
+inline int str2my_decimal(uint mask, const char *from, size_t length,
                           CHARSET_INFO *charset, my_decimal *decimal_value)
 {
   const char *end;

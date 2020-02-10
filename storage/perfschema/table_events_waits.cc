@@ -1,17 +1,24 @@
 /* Copyright (c) 2008, 2015, Oracle and/or its affiliates. All rights reserved.
 
   This program is free software; you can redistribute it and/or modify
-  it under the terms of the GNU General Public License as published by
-  the Free Software Foundation; version 2 of the License.
+  it under the terms of the GNU General Public License, version 2.0,
+  as published by the Free Software Foundation.
+
+  This program is also distributed with certain software (including
+  but not limited to OpenSSL) that is licensed under separate terms,
+  as designated in a particular file or component or in included license
+  documentation.  The authors of MySQL hereby grant you an additional
+  permission to link the program and your derivative works with the
+  separately licensed software that they have included with MySQL.
 
   This program is distributed in the hope that it will be useful,
   but WITHOUT ANY WARRANTY; without even the implied warranty of
   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-  GNU General Public License for more details.
+  GNU General Public License, version 2.0, for more details.
 
   You should have received a copy of the GNU General Public License
   along with this program; if not, write to the Free Software Foundation,
-  51 Franklin Street, Suite 500, Boston, MA 02110-1335 USA */
+  51 Franklin Street, Fifth Floor, Boston, MA 02110-1335 USA */
 
 /**
   @file storage/perfschema/table_events_waits.cc
@@ -427,7 +434,7 @@ void table_events_waits_common::make_row(bool thread_own_wait,
     return;
 
   base= base_name(wait->m_source_file);
-  m_row.m_source_length= my_snprintf(m_row.m_source, sizeof(m_row.m_source),
+  m_row.m_source_length= (uint)my_snprintf(m_row.m_source, sizeof(m_row.m_source),
                                      "%s:%d", base, wait->m_source_line);
   if (m_row.m_source_length > sizeof(m_row.m_source))
     m_row.m_source_length= sizeof(m_row.m_source);
@@ -662,7 +669,7 @@ int table_events_waits_common::read_row_values(TABLE *table,
         break;
       case 16: /* OPERATION */
         operation= &operation_names_map[(int) m_row.m_operation - 1];
-        set_field_varchar_utf8(f, operation->str, operation->length);
+        set_field_varchar_utf8(f, operation->str, (uint)operation->length);
         break;
       case 17: /* NUMBER_OF_BYTES */
         if ((m_row.m_operation == OPERATION_TYPE_FILEREAD) ||

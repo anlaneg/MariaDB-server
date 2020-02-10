@@ -14,7 +14,7 @@
    You should have received a copy of the GNU Library General Public
    License along with this library; if not, write to the Free
    Software Foundation, Inc., 51 Franklin St, Fifth Floor, Boston,
-   MA 02110-1301, USA */
+   MA 02110-1335  USA */
 
 /* 
    UCA (Unicode Collation Algorithm) support. 
@@ -31260,7 +31260,7 @@ static my_bool
 my_uca_alloc_contractions(MY_CONTRACTIONS *contractions,
                           MY_CHARSET_LOADER *loader, size_t n)
 {
-  uint size= n * sizeof(MY_CONTRACTION);
+  size_t size= n * sizeof(MY_CONTRACTION);
   if (!(contractions->item= (loader->once_alloc)(size)) ||
       !(contractions->flags= (char *) (loader->once_alloc)(MY_UCA_CNT_FLAG_SIZE)))
     return 1;
@@ -32428,11 +32428,11 @@ int my_wildcmp_uca_impl(CHARSET_INFO *cs,
                         const char *wildstr,const char *wildend,
                         int escape, int w_one, int w_many, int recurse_level)
 {
-  int result= -1;			/* Not found, using wildcards */
+  int result= -1;                             /* Not found, using wildcards */
   my_wc_t s_wc, w_wc;
   int scan;
   my_charset_conv_mb_wc mb_wc= cs->cset->mb_wc;
-  
+
   if (my_string_stack_guard && my_string_stack_guard(recurse_level))
     return 1;
   while (wildstr != wildend)
@@ -32441,118 +32441,120 @@ int my_wildcmp_uca_impl(CHARSET_INFO *cs,
     {
       my_bool escaped= 0;
       if ((scan= mb_wc(cs, &w_wc, (const uchar*)wildstr,
-		       (const uchar*)wildend)) <= 0)
-	return 1;
+                       (const uchar*)wildend)) <= 0)
+        return 1;
 
-      if (w_wc == (my_wc_t)w_many)
+      if (w_wc == (my_wc_t) w_many)
       {
-        result= 1;				/* Found an anchor char */
+        result= 1;                                /* Found an anchor char */
         break;
       }
 
       wildstr+= scan;
-      if (w_wc ==  (my_wc_t)escape)
+      if (w_wc ==  (my_wc_t) escape && wildstr < wildend)
       {
         if ((scan= mb_wc(cs, &w_wc, (const uchar*)wildstr,
-			(const uchar*)wildend)) <= 0)
+                         (const uchar*)wildend)) <= 0)
           return 1;
         wildstr+= scan;
         escaped= 1;
       }
-      
+
       if ((scan= mb_wc(cs, &s_wc, (const uchar*)str,
-      		       (const uchar*)str_end)) <= 0)
+                       (const uchar*)str_end)) <= 0)
         return 1;
       str+= scan;
-      
-      if (!escaped && w_wc == (my_wc_t)w_one)
+
+      if (!escaped && w_wc == (my_wc_t) w_one)
       {
-        result= 1;				/* Found an anchor char */
+        result= 1;                                /* Found an anchor char */
       }
       else
       {
         if (my_uca_charcmp(cs,s_wc,w_wc))
-          return 1;
+          return 1;                               /* No match */
       }
       if (wildstr == wildend)
-	return (str != str_end);		/* Match if both are at end */
+        return (str != str_end);                  /* Match if both are at end */
     }
-    
-    
-    if (w_wc == (my_wc_t)w_many)
-    {						/* Found w_many */
-    
+
+    if (w_wc == (my_wc_t) w_many)
+    {                                             /* Found w_many */
       /* Remove any '%' and '_' from the wild search string */
       for ( ; wildstr != wildend ; )
       {
         if ((scan= mb_wc(cs, &w_wc, (const uchar*)wildstr,
-			 (const uchar*)wildend)) <= 0)
+                         (const uchar*)wildend)) <= 0)
           return 1;
-        
-	if (w_wc == (my_wc_t)w_many)
-	{
-	  wildstr+= scan;
-	  continue;
-	} 
-	
-	if (w_wc == (my_wc_t)w_one)
-	{
-	  wildstr+= scan;
-	  if ((scan= mb_wc(cs, &s_wc, (const uchar*)str,
-			   (const uchar*)str_end)) <= 0)
+
+        if (w_wc == (my_wc_t) w_many)
+        {
+          wildstr+= scan;
+          continue;
+        }
+
+        if (w_wc == (my_wc_t) w_one)
+        {
+          wildstr+= scan;
+          if ((scan= mb_wc(cs, &s_wc, (const uchar*)str,
+                           (const uchar*)str_end)) <= 0)
             return 1;
           str+= scan;
-	  continue;
-	}
-	break;					/* Not a wild character */
+          continue;
+        }
+        break;                                        /* Not a wild character */
       }
-      
+
       if (wildstr == wildend)
-	return 0;				/* Ok if w_many is last */
-      
+        return 0;                                /* Ok if w_many is last */
+
       if (str == str_end)
-	return -1;
-      
+        return -1;
+
       if ((scan= mb_wc(cs, &w_wc, (const uchar*)wildstr,
-		       (const uchar*)wildend)) <= 0)
+                       (const uchar*)wildend)) <= 0)
         return 1;
-      
-      if (w_wc ==  (my_wc_t)escape)
+      wildstr+= scan;
+
+      if (w_wc ==  (my_wc_t) escape)
       {
-        wildstr+= scan;
-        if ((scan= mb_wc(cs, &w_wc, (const uchar*)wildstr,
-			 (const uchar*)wildend)) <= 0)
-          return 1;
+        if (wildstr < wildend)
+        {
+          if ((scan= mb_wc(cs, &w_wc, (const uchar*)wildstr,
+                           (const uchar*)wildend)) <= 0)
+            return 1;
+          wildstr+= scan;
+        }
       }
-      
+
       while (1)
       {
         /* Skip until the first character from wildstr is found */
         while (str != str_end)
         {
           if ((scan= mb_wc(cs, &s_wc, (const uchar*)str,
-			   (const uchar*)str_end)) <= 0)
+                           (const uchar*)str_end)) <= 0)
             return 1;
-          
+
           if (!my_uca_charcmp(cs,s_wc,w_wc))
             break;
           str+= scan;
         }
         if (str == str_end)
           return -1;
-        
+
+        str+= scan;
         result= my_wildcmp_uca_impl(cs, str, str_end, wildstr, wildend,
-                                    escape, w_one, w_many, recurse_level+1);
-        
+                                    escape, w_one, w_many,
+                                    recurse_level + 1);
         if (result <= 0)
           return result;
-        
-        str+= scan;
-      } 
+      }
     }
   }
   return (str != str_end ? 1 : 0);
 }
+
 
 int my_wildcmp_uca(CHARSET_INFO *cs,
                    const char *str,const char *str_end,
@@ -34005,7 +34007,7 @@ apply_one_rule(MY_CHARSET_LOADER *loader,
   {
     MY_CONTRACTIONS *contractions= &dst->contractions;
     to= my_uca_init_one_contraction(contractions,
-                                    r->curr, nshift, r->with_context);
+                                    r->curr, (uint)nshift, r->with_context);
     /* Store weights of the "reset to" character */
     dst->contractions.nitems--; /* Temporarily hide - it's incomplete */
     rc= my_char_weight_put(dst,
@@ -34202,9 +34204,9 @@ init_weight_level(MY_CHARSET_LOADER *loader, MY_COLL_RULES *rules,
       ncontractions++;
   }
 
-  ncontractions += src->contractions.nitems;
+  ncontractions += (int)src->contractions.nitems;
 
-  if ((my_uca_generate_pages(loader, dst, src, npages)))
+  if ((my_uca_generate_pages(loader, dst, src, (uint)npages)))
     return TRUE;
 
   if (ncontractions)
@@ -35542,7 +35544,7 @@ MY_COLLATION_HANDLER my_collation_any_uca_handler =
 
 /* 
   We consider bytes with code more than 127 as a letter.
-  This garantees that word boundaries work fine with regular
+  This guarantees that word boundaries work fine with regular
   expressions. Note, there is no need to mark byte 255  as a
   letter, it is illegal byte in UTF8.
 */

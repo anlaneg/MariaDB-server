@@ -11,7 +11,7 @@
 
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
-   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA */
+   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1335  USA */
 
 #include "mariadb.h"          // HAVE_*
 #include "sql_priv.h"
@@ -59,7 +59,7 @@ load_des_key_file(const char *file_name)
     char *start, *end;
     char buf[1024], offset;
     st_des_keyblock keyblock;
-    uint length;
+    size_t length;
 
     if (!(length=my_b_gets(&io,buf,sizeof(buf)-1)))
       break;					// End of file

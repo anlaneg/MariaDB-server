@@ -1,7 +1,7 @@
 /*****************************************************************************
 
 Copyright (c) 2014, 2015, Oracle and/or its affiliates. All Rights Reserved.
-Copyright (c) 2017, MariaDB Corporation.
+Copyright (c) 2017, 2019, MariaDB Corporation.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License as published by the Free Software
@@ -13,7 +13,7 @@ FOR A PARTICULAR PURPOSE. See the GNU General Public License for more details.
 
 You should have received a copy of the GNU General Public License along with
 this program; if not, write to the Free Software Foundation, Inc.,
-51 Franklin Street, Suite 500, Boston, MA 02110-1335 USA
+51 Franklin Street, Fifth Floor, Boston, MA 02110-1335 USA
 
 *****************************************************************************/
 
@@ -129,14 +129,13 @@ InnoDB:
 #include <string.h> /* strlen(), strrchr(), strncmp() */
 
 #include "my_global.h" /* needed for headers from mysql/psi/ */
+
 /* JAN: TODO: missing 5.7 header */
 #ifdef HAVE_MYSQL_MEMORY_H
 #include "mysql/psi/mysql_memory.h" /* PSI_MEMORY_CALL() */
 #endif
 
 #include "mysql/psi/psi_memory.h" /* PSI_memory_key, PSI_memory_info */
-
-#include "univ.i"
 
 #include "os0proc.h" /* os_mem_alloc_large() */
 #include "os0thread.h" /* os_thread_sleep() */
@@ -172,8 +171,6 @@ extern PSI_memory_key	mem_key_other;
 extern PSI_memory_key	mem_key_row_log_buf;
 extern PSI_memory_key	mem_key_row_merge_sort;
 extern PSI_memory_key	mem_key_std;
-extern PSI_memory_key	mem_key_trx_sys_t_rw_trx_ids;
-extern PSI_memory_key	mem_key_partitioning;
 
 /** Setup the internal objects needed for UT_NEW() to operate.
 This must be called before the first call to UT_NEW(). */
@@ -235,6 +232,51 @@ struct ut_new_pfx_t {
 #endif
 };
 
+static inline void ut_allocate_trace_dontdump(void *ptr, size_t	bytes,
+					      bool
+#if defined(DBUG_OFF) && defined(HAVE_MADVISE) && defined(MADV_DONTDUMP)
+					      dontdump
+#endif
+					      , ut_new_pfx_t* pfx,
+					      const char*
+#ifdef UNIV_PFS_MEMORY
+					      file
+#endif
+
+					      )
+{
+	ut_a(ptr != NULL);
+
+#if defined(DBUG_OFF) && defined(HAVE_MADVISE) && defined(MADV_DONTDUMP)
+	if (dontdump && madvise(ptr, bytes, MADV_DONTDUMP)) {
+		ib::warn() << "Failed to set memory to " DONTDUMP_STR ": "
+			   << strerror(errno)
+			   << " ptr " << ptr
+			   << " size " << bytes;
+	}
+#endif
+	if (pfx != NULL) {
+#ifdef UNIV_PFS_MEMORY
+		allocate_trace(bytes, file, pfx);
+#endif /* UNIV_PFS_MEMORY */
+		pfx->m_size = bytes;
+	}
+}
+
+#if defined(DBUG_OFF) && defined(HAVE_MADVISE) && defined(MADV_DODUMP)
+static inline void ut_dodump(void* ptr, size_t m_size)
+{
+	if (ptr && madvise(ptr, m_size, MADV_DODUMP)) {
+		ib::warn() << "Failed to set memory to " DODUMP_STR ": "
+			   << strerror(errno)
+			   << " ptr " << ptr
+			   << " size " << m_size;
+	}
+}
+#else
+static inline void ut_dodump(void*, size_t) {}
+#endif
+
 /** Allocator class for allocating memory from inside std::* containers.
 @tparam	T		type of allocated object
 @tparam oom_fatal	whether to commit suicide when running out of memory */
@@ -249,19 +291,25 @@ public:
 	typedef size_t		size_type;
 	typedef ptrdiff_t	difference_type;
 
+#ifdef UNIV_PFS_MEMORY
 	/** Default constructor. */
 	explicit
 	ut_allocator(PSI_memory_key key = PSI_NOT_INSTRUMENTED)
-#ifdef UNIV_PFS_MEMORY
 		: m_key(key)
-#endif /* UNIV_PFS_MEMORY */
 	{
 	}
+#else
+	ut_allocator() {}
+	ut_allocator(PSI_memory_key) {}
+#endif /* UNIV_PFS_MEMORY */
 
 	/** Constructor from allocator of another type. */
 	template <class U>
-	ut_allocator(
-		const ut_allocator<U>&	other)
+	ut_allocator(const ut_allocator<U>&
+#ifdef UNIV_PFS_MEMORY
+		     other
+#endif
+		     )
 #ifdef UNIV_PFS_MEMORY
 		: m_key(other.m_key)
 #endif /* UNIV_PFS_MEMORY */
@@ -282,6 +330,8 @@ public:
 #endif /* UNIV_PFS_MEMORY */
 	}
 
+	pointer allocate(size_type n) { return allocate(n, NULL, NULL); }
+
 	/** Allocate a chunk of memory that can hold 'n_elements' objects of
 	type 'T' and trace the allocation.
 	If the allocation fails this method may throw an exception. This
@@ -290,17 +340,19 @@ public:
 	After successfull allocation the returned pointer must be passed
 	to ut_allocator::deallocate() when no longer needed.
 	@param[in]	n_elements	number of elements
-	@param[in]	hint		pointer to a nearby memory location,
-	unused by this implementation
-	@param[in]	file		file name of the caller
 	@param[in]	set_to_zero	if true, then the returned memory is
 	initialized with 0x0 bytes.
+	@param[in]	throw_on_error	if true, raize exception if too big
 	@return pointer to the allocated memory */
 	pointer
 	allocate(
 		size_type	n_elements,
-		const_pointer	hint = NULL,
-		const char*	file = NULL,
+		const_pointer,
+		const char*
+#ifdef UNIV_PFS_MEMORY
+		file /*!< file name of the caller */
+#endif
+		,
 		bool		set_to_zero = false,
 		bool		throw_on_error = true)
 	{
@@ -567,6 +619,8 @@ public:
 	/** Allocate a large chunk of memory that can hold 'n_elements'
 	objects of type 'T' and trace the allocation.
 	@param[in]	n_elements	number of elements
+	@param[in]	dontdump	if true, advise the OS is not to core
+	dump this memory.
 	@param[out]	pfx		storage for the description of the
 	allocated memory. The caller must provide space for this one and keep
 	it until the memory is no longer needed and then pass it to
@@ -575,7 +629,8 @@ public:
 	pointer
 	allocate_large(
 		size_type	n_elements,
-		ut_new_pfx_t*	pfx)
+		ut_new_pfx_t*	pfx,
+		bool		dontdump = false)
 	{
 		if (n_elements == 0 || n_elements > max_size()) {
 			return(NULL);
@@ -586,17 +641,22 @@ public:
 		pointer	ptr = reinterpret_cast<pointer>(
 			os_mem_alloc_large(&n_bytes));
 
-#ifdef UNIV_PFS_MEMORY
-		if (ptr != NULL) {
-			allocate_trace(n_bytes, NULL, pfx);
+		if (ptr == NULL) {
+			return NULL;
 		}
-#else
-		pfx->m_size = n_bytes;
-#endif /* UNIV_PFS_MEMORY */
+
+		ut_allocate_trace_dontdump(ptr, n_bytes, dontdump, pfx, NULL);
 
 		return(ptr);
 	}
 
+	pointer
+	allocate_large_dontdump(
+		size_type	n_elements,
+		ut_new_pfx_t*	pfx)
+	{
+		return allocate_large(n_elements, pfx, true);
+	}
 	/** Free a memory allocated by allocate_large() and trace the
 	deallocation.
 	@param[in,out]	ptr	pointer to memory to free
@@ -605,17 +665,43 @@ public:
 	void
 	deallocate_large(
 		pointer			ptr,
-		const ut_new_pfx_t*	pfx)
+		const ut_new_pfx_t*
+#ifdef UNIV_PFS_MEMORY
+		pfx
+#endif
+		,
+		size_t			size)
 	{
 #ifdef UNIV_PFS_MEMORY
-		deallocate_trace(pfx);
+		if (pfx) {
+			deallocate_trace(pfx);
+		}
 #endif /* UNIV_PFS_MEMORY */
 
-		os_mem_free_large(ptr, pfx->m_size);
+		os_mem_free_large(ptr, size);
+	}
+
+	void
+	deallocate_large_dodump(
+		pointer			ptr,
+		const ut_new_pfx_t*
+#ifdef UNIV_PFS_MEMORY
+		pfx
+#endif
+		,
+		size_t			size)
+	{
+		ut_dodump(ptr, size);
+		deallocate_large(ptr,
+#ifdef UNIV_PFS_MEMORY
+		pfx,
+#else
+		NULL,
+#endif
+		size);
 	}
 
 #ifdef UNIV_PFS_MEMORY
-
 	/** Get the performance schema key to use for tracing allocations.
 	@param[in]	file	file name of the caller or NULL if unknown
 	@return performance schema key */
@@ -725,12 +811,7 @@ could be freed by A2 even if the pfs mem key is different. */
 template <typename T>
 inline
 bool
-operator==(
-	const ut_allocator<T>&	lhs,
-	const ut_allocator<T>&	rhs)
-{
-	return(true);
-}
+operator==(const ut_allocator<T>&, const ut_allocator<T>&) { return(true); }
 
 /** Compare two allocators of the same type. */
 template <typename T>
@@ -843,6 +924,10 @@ ut_delete_array(
 	ut_allocator<byte>(key).allocate( \
 		n_bytes, NULL, __FILE__, false, false))
 
+#define ut_malloc_dontdump(n_bytes) static_cast<void*>( \
+	ut_allocator<byte>(PSI_NOT_INSTRUMENTED).allocate_large( \
+		n_bytes, true))
+
 #define ut_zalloc(n_bytes, key)		static_cast<void*>( \
 	ut_allocator<byte>(key).allocate( \
 		n_bytes, NULL, __FILE__, true, false))
@@ -866,6 +951,10 @@ ut_delete_array(
 #define ut_free(ptr)	ut_allocator<byte>(PSI_NOT_INSTRUMENTED).deallocate( \
 	reinterpret_cast<byte*>(ptr))
 
+#define ut_free_dodump(ptr, size) static_cast<void*>( \
+	ut_allocator<byte>(PSI_NOT_INSTRUMENTED).deallocate_large( \
+		ptr, NULL, size, true))
+
 #else /* UNIV_PFS_MEMORY */
 
 /* Fallbacks when memory tracing is disabled at compile time. */
@@ -888,6 +977,14 @@ ut_delete_array(
 
 #define ut_malloc_nokey(n_bytes)	::malloc(n_bytes)
 
+static inline void *ut_malloc_dontdump(size_t n_bytes)
+{
+	void *ptr = os_mem_alloc_large(&n_bytes);
+
+	ut_allocate_trace_dontdump(ptr, n_bytes, true, NULL, NULL);
+	return ptr;
+}
+
 #define ut_zalloc_nokey(n_bytes)	::calloc(1, n_bytes)
 
 #define ut_zalloc_nokey_nofatal(n_bytes)	::calloc(1, n_bytes)
@@ -895,6 +992,12 @@ ut_delete_array(
 #define ut_realloc(ptr, n_bytes)	::realloc(ptr, n_bytes)
 
 #define ut_free(ptr)			::free(ptr)
+
+static inline void ut_free_dodump(void *ptr, size_t size)
+{
+	ut_dodump(ptr, size);
+	os_mem_free_large(ptr, size);
+}
 
 #endif /* UNIV_PFS_MEMORY */
 

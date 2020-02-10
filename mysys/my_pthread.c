@@ -11,7 +11,7 @@
 
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
-   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA */
+   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1335  USA */
 
 /* Functions to get threads more portable */
 
@@ -21,6 +21,7 @@
 #include <signal.h>
 #include <m_string.h>
 #include <thr_alarm.h>
+#include <my_pthread.h>
 
 #if (defined(__BSD__) || defined(_BSDI_VERSION))
 #define SCHED_POLICY SCHED_RR

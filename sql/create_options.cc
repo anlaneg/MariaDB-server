@@ -1,4 +1,4 @@
-/* Copyright (C) 2010, 2017, MariaDB Corporation Ab
+/* Copyright (C) 2010, 2019, MariaDB Corporation.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -11,7 +11,7 @@
 
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
-   Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02111-1301 USA */
+   Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1335 USA */
 
 /**
   @file
@@ -132,7 +132,8 @@ static bool set_one_value(ha_create_table_option *opt,
   switch (opt->type)
   {
   case HA_OPTION_TYPE_SYSVAR:
-    DBUG_ASSERT(0); // HA_OPTION_TYPE_SYSVAR's are replaced in resolve_sysvars()
+    // HA_OPTION_TYPE_SYSVAR's are replaced in resolve_sysvars()
+    break; // to DBUG_ASSERT(0)
   case HA_OPTION_TYPE_ULL:
     {
       ulonglong *val= (ulonglong*)value_ptr(base, opt);
@@ -545,7 +546,7 @@ uint engine_option_value::frm_length()
 
     if value.str is NULL, this option is not written to frm (=DEFAULT)
   */
-  return value.str ? 1 + name.length + 2 + value.length : 0;
+  return value.str ? (uint)(1 + name.length + 2 + value.length) : 0;
 }
 
 
@@ -613,7 +614,8 @@ uchar *engine_option_value::frm_image(uchar *buff)
 {
   if (value.str)
   {
-    *buff++= name.length;
+    DBUG_ASSERT(name.length <= 0xff);
+    *buff++= (uchar)name.length;
     memcpy(buff, name.str, name.length);
     buff+= name.length;
     int2store(buff, value.length | (quoted_value ? FRM_QUOTED_VALUE : 0));
@@ -729,7 +731,7 @@ uchar *engine_option_value::frm_read(const uchar *buff, const uchar *buff_end,
   @retval FALSE OK
 */
 
-bool engine_table_options_frm_read(const uchar *buff, uint length,
+bool engine_table_options_frm_read(const uchar *buff, size_t length,
                                    TABLE_SHARE *share)
 {
   const uchar *buff_end= buff + length;

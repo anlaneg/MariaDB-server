@@ -13,7 +13,7 @@
 
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
-   Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA */
+   Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1335  USA */
 
 #include <my_global.h>
 #include <my_default.h>
@@ -826,7 +826,7 @@ static int setval(const struct my_option *opts, void *value, char *argument,
         *((ulonglong*)value)=
               find_set_from_flags(opts->typelib, opts->typelib->count, 
                                   *(ulonglong *)value, opts->def_value,
-                                  argument, strlen(argument),
+                                  argument, (uint)strlen(argument),
                                   &error, &error_len);
         if (error)
         {
@@ -1621,7 +1621,7 @@ void my_print_variables(const struct my_option *options)
 
   for (optp= options; optp->name; optp++)
   {
-    length= strlen(optp->name)+1;
+    length= (uint)strlen(optp->name)+1;
     if (length > name_space)
       name_space= length;
   }

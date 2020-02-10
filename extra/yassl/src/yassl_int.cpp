@@ -13,7 +13,7 @@
    You should have received a copy of the GNU General Public License
    along with this program; see the file COPYING. If not, write to the
    Free Software Foundation, Inc., 51 Franklin St, Fifth Floor, Boston,
-   MA  02110-1301  USA.
+   MA  02110-1335  USA.
 */
 
 
@@ -920,10 +920,6 @@ static bool setPrefix(opaque* sha_input, int i)
     }
     return true;
 }
-
-
-const char handshake_order[] = "Out of order HandShake Message!";
-
 
 } // namespcae for locals
 

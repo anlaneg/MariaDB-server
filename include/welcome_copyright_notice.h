@@ -12,12 +12,12 @@
 
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
-   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA */
+   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1335  USA */
 
 #ifndef _welcome_copyright_notice_h_
 #define _welcome_copyright_notice_h_
 
-#define COPYRIGHT_NOTICE_CURRENT_YEAR "2017"
+#define COPYRIGHT_NOTICE_CURRENT_YEAR "2018"
 
 /*
   This define specifies copyright notice which is displayed by every MySQL

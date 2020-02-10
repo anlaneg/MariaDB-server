@@ -11,7 +11,7 @@
 
   You should have received a copy of the GNU General Public License
   along with this program; if not, write to the Free Software Foundation,
-  51 Franklin Street, Suite 500, Boston, MA 02110-1335 USA */
+  51 Franklin Street, Fifth Floor, Boston, MA 02110-1335 USA */
 
 #ifndef SQL_DIGEST_H
 #define SQL_DIGEST_H
@@ -54,10 +54,10 @@ struct sql_digest_storage
     reset(NULL, 0);
   }
 
-  inline void reset(unsigned char *token_array, uint length)
+  inline void reset(unsigned char *token_array, size_t length)
   {
     m_token_array= token_array;
-    m_token_array_length= length;
+    m_token_array_length= (uint)length;
     reset();
   }
 

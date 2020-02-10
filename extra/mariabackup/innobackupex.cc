@@ -16,7 +16,7 @@ GNU General Public License for more details.
 
 You should have received a copy of the GNU General Public License
 along with this program; if not, write to the Free Software
-Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
+Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1335  USA
 
 *******************************************************
 
@@ -34,8 +34,8 @@ ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
 FOR A PARTICULAR PURPOSE. See the GNU General Public License for more details.
 
 You should have received a copy of the GNU General Public License along with
-this program; if not, write to the Free Software Foundation, Inc., 59 Temple
-Place, Suite 330, Boston, MA 02111-1307 USA
+this program; if not, write to the Free Software Foundation, Inc., 51 Franklin
+Street, Fifth Floor, Boston, MA 02110-1335 USA
 
 *******************************************************/
 
@@ -241,7 +241,7 @@ static struct my_option ibx_long_options[] =
 	{"galera-info", OPT_GALERA_INFO, "This options creates the "
 	 "xtrabackup_galera_info file which contains the local node state at "
 	 "the time of the backup. Option should be used when performing the "
-	 "backup of Percona-XtraDB-Cluster. Has no effect when backup locks "
+	 "backup of MariaDB Galera Cluster. Has no effect when backup locks "
 	 "are used to create the backup.",
 	 (uchar *) &opt_ibx_galera_info, (uchar *) &opt_ibx_galera_info, 0,
 	 GET_BOOL, NO_ARG, 0, 0, 0, 0, 0, 0},
@@ -586,8 +586,8 @@ static struct my_option ibx_long_options[] =
 	{"stream", OPT_STREAM, "This option specifies the format in which to "
 	 "do the streamed backup.  The option accepts a string argument. The "
 	 "backup will be done to STDOUT in the specified format. Currently, "
-	 "the only supported formats are tar and xbstream. This option is "
-	 "passed directly to xtrabackup's --stream option.",
+	 "the only supported formats are tar and mbstream/xbstream. This "
+	 "option is passed directly to xtrabackup's --stream option.",
 	 (uchar*) &ibx_xtrabackup_stream_str,
 	 (uchar*) &ibx_xtrabackup_stream_str, 0, GET_STR,
 	 REQUIRED_ARG, 0, 0, 0, 0, 0, 0},
@@ -655,7 +655,7 @@ innobackupex [--compress] [--compress-threads=NUMBER-OF-THREADS] [--compress-chu
              [--include=REGEXP] [--user=NAME]\n\
              [--password=WORD] [--port=PORT] [--socket=SOCKET]\n\
              [--no-timestamp] [--ibbackup=IBBACKUP-BINARY]\n\
-             [--slave-info] [--galera-info] [--stream=tar|xbstream]\n\
+             [--slave-info] [--galera-info] [--stream=tar|mbstream|xbstream]\n\
              [--defaults-file=MY.CNF] [--defaults-group=GROUP-NAME]\n\
              [--databases=LIST] [--no-lock] \n\
              [--tmpdir=DIRECTORY] [--tables-file=FILE]\n\
@@ -716,7 +716,7 @@ The --decompress command will decompress a backup made\n\
 with the --compress option. The\n\
 --parallel option will allow multiple files to be decompressed\n\
 simultaneously. In order to decompress, the qpress utility MUST be installed\n\
-and accessable within the path. This process will remove the original\n\
+and accessible within the path. This process will remove the original\n\
 compressed files and leave the results in the same location.\n\
 \n\
 On success the exit code innobackupex is 0. A non-zero exit code \n\
@@ -738,7 +738,7 @@ ibx_get_one_option(int optid,
 		exit(0);
 		break;
 	case 'v':
-		msg("innobackupex version %s %s (%s)\n",
+		printf("innobackupex version %s %s (%s)",
 			MYSQL_SERVER_VERSION,
 			SYSTEM_TYPE, MACHINE_TYPE);
 		exit(0);
@@ -751,7 +751,8 @@ ibx_get_one_option(int optid,
 		}
 		break;
 	case OPT_STREAM:
-    if (!strcasecmp(argument, "xbstream"))
+		if (!strcasecmp(argument, "mbstream") ||
+		    !strcasecmp(argument, "xbstream"))
 			xtrabackup_stream_fmt = XB_STREAM_FMT_XBSTREAM;
 		else {
 			ibx_msg("Invalid --stream argument: %s\n", argument);

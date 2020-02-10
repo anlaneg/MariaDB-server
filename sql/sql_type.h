@@ -14,7 +14,7 @@
 
  You should have received a copy of the GNU General Public License
  along with this program; if not, write to the Free Software
- Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA */
+ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1335  USA */
 
 #ifdef USE_PRAGMA_INTERFACE
 #pragma interface			/* gcc class implementation */
@@ -24,7 +24,8 @@
 #include "mysqld.h"
 #include "sql_array.h"
 #include "sql_const.h"
-#include "my_time.h"
+#include "sql_time.h"
+#include "sql_type_real.h"
 
 class Field;
 class Column_definition;
@@ -50,12 +51,12 @@ class Item_func_neg;
 class Item_func_signed;
 class Item_func_unsigned;
 class Item_double_typecast;
+class Item_float_typecast;
 class Item_decimal_typecast;
 class Item_char_typecast;
 class Item_time_typecast;
 class Item_date_typecast;
 class Item_datetime_typecast;
-class Item_longlong_typecast;
 class Item_func_plus;
 class Item_func_minus;
 class Item_func_mul;
@@ -73,6 +74,367 @@ class handler;
 struct Schema_specification_st;
 struct TABLE;
 struct SORT_FIELD_ATTR;
+class Vers_history_point;
+
+
+/**
+  Class Time is designed to store valid TIME values.
+
+  1. Valid value:
+    a. MYSQL_TIMESTAMP_TIME - a valid TIME within the supported TIME range
+    b. MYSQL_TIMESTAMP_NONE - an undefined value
+
+  2. Invalid value (internally only):
+    a. MYSQL_TIMESTAMP_TIME outside of the supported TIME range
+    a. MYSQL_TIMESTAMP_{DATE|DATETIME|ERROR}
+
+  Temporarily Time is allowed to have an invalid value, but only internally,
+  during initialization time. All constructors and modification methods must
+  leave the Time value as described above (see "Valid values").
+
+  Time derives from MYSQL_TIME privately to make sure it is accessed
+  externally only in the valid state.
+*/
+class Time: private MYSQL_TIME
+{
+public:
+  enum datetime_to_time_mode_t
+  {
+    DATETIME_TO_TIME_YYYYMMDD_000000DD_MIX_TO_HOURS,
+    DATETIME_TO_TIME_YYYYMMDD_TRUNCATE
+  };
+  class Options
+  {
+    sql_mode_t              m_get_date_flags;
+    datetime_to_time_mode_t m_datetime_to_time_mode;
+  public:
+    Options()
+     :m_get_date_flags(flags_for_get_date()),
+      m_datetime_to_time_mode(DATETIME_TO_TIME_YYYYMMDD_000000DD_MIX_TO_HOURS)
+    { }
+    Options(sql_mode_t flags)
+     :m_get_date_flags(flags),
+      m_datetime_to_time_mode(DATETIME_TO_TIME_YYYYMMDD_000000DD_MIX_TO_HOURS)
+    { }
+    Options(sql_mode_t flags, datetime_to_time_mode_t dtmode)
+     :m_get_date_flags(flags),
+      m_datetime_to_time_mode(dtmode)
+    { }
+    sql_mode_t get_date_flags() const
+    { return m_get_date_flags; }
+    datetime_to_time_mode_t datetime_to_time_mode() const
+    { return m_datetime_to_time_mode; }
+  };
+  /*
+    CAST(AS TIME) historically does not mix days to hours.
+    This is different comparing to how implicit conversion
+    in Field::store_time_dec() works (e.g. on INSERT).
+  */
+  class Options_for_cast: public Options
+  {
+  public:
+    Options_for_cast()
+     :Options(flags_for_get_date(), DATETIME_TO_TIME_YYYYMMDD_TRUNCATE)
+    { }
+  };
+private:
+  bool is_valid_value_slow() const
+  {
+    return time_type == MYSQL_TIMESTAMP_NONE || is_valid_time_slow();
+  }
+  bool is_valid_time_slow() const
+  {
+    return time_type == MYSQL_TIMESTAMP_TIME &&
+           year == 0 && month == 0 && day == 0 &&
+           minute <= TIME_MAX_MINUTE &&
+           second <= TIME_MAX_SECOND &&
+           second_part <= TIME_MAX_SECOND_PART;
+  }
+
+  /*
+    Convert a valid DATE or DATETIME to TIME.
+    Before this call, "this" must be a valid DATE or DATETIME value,
+    e.g. returned from Item::get_date().
+    After this call, "this" is a valid TIME value.
+  */
+  void valid_datetime_to_valid_time(const Options opt)
+  {
+    DBUG_ASSERT(time_type == MYSQL_TIMESTAMP_DATE ||
+                time_type == MYSQL_TIMESTAMP_DATETIME);
+    /*
+      Make sure that day and hour are valid, so the result hour value
+      after mixing days to hours does not go out of the valid TIME range.
+    */
+    DBUG_ASSERT(day < 32);
+    DBUG_ASSERT(hour < 24);
+    if (year == 0 && month == 0 &&
+        opt.datetime_to_time_mode() ==
+        DATETIME_TO_TIME_YYYYMMDD_000000DD_MIX_TO_HOURS)
+    {
+      /*
+        The maximum hour value after mixing days will be 31*24+23=767,
+        which is within the supported TIME range.
+        Thus no adjust_time_range_or_invalidate() is needed here.
+      */
+      hour+= day * 24;
+    }
+    year= month= day= 0;
+    time_type= MYSQL_TIMESTAMP_TIME;
+    DBUG_ASSERT(is_valid_time_slow());
+  }
+  /**
+    Convert valid DATE/DATETIME to valid TIME if needed.
+    This method is called after Item::get_date(),
+    which can return only valid TIME/DATE/DATETIME values.
+    Before this call, "this" is:
+    - either a valid TIME/DATE/DATETIME value
+      (within the supported range for the corresponding type),
+    - or MYSQL_TIMESTAMP_NONE
+    After this call, "this" is:
+    - either a valid TIME (within the supported TIME range),
+    - or MYSQL_TIMESTAMP_NONE
+  */
+  void valid_MYSQL_TIME_to_valid_value(const Options opt)
+  {
+    switch (time_type) {
+    case MYSQL_TIMESTAMP_DATE:
+    case MYSQL_TIMESTAMP_DATETIME:
+      valid_datetime_to_valid_time(opt);
+      break;
+    case MYSQL_TIMESTAMP_NONE:
+      break;
+    case MYSQL_TIMESTAMP_ERROR:
+      set_zero_time(this, MYSQL_TIMESTAMP_TIME);
+      break;
+    case MYSQL_TIMESTAMP_TIME:
+      DBUG_ASSERT(is_valid_time_slow());
+      break;
+    }
+  }
+  void make_from_item(class Item *item, const Options opt);
+public:
+  Time() { time_type= MYSQL_TIMESTAMP_NONE; }
+  Time(Item *item) { make_from_item(item, Options()); }
+  Time(Item *item, const Options opt) { make_from_item(item, opt); }
+  static sql_mode_t flags_for_get_date()
+  { return TIME_TIME_ONLY | TIME_INVALID_DATES; }
+  static sql_mode_t comparison_flags_for_get_date()
+  { return TIME_TIME_ONLY | TIME_INVALID_DATES | TIME_FUZZY_DATES; }
+  bool is_valid_time() const
+  {
+    DBUG_ASSERT(is_valid_value_slow());
+    return time_type == MYSQL_TIMESTAMP_TIME;
+  }
+  const MYSQL_TIME *get_mysql_time() const
+  {
+    DBUG_ASSERT(is_valid_time_slow());
+    return this;
+  }
+  bool copy_to_mysql_time(MYSQL_TIME *ltime) const
+  {
+    if (time_type == MYSQL_TIMESTAMP_NONE)
+    {
+      ltime->time_type= MYSQL_TIMESTAMP_NONE;
+      return true;
+    }
+    DBUG_ASSERT(is_valid_time_slow());
+    *ltime= *this;
+    return false;
+  }
+  int cmp(const Time *other) const
+  {
+    DBUG_ASSERT(is_valid_time_slow());
+    DBUG_ASSERT(other->is_valid_time_slow());
+    longlong p0= pack_time(this);
+    longlong p1= pack_time(other);
+    if (p0 < p1)
+      return -1;
+    if (p0 > p1)
+      return 1;
+    return 0;
+  }
+  longlong to_seconds_abs() const
+  {
+    DBUG_ASSERT(is_valid_time_slow());
+    return hour * 3600L + minute * 60 + second;
+  }
+  longlong to_seconds() const
+  {
+    return neg ? -to_seconds_abs() : to_seconds_abs();
+  }
+};
+
+
+/**
+  Class Temporal_with_date is designed to store valid DATE or DATETIME values.
+  See also class Time.
+
+  1. Valid value:
+    a. MYSQL_TIMESTAMP_{DATE|DATETIME} - a valid DATE or DATETIME value
+    b. MYSQL_TIMESTAMP_NONE            - an undefined value
+
+  2. Invalid value (internally only):
+    a. MYSQL_TIMESTAMP_{DATE|DATETIME} - a DATE or DATETIME value, but with
+                                         MYSQL_TIME members outside of the
+                                         valid/supported range
+    b. MYSQL_TIMESTAMP_TIME            - a TIME value
+    c. MYSQL_TIMESTAMP_ERROR           - error
+
+  Temporarily is allowed to have an invalid value, but only internally,
+  during initialization time. All constructors and modification methods must
+  leave the value as described above (see "Valid value").
+
+  Derives from MYSQL_TIME using "protected" inheritance to make sure
+  it is accessed externally only in the valid state.
+*/
+
+class Temporal_with_date: protected MYSQL_TIME
+{
+protected:
+  void make_from_item(THD *thd, Item *item, sql_mode_t flags);
+
+  ulong daynr() const
+  {
+    return (ulong) ::calc_daynr((uint) year, (uint) month, (uint) day);
+  }
+  int weekday(bool sunday_first_day_of_week) const
+  {
+    return ::calc_weekday(daynr(), sunday_first_day_of_week);
+  }
+  Temporal_with_date(THD *thd, Item *item, sql_mode_t flags)
+  {
+    make_from_item(thd, item, flags);
+  }
+};
+
+
+/**
+  Class Date is designed to store valid DATE values.
+  All constructors and modification methods leave instances
+  of this class in one of the following valid states:
+    a. MYSQL_TIMESTAMP_DATE - a DATE with all MYSQL_TIME members properly set
+    b. MYSQL_TIMESTAMP_NONE - an undefined value.
+  Other MYSQL_TIMESTAMP_XXX are not possible.
+  MYSQL_TIMESTAMP_DATE with MYSQL_TIME members improperly set is not possible.
+*/
+class Date: public Temporal_with_date
+{
+  bool is_valid_value_slow() const
+  {
+    return time_type == MYSQL_TIMESTAMP_NONE || is_valid_date_slow();
+  }
+  bool is_valid_date_slow() const
+  {
+    DBUG_ASSERT(time_type == MYSQL_TIMESTAMP_DATE);
+    return !check_datetime_range(this);
+  }
+public:
+  Date(THD *thd, Item *item, sql_mode_t flags)
+   :Temporal_with_date(thd, item, flags)
+  {
+    if (time_type == MYSQL_TIMESTAMP_DATETIME)
+      datetime_to_date(this);
+    DBUG_ASSERT(is_valid_value_slow());
+  }
+  Date(const Temporal_with_date *d)
+   :Temporal_with_date(*d)
+  {
+    datetime_to_date(this);
+    DBUG_ASSERT(is_valid_date_slow());
+  }
+  bool is_valid_date() const
+  {
+    DBUG_ASSERT(is_valid_value_slow());
+    return time_type == MYSQL_TIMESTAMP_DATE;
+  }
+  const MYSQL_TIME *get_mysql_time() const
+  {
+    DBUG_ASSERT(is_valid_date_slow());
+    return this;
+  }
+};
+
+
+/**
+  Class Datetime is designed to store valid DATETIME values.
+  All constructors and modification methods leave instances
+  of this class in one of the following valid states:
+    a. MYSQL_TIMESTAMP_DATETIME - a DATETIME with all members properly set
+    b. MYSQL_TIMESTAMP_NONE     - an undefined value.
+  Other MYSQL_TIMESTAMP_XXX are not possible.
+  MYSQL_TIMESTAMP_DATETIME with MYSQL_TIME members
+  improperly set is not possible.
+*/
+class Datetime: public Temporal_with_date
+{
+  bool is_valid_value_slow() const
+  {
+    return time_type == MYSQL_TIMESTAMP_NONE || is_valid_datetime_slow();
+  }
+  bool is_valid_datetime_slow() const
+  {
+    DBUG_ASSERT(time_type == MYSQL_TIMESTAMP_DATETIME);
+    return !check_datetime_range(this);
+  }
+public:
+  Datetime(THD *thd, Item *item, sql_mode_t flags)
+   :Temporal_with_date(thd, item, flags)
+  {
+    if (time_type == MYSQL_TIMESTAMP_DATE)
+      date_to_datetime(this);
+    DBUG_ASSERT(is_valid_value_slow());
+  }
+  bool is_valid_datetime() const
+  {
+    /*
+      Here we quickly check for the type only.
+      If the type is valid, the rest of value must also be valid.
+    */
+    DBUG_ASSERT(is_valid_value_slow());
+    return time_type == MYSQL_TIMESTAMP_DATETIME;
+  }
+  bool hhmmssff_is_zero() const
+  {
+    DBUG_ASSERT(is_valid_datetime_slow());
+    return hour == 0 && minute == 0 && second == 0 && second_part == 0;
+  }
+  int weekday(bool sunday_first_day_of_week) const
+  {
+    DBUG_ASSERT(is_valid_datetime_slow());
+    return Temporal_with_date::weekday(sunday_first_day_of_week);
+  }
+  const MYSQL_TIME *get_mysql_time() const
+  {
+    DBUG_ASSERT(is_valid_datetime_slow());
+    return this;
+  }
+  bool copy_to_mysql_time(MYSQL_TIME *ltime) const
+  {
+    if (time_type == MYSQL_TIMESTAMP_NONE)
+    {
+      ltime->time_type= MYSQL_TIMESTAMP_NONE;
+      return true;
+    }
+    DBUG_ASSERT(is_valid_datetime_slow());
+    *ltime= *this;
+    return false;
+  }
+  /**
+    Copy without data loss, with an optional DATETIME to DATE conversion.
+    If the value of the "type" argument is MYSQL_TIMESTAMP_DATE,
+    then "this" must be a datetime with a zero hhmmssff part.
+  */
+  bool copy_to_mysql_time(MYSQL_TIME *ltime, timestamp_type type)
+  {
+    DBUG_ASSERT(type == MYSQL_TIMESTAMP_DATE ||
+                type == MYSQL_TIMESTAMP_DATETIME);
+    if (copy_to_mysql_time(ltime))
+      return true;
+    DBUG_ASSERT(type != MYSQL_TIMESTAMP_DATE || hhmmssff_is_zero());
+    ltime->time_type= type;
+    return false;
+  }
+};
 
 /*
   Flags for collation aggregation modes, used in TDCollation::agg():
@@ -272,7 +634,6 @@ public:
   {
     *this= other;
   }
-  void set(const Field *field);
   uint32 max_char_length() const
   { return max_length / collation.collation->mbmaxlen; }
   void fix_length_and_charset(uint32 max_char_length_arg, CHARSET_INFO *cs)
@@ -563,6 +924,74 @@ public:
     null_ptr(maybe_null ? (uchar*) "" : 0),
     null_bit(0)
   { }
+};
+
+
+class Information_schema_numeric_attributes
+{
+  enum enum_attr
+  {
+    ATTR_NONE= 0,
+    ATTR_PRECISION= 1,
+    ATTR_SCALE= 2,
+    ATTR_PRECISION_AND_SCALE= (ATTR_PRECISION|ATTR_SCALE)
+  };
+  uint m_precision;
+  uint m_scale;
+  enum_attr m_available_attributes;
+public:
+  Information_schema_numeric_attributes()
+   :m_precision(0), m_scale(0),
+    m_available_attributes(ATTR_NONE)
+  { }
+  Information_schema_numeric_attributes(uint precision)
+   :m_precision(precision), m_scale(0),
+    m_available_attributes(ATTR_PRECISION)
+  { }
+  Information_schema_numeric_attributes(uint precision, uint scale)
+   :m_precision(precision), m_scale(scale),
+    m_available_attributes(ATTR_PRECISION_AND_SCALE)
+  { }
+  bool has_precision() const { return m_available_attributes & ATTR_PRECISION; }
+  bool has_scale() const { return m_available_attributes & ATTR_SCALE; }
+  uint precision() const
+  {
+    DBUG_ASSERT(has_precision());
+    return (uint) m_precision;
+  }
+  uint scale() const
+  {
+    DBUG_ASSERT(has_scale());
+    return (uint) m_scale;
+  }
+};
+
+
+class Information_schema_character_attributes
+{
+  uint32 m_octet_length;
+  uint32 m_char_length;
+  bool m_is_set;
+public:
+  Information_schema_character_attributes()
+   :m_octet_length(0), m_char_length(0), m_is_set(false)
+  { }
+  Information_schema_character_attributes(uint32 octet_length,
+                                          uint32 char_length)
+   :m_octet_length(octet_length), m_char_length(char_length), m_is_set(true)
+  { }
+  bool has_octet_length() const { return m_is_set; }
+  bool has_char_length() const { return m_is_set; }
+  uint32 octet_length() const
+  {
+    DBUG_ASSERT(has_octet_length());
+    return m_octet_length;
+  }
+  uint char_length() const
+  {
+    DBUG_ASSERT(has_char_length());
+    return m_char_length;
+  }
 };
 
 
@@ -906,6 +1335,8 @@ public:
   bool Item_sum_variance_fix_length_and_dec(Item_sum_variance *) const= 0;
 
   virtual bool Item_val_bool(Item *item) const= 0;
+  virtual bool Item_get_date(Item *item, MYSQL_TIME *ltime,
+                             ulonglong fuzzydate) const= 0;
   virtual longlong Item_val_int_signed_typecast(Item *item) const= 0;
   virtual longlong Item_val_int_unsigned_typecast(Item *item) const= 0;
 
@@ -975,6 +1406,8 @@ public:
   virtual bool
   Item_double_typecast_fix_length_and_dec(Item_double_typecast *item) const;
   virtual bool
+  Item_float_typecast_fix_length_and_dec(Item_float_typecast *item) const;
+  virtual bool
   Item_decimal_typecast_fix_length_and_dec(Item_decimal_typecast *item) const;
   virtual bool
   Item_char_typecast_fix_length_and_dec(Item_char_typecast *item) const;
@@ -984,8 +1417,6 @@ public:
   Item_date_typecast_fix_length_and_dec(Item_date_typecast *item) const;
   virtual bool
   Item_datetime_typecast_fix_length_and_dec(Item_datetime_typecast *item) const;
-  virtual bool
-  Item_longlong_typecast_fix_length_and_dec(Item_longlong_typecast *item) const;
 
   virtual bool
   Item_func_plus_fix_length_and_dec(Item_func_plus *func) const= 0;
@@ -997,6 +1428,9 @@ public:
   Item_func_div_fix_length_and_dec(Item_func_div *func) const= 0;
   virtual bool
   Item_func_mod_fix_length_and_dec(Item_func_mod *func) const= 0;
+
+  virtual bool
+  Vers_history_point_resolve_unit(THD *thd, Vers_history_point *point) const;
 };
 
 
@@ -1168,6 +1602,11 @@ public:
     DBUG_ASSERT(0);
     return false;
   }
+  bool Item_get_date(Item *item, MYSQL_TIME *ltime, ulonglong fuzzydate) const
+  {
+    DBUG_ASSERT(0);
+    return true;
+  }
   longlong Item_val_int_signed_typecast(Item *item) const
   {
     DBUG_ASSERT(0);
@@ -1273,6 +1712,11 @@ public:
     DBUG_ASSERT(0);
     return true;
   }
+  bool Item_float_typecast_fix_length_and_dec(Item_float_typecast *) const
+  {
+    DBUG_ASSERT(0);
+    return true;
+  }
   bool Item_decimal_typecast_fix_length_and_dec(Item_decimal_typecast *) const
   {
     DBUG_ASSERT(0);
@@ -1312,10 +1756,6 @@ public:
 */
 class Type_handler_numeric: public Type_handler
 {
-protected:
-  bool Item_sum_hybrid_fix_length_and_dec_numeric(Item_sum_hybrid *func,
-                                                  const Type_handler *handler)
-                                                  const;
 public:
   String *print_item_value(THD *thd, Item *item, String *str) const;
   double Item_func_min_max_val_real(Item_func_min_max *) const;
@@ -1358,7 +1798,6 @@ public:
                                  const st_value *value) const;
   int Item_save_in_field(Item *item, Field *field, bool no_conversions) const;
   Item *make_const_item_for_comparison(THD *, Item *src, const Item *cmp) const;
-  Item_cache *Item_get_cache(THD *thd, const Item *item) const;
   bool set_comparator_func(Arg_comparator *cmp) const;
   bool Item_hybrid_func_fix_attributes(THD *thd,
                                        const char *name,
@@ -1374,11 +1813,10 @@ public:
   bool Item_func_signed_fix_length_and_dec(Item_func_signed *item) const;
   bool Item_func_unsigned_fix_length_and_dec(Item_func_unsigned *item) const;
   bool Item_val_bool(Item *item) const;
+  bool Item_get_date(Item *item, MYSQL_TIME *ltime, ulonglong fuzzydate) const;
   longlong Item_val_int_signed_typecast(Item *item) const;
   longlong Item_val_int_unsigned_typecast(Item *item) const;
   String *Item_func_hex_val_str_ascii(Item_func_hex *item, String *str) const;
-  String *Item_func_hybrid_field_type_val_str(Item_func_hybrid_field_type *,
-                                              String *) const;
   double Item_func_hybrid_field_type_val_real(Item_func_hybrid_field_type *)
                                               const;
   longlong Item_func_hybrid_field_type_val_int(Item_func_hybrid_field_type *)
@@ -1389,7 +1827,6 @@ public:
   bool Item_func_hybrid_field_type_get_date(Item_func_hybrid_field_type *,
                                             MYSQL_TIME *,
                                             ulonglong fuzzydate) const;
-  String *Item_func_min_max_val_str(Item_func_min_max *, String *) const;
   longlong Item_func_between_val_int(Item_func_between *func) const;
   cmp_item *make_cmp_item(THD *thd, CHARSET_INFO *cs) const;
   in_vector *make_in_vector(THD *, const Item_func_in *, uint nargs) const;
@@ -1452,6 +1889,7 @@ public:
   bool Item_sum_avg_fix_length_and_dec(Item_sum_avg *) const;
   bool Item_sum_variance_fix_length_and_dec(Item_sum_variance *) const;
   bool Item_val_bool(Item *item) const;
+  bool Item_get_date(Item *item, MYSQL_TIME *ltime, ulonglong fuzzydate) const;
   longlong Item_val_int_signed_typecast(Item *item) const;
   longlong Item_val_int_unsigned_typecast(Item *item) const;
   String *Item_func_hex_val_str_ascii(Item_func_hex *item, String *str) const;
@@ -1483,6 +1921,131 @@ public:
   bool Item_func_div_fix_length_and_dec(Item_func_div *) const;
   bool Item_func_mod_fix_length_and_dec(Item_func_mod *) const;
 };
+
+
+class Type_limits_int
+{
+private:
+  uint32 m_precision;
+  uint32 m_char_length;
+public:
+  Type_limits_int(uint32 prec, uint32 nchars)
+   :m_precision(prec), m_char_length(nchars)
+  { }
+  uint32 precision() const { return m_precision; }
+  uint32 char_length() const { return m_char_length; }
+};
+
+
+/*
+  UNDIGNED TINYINT:    0..255   digits=3 nchars=3
+  SIGNED TINYINT  : -128..127   digits=3 nchars=4
+*/
+class Type_limits_uint8: public Type_limits_int
+{
+public:
+  Type_limits_uint8()
+   :Type_limits_int(MAX_TINYINT_WIDTH, MAX_TINYINT_WIDTH)
+  { }
+};
+
+
+class Type_limits_sint8: public Type_limits_int
+{
+public:
+  Type_limits_sint8()
+   :Type_limits_int(MAX_TINYINT_WIDTH, MAX_TINYINT_WIDTH + 1)
+  { }
+};
+
+
+/*
+  UNDIGNED SMALLINT:       0..65535  digits=5 nchars=5
+  SIGNED SMALLINT:    -32768..32767  digits=5 nchars=6
+*/
+class Type_limits_uint16: public Type_limits_int
+{
+public:
+  Type_limits_uint16()
+   :Type_limits_int(MAX_SMALLINT_WIDTH, MAX_SMALLINT_WIDTH)
+  { }
+};
+
+
+class Type_limits_sint16: public Type_limits_int
+{
+public:
+  Type_limits_sint16()
+   :Type_limits_int(MAX_SMALLINT_WIDTH, MAX_SMALLINT_WIDTH + 1)
+  { }
+};
+
+
+/*
+  MEDIUMINT UNSIGNED         0 .. 16777215  digits=8 char_length=8
+  MEDIUMINT SIGNED:   -8388608 ..  8388607  digits=7 char_length=8
+*/
+class Type_limits_uint24: public Type_limits_int
+{
+public:
+  Type_limits_uint24()
+   :Type_limits_int(MAX_MEDIUMINT_WIDTH, MAX_MEDIUMINT_WIDTH)
+  { }
+};
+
+
+class Type_limits_sint24: public Type_limits_int
+{
+public:
+  Type_limits_sint24()
+   :Type_limits_int(MAX_MEDIUMINT_WIDTH - 1, MAX_MEDIUMINT_WIDTH)
+  { }
+};
+
+
+/*
+  UNSIGNED INT:           0..4294967295  digits=10 nchars=10
+  SIGNED INT:   -2147483648..2147483647  digits=10 nchars=11
+*/
+class Type_limits_uint32: public Type_limits_int
+{
+public:
+  Type_limits_uint32()
+   :Type_limits_int(MAX_INT_WIDTH, MAX_INT_WIDTH)
+  { }
+};
+
+
+
+class Type_limits_sint32: public Type_limits_int
+{
+public:
+  Type_limits_sint32()
+   :Type_limits_int(MAX_INT_WIDTH, MAX_INT_WIDTH + 1)
+  { }
+};
+
+
+/*
+  UNSIGNED BIGINT:                  0..18446744073709551615 digits=20 nchars=20
+  SIGNED BIGINT:  -9223372036854775808..9223372036854775807 digits=19 nchars=20
+*/
+class Type_limits_uint64: public Type_limits_int
+{
+public:
+  Type_limits_uint64(): Type_limits_int(MAX_BIGINT_WIDTH, MAX_BIGINT_WIDTH)
+  { }
+};
+
+
+class Type_limits_sint64: public Type_limits_int
+{
+public:
+  Type_limits_sint64()
+   :Type_limits_int(MAX_BIGINT_WIDTH - 1, MAX_BIGINT_WIDTH)
+  { }
+};
+
 
 
 class Type_handler_int_result: public Type_handler_numeric
@@ -1520,6 +2083,7 @@ public:
   bool Item_sum_avg_fix_length_and_dec(Item_sum_avg *) const;
   bool Item_sum_variance_fix_length_and_dec(Item_sum_variance *) const;
   bool Item_val_bool(Item *item) const;
+  bool Item_get_date(Item *item, MYSQL_TIME *ltime, ulonglong fuzzydate) const;
   longlong Item_val_int_signed_typecast(Item *item) const;
   longlong Item_val_int_unsigned_typecast(Item *item) const;
   String *Item_func_hex_val_str_ascii(Item_func_hex *item, String *str) const;
@@ -1557,6 +2121,10 @@ class Type_handler_general_purpose_int: public Type_handler_int_result
 {
 public:
   bool type_can_have_auto_increment_attribute() const { return true; }
+  virtual const Type_limits_int *
+    type_limits_int_by_unsigned_flag(bool unsigned_flag) const= 0;
+  uint32 max_display_length(const Item *item) const;
+  bool Vers_history_point_resolve_unit(THD *thd, Vers_history_point *p) const;
 };
 
 
@@ -1585,11 +2153,14 @@ public:
                                    Item *source_expr, Item *source_const) const;
   bool subquery_type_allows_materialization(const Item *inner,
                                             const Item *outer) const;
+  bool Item_func_min_max_fix_attributes(THD *thd, Item_func_min_max *func,
+                                        Item **items, uint nitems) const;
   bool Item_sum_hybrid_fix_length_and_dec(Item_sum_hybrid *func) const;
   bool Item_sum_sum_fix_length_and_dec(Item_sum_sum *) const;
   bool Item_sum_avg_fix_length_and_dec(Item_sum_avg *) const;
   bool Item_sum_variance_fix_length_and_dec(Item_sum_variance *) const;
   bool Item_val_bool(Item *item) const;
+  bool Item_get_date(Item *item, MYSQL_TIME *ltime, ulonglong fuzzydate) const;
   longlong Item_val_int_signed_typecast(Item *item) const;
   longlong Item_val_int_unsigned_typecast(Item *item) const;
   String *Item_func_hex_val_str_ascii(Item_func_hex *item, String *str) const;
@@ -1625,6 +2196,7 @@ public:
   bool Item_func_mul_fix_length_and_dec(Item_func_mul *) const;
   bool Item_func_div_fix_length_and_dec(Item_func_div *) const;
   bool Item_func_mod_fix_length_and_dec(Item_func_mod *) const;
+  bool Vers_history_point_resolve_unit(THD *thd, Vers_history_point *p) const;
 };
 
 
@@ -1703,6 +2275,7 @@ public:
   bool Item_func_signed_fix_length_and_dec(Item_func_signed *item) const;
   bool Item_func_unsigned_fix_length_and_dec(Item_func_unsigned *item) const;
   bool Item_val_bool(Item *item) const;
+  bool Item_get_date(Item *item, MYSQL_TIME *ltime, ulonglong fuzzydate) const;
   longlong Item_val_int_signed_typecast(Item *item) const;
   longlong Item_val_int_unsigned_typecast(Item *item) const;
   String *Item_func_hex_val_str_ascii(Item_func_hex *item, String *str) const;
@@ -1748,6 +2321,7 @@ class Type_handler_general_purpose_string: public Type_handler_string_result
 {
 public:
   bool is_general_purpose_string_type() const { return true; }
+  bool Vers_history_point_resolve_unit(THD *thd, Vers_history_point *p) const;
 };
 
 
@@ -1774,11 +2348,16 @@ public:
 class Type_handler_tiny: public Type_handler_general_purpose_int
 {
   static const Name m_name_tiny;
+  static const Type_limits_int m_limits_sint8;
+  static const Type_limits_int m_limits_uint8;
 public:
   virtual ~Type_handler_tiny() {}
   const Name name() const { return m_name_tiny; }
   enum_field_types field_type() const { return MYSQL_TYPE_TINY; }
-  uint32 max_display_length(const Item *item) const { return 4; }
+  const Type_limits_int *type_limits_int_by_unsigned_flag(bool unsigned_fl) const
+  {
+    return unsigned_fl ? &m_limits_uint8 : &m_limits_sint8;
+  }
   uint32 calc_pack_length(uint32 length) const { return 1; }
   bool Item_send(Item *item, Protocol *protocol, st_value *buf) const
   {
@@ -1803,6 +2382,8 @@ public:
 class Type_handler_short: public Type_handler_general_purpose_int
 {
   static const Name m_name_short;
+  static const Type_limits_int m_limits_sint16;
+  static const Type_limits_int m_limits_uint16;
 public:
   virtual ~Type_handler_short() {}
   const Name name() const { return m_name_short; }
@@ -1811,7 +2392,10 @@ public:
   {
     return Item_send_short(item, protocol, buf);
   }
-  uint32 max_display_length(const Item *item) const { return 6; }
+  const Type_limits_int *type_limits_int_by_unsigned_flag(bool unsigned_fl) const
+  {
+    return unsigned_fl ? &m_limits_uint16 : &m_limits_sint16;
+  }
   uint32 calc_pack_length(uint32 length) const { return 2; }
   Field *make_conversion_table_field(TABLE *TABLE, uint metadata,
                                      const Field *target) const;
@@ -1832,13 +2416,15 @@ public:
 class Type_handler_long: public Type_handler_general_purpose_int
 {
   static const Name m_name_int;
+  static const Type_limits_int m_limits_sint32;
+  static const Type_limits_int m_limits_uint32;
 public:
   virtual ~Type_handler_long() {}
   const Name name() const { return m_name_int; }
   enum_field_types field_type() const { return MYSQL_TYPE_LONG; }
-  uint32 max_display_length(const Item *item) const
+  const Type_limits_int *type_limits_int_by_unsigned_flag(bool unsigned_fl) const
   {
-    return MY_INT32_NUM_DECIMAL_DIGITS;
+    return unsigned_fl ? &m_limits_uint32 : &m_limits_sint32;
   }
   uint32 calc_pack_length(uint32 length) const { return 4; }
   bool Item_send(Item *item, Protocol *protocol, st_value *buf) const
@@ -1864,11 +2450,16 @@ public:
 class Type_handler_longlong: public Type_handler_general_purpose_int
 {
   static const Name m_name_longlong;
+  static const Type_limits_int m_limits_sint64;
+  static const Type_limits_int m_limits_uint64;
 public:
   virtual ~Type_handler_longlong() {}
   const Name name() const { return m_name_longlong; }
   enum_field_types field_type() const { return MYSQL_TYPE_LONGLONG; }
-  uint32 max_display_length(const Item *item) const { return 20; }
+  const Type_limits_int *type_limits_int_by_unsigned_flag(bool unsigned_fl) const
+  {
+    return unsigned_fl ? &m_limits_uint64 : &m_limits_sint64;
+  }
   uint32 calc_pack_length(uint32 length) const { return 8; }
   Item *create_typecast_item(THD *thd, Item *item,
                              const Type_cast_attributes &attr) const;
@@ -1908,6 +2499,8 @@ public:
 class Type_handler_int24: public Type_handler_general_purpose_int
 {
   static const Name m_name_mediumint;
+  static const Type_limits_int m_limits_sint24;
+  static const Type_limits_int m_limits_uint24;
 public:
   virtual ~Type_handler_int24() {}
   const Name name() const { return m_name_mediumint; }
@@ -1916,7 +2509,10 @@ public:
   {
     return Item_send_long(item, protocol, buf);
   }
-  uint32 max_display_length(const Item *item) const { return 8; }
+  const Type_limits_int *type_limits_int_by_unsigned_flag(bool unsigned_fl) const
+  {
+    return unsigned_fl ? &m_limits_uint24 : &m_limits_sint24;
+  }
   uint32 calc_pack_length(uint32 length) const { return 3; }
   Field *make_conversion_table_field(TABLE *, uint metadata,
                                      const Field *target) const;
@@ -1956,6 +2552,8 @@ public:
                           const Record_addr &addr,
                           const Type_all_attributes &attr,
                           TABLE *table) const;
+  Item_cache *Item_get_cache(THD *thd, const Item *item) const;
+  bool Item_get_date(Item *item, MYSQL_TIME *ltime, ulonglong fuzzydate) const;
 };
 
 
@@ -1996,6 +2594,7 @@ public:
                           const Record_addr &addr,
                           const Type_all_attributes &attr,
                           TABLE *table) const;
+  bool Vers_history_point_resolve_unit(THD *thd, Vers_history_point *p) const;
 };
 
 
@@ -2009,6 +2608,8 @@ public:
   bool type_can_have_auto_increment_attribute() const { return true; }
   uint32 max_display_length(const Item *item) const { return 25; }
   uint32 calc_pack_length(uint32 length) const { return sizeof(float); }
+  Item *create_typecast_item(THD *thd, Item *item,
+                             const Type_cast_attributes &attr) const;
   bool Item_send(Item *item, Protocol *protocol, st_value *buf) const
   {
     return Item_send_float(item, protocol, buf);
@@ -2027,6 +2628,11 @@ public:
                           TABLE *table) const;
   void Item_param_set_param_func(Item_param *param,
                                  uchar **pos, ulong len) const;
+
+  Item_cache *Item_get_cache(THD *thd, const Item *item) const;
+  String *Item_func_hybrid_field_type_val_str(Item_func_hybrid_field_type *,
+                                              String *) const;
+  String *Item_func_min_max_val_str(Item_func_min_max *, String *) const;
 };
 
 
@@ -2059,6 +2665,11 @@ public:
                           TABLE *table) const;
   void Item_param_set_param_func(Item_param *param,
                                  uchar **pos, ulong len) const;
+
+  Item_cache *Item_get_cache(THD *thd, const Item *item) const;
+  String *Item_func_hybrid_field_type_val_str(Item_func_hybrid_field_type *,
+                                              String *) const;
+  String *Item_func_min_max_val_str(Item_func_min_max *, String *) const;
 };
 
 
@@ -2099,6 +2710,20 @@ public:
                                        Type_handler_hybrid_field_type *,
                                        Type_all_attributes *atrr,
                                        Item **items, uint nitems) const;
+  String *Item_func_hybrid_field_type_val_str(Item_func_hybrid_field_type *,
+                                              String *) const;
+  double Item_func_hybrid_field_type_val_real(Item_func_hybrid_field_type *)
+                                              const;
+  longlong Item_func_hybrid_field_type_val_int(Item_func_hybrid_field_type *)
+                                               const;
+  my_decimal *Item_func_hybrid_field_type_val_decimal(
+                                              Item_func_hybrid_field_type *,
+                                              my_decimal *) const;
+  bool Item_func_hybrid_field_type_get_date(Item_func_hybrid_field_type *,
+                                            MYSQL_TIME *,
+                                            ulonglong fuzzydate) const;
+  bool Item_func_min_max_get_date(Item_func_min_max*,
+                                  MYSQL_TIME *, ulonglong fuzzydate) const;
   Item *make_const_item_for_comparison(THD *, Item *src, const Item *cmp) const;
   bool set_comparator_func(Arg_comparator *cmp) const;
   cmp_item *make_cmp_item(THD *thd, CHARSET_INFO *cs) const;
@@ -2593,6 +3218,8 @@ class Type_handler_blob_common: public Type_handler_longstr
 {
 public:
   virtual ~Type_handler_blob_common() { }
+  Field *make_conversion_table_field(TABLE *, uint metadata,
+                                     const Field *target) const;
   const Type_handler *type_handler_for_tmp_table(const Item *item) const
   {
     return blob_type_handler(item);
@@ -2617,6 +3244,7 @@ public:
                                        Type_all_attributes *atrr,
                                        Item **items, uint nitems) const;
   void Item_param_setup_conversion(THD *thd, Item_param *) const;
+
 };
 
 
@@ -2628,8 +3256,6 @@ public:
   const Name name() const { return m_name_tinyblob; }
   enum_field_types field_type() const { return MYSQL_TYPE_TINY_BLOB; }
   uint32 calc_pack_length(uint32 length) const;
-  Field *make_conversion_table_field(TABLE *, uint metadata,
-                                     const Field *target) const;
   Field *make_table_field(const LEX_CSTRING *name,
                           const Record_addr &addr,
                           const Type_all_attributes &attr,
@@ -2645,8 +3271,6 @@ public:
   const Name name() const { return m_name_mediumblob; }
   enum_field_types field_type() const { return MYSQL_TYPE_MEDIUM_BLOB; }
   uint32 calc_pack_length(uint32 length) const;
-  Field *make_conversion_table_field(TABLE *, uint metadata,
-                                     const Field *target) const;
   Field *make_table_field(const LEX_CSTRING *name,
                           const Record_addr &addr,
                           const Type_all_attributes &attr,
@@ -2664,8 +3288,6 @@ public:
   uint32 calc_pack_length(uint32 length) const;
   Item *create_typecast_item(THD *thd, Item *item,
                              const Type_cast_attributes &attr) const;
-  Field *make_conversion_table_field(TABLE *, uint metadata,
-                                     const Field *target) const;
   Field *make_table_field(const LEX_CSTRING *name,
                           const Record_addr &addr,
                           const Type_all_attributes &attr,
@@ -2681,8 +3303,6 @@ public:
   const Name name() const { return m_name_blob; }
   enum_field_types field_type() const { return MYSQL_TYPE_BLOB; }
   uint32 calc_pack_length(uint32 length) const;
-  Field *make_conversion_table_field(TABLE *, uint metadata,
-                                     const Field *target) const;
   Field *make_table_field(const LEX_CSTRING *name,
                           const Record_addr &addr,
                           const Type_all_attributes &attr,
@@ -2766,6 +3386,7 @@ public:
   bool Item_func_signed_fix_length_and_dec(Item_func_signed *) const;
   bool Item_func_unsigned_fix_length_and_dec(Item_func_unsigned *) const;
   bool Item_double_typecast_fix_length_and_dec(Item_double_typecast *) const;
+  bool Item_float_typecast_fix_length_and_dec(Item_float_typecast *) const;
   bool Item_decimal_typecast_fix_length_and_dec(Item_decimal_typecast *) const;
   bool Item_char_typecast_fix_length_and_dec(Item_char_typecast *) const;
   bool Item_time_typecast_fix_length_and_dec(Item_time_typecast *) const;
@@ -2801,6 +3422,7 @@ public:
                                          const;
   void Item_param_set_param_func(Item_param *param,
                                  uchar **pos, ulong len) const;
+  bool Vers_history_point_resolve_unit(THD *thd, Vers_history_point *p) const;
 };
 
 
@@ -2858,16 +3480,15 @@ public:
 class Type_handler_hybrid_field_type
 {
   const Type_handler *m_type_handler;
-  bool m_vers_trx_id;
   bool aggregate_for_min_max(const Type_handler *other);
 
 public:
   Type_handler_hybrid_field_type();
   Type_handler_hybrid_field_type(const Type_handler *handler)
-   :m_type_handler(handler), m_vers_trx_id(false)
+   :m_type_handler(handler)
   { }
   Type_handler_hybrid_field_type(const Type_handler_hybrid_field_type *other)
-    :m_type_handler(other->m_type_handler), m_vers_trx_id(other->m_vers_trx_id)
+    :m_type_handler(other->m_type_handler)
   { }
   void swap(Type_handler_hybrid_field_type &other)
   {
@@ -2894,10 +3515,6 @@ public:
   const Type_handler *set_handler_by_result_type(Item_result type)
   {
     return (m_type_handler= Type_handler::get_handler_by_result_type(type));
-  }
-  const Type_handler *set_handler_by_cmp_type(Item_result type)
-  {
-    return (m_type_handler= Type_handler::get_handler_by_cmp_type(type));
   }
   const Type_handler *set_handler_by_result_type(Item_result type,
                                                  uint max_octet_length,

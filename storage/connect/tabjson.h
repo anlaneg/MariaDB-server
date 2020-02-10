@@ -1,11 +1,11 @@
 /*************** tabjson H Declares Source Code File (.H) **************/
 /*  Name: tabjson.h   Version 1.3                                      */
 /*                                                                     */
-/*  (C) Copyright to the author Olivier BERTRAND          2014 - 2017  */
+/*  (C) Copyright to the author Olivier BERTRAND          2014 - 2018  */
 /*                                                                     */
 /*  This file contains the JSON classes declares.                      */
 /***********************************************************************/
-#include "osutil.h"
+//#include "osutil.h"				// Unuseful and bad for OEM
 #include "block.h"
 #include "colblk.h"
 #include "json.h"
@@ -15,6 +15,8 @@ enum JMODE {MODE_OBJECT, MODE_ARRAY, MODE_VALUE};
 typedef class JSONDEF *PJDEF;
 typedef class TDBJSON *PJTDB;
 typedef class JSONCOL *PJCOL;
+class TDBJSN;
+DllExport PQRYRES JSONColumns(PGLOBAL, PCSZ, PCSZ, PTOS, bool);
 
 /***********************************************************************/
 /*  The JSON tree node. Can be an Object or an Array.           	  	 */
@@ -29,6 +31,47 @@ typedef struct _jnode {
   int   Nx;                     // Next to read row number
 } JNODE, *PJNODE;
 
+typedef struct _jncol {
+	struct _jncol *Next;
+	char *Name;
+	char *Fmt;
+	int   Type;
+	int   Len;
+	int   Scale;
+	bool  Cbn;
+	bool  Found;
+} JCOL, *PJCL;
+
+/***********************************************************************/
+/*  Class used to get the columns of a mongo collection.               */
+/***********************************************************************/
+class JSONDISC : public BLOCK {
+public:
+	// Constructor
+	JSONDISC(PGLOBAL g, uint *lg);
+
+	// Functions
+	int  GetColumns(PGLOBAL g, PCSZ db, PCSZ dsn, PTOS topt);
+	bool Find(PGLOBAL g, PJVAL jvp, PCSZ key, int j);
+	void AddColumn(PGLOBAL g);
+
+	// Members
+	JCOL    jcol;
+	PJCL    jcp, fjcp, pjcp;
+	PVAL    valp;
+	PJDEF   tdp;
+	TDBJSN *tjnp;
+	PJTDB   tjsp;
+	PJPR    jpp;
+	PJSON   jsp;
+	PJOB    row;
+	PCSZ    sep;
+	char    colname[65], fmt[129], buf[16];
+	uint   *length;
+	int     i, n, bf, ncol, lvl;
+	bool    all;
+}; // end of JSONDISC
+
 /***********************************************************************/
 /*  JSON table.                                                        */
 /***********************************************************************/
@@ -36,13 +79,13 @@ class DllExport JSONDEF : public DOSDEF {         /* Table description */
   friend class TDBJSON;
   friend class TDBJSN;
   friend class TDBJCL;
+	friend class JSONDISC;
 #if defined(CMGO_SUPPORT)
 	friend class CMGFAM;
 #endif   // CMGO_SUPPORT
 #if defined(JAVA_SUPPORT)
 	friend class JMGFAM;
 #endif   // JAVA_SUPPORT
-	friend PQRYRES JSONColumns(PGLOBAL, PCSZ, PCSZ, PTOS, bool);
 public:
   // Constructor
   JSONDEF(void);

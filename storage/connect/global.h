@@ -1,7 +1,7 @@
 /***********************************************************************/
 /*  GLOBAL.H: Declaration file used by all CONNECT implementations.    */
 /*  (C) Copyright MariaDB Corporation Ab                 							 */
-/*  Author Olivier Bertrand                              1993-2017     */
+/*  Author Olivier Bertrand                              1993-2018     */
 /***********************************************************************/
 
 /***********************************************************************/
@@ -52,7 +52,7 @@
 /***********************************************************************/
 /*  Define access to the thread based trace value.                     */
 /***********************************************************************/
-#define trace  GetTraceValue()
+#define trace(T)  (bool)(GetTraceValue() & (uint)T)
 
 /***********************************************************************/
 /*  Miscellaneous Constants                                            */
@@ -192,7 +192,7 @@ typedef struct _global {            /* Global structure                */
 	PACTIVITY Activityp;
   char      Message[MAX_STR];
 	ulong     More;										/* Used by jsonudf                 */
-	int       Createas;               /* To pass info to created table   */
+	int       Createas;               /* To pass multi to ext tables     */
   void     *Xchk;                   /* indexes in create/alter         */
   short     Alchecked;              /* Checked for ALTER               */
   short     Mrr;                    /* True when doing mrr             */
@@ -219,15 +219,21 @@ DllExport LPCSTR  PlugSetPath(LPSTR to, LPCSTR prefix, LPCSTR name, LPCSTR dir);
 DllExport BOOL    PlugIsAbsolutePath(LPCSTR path);
 DllExport bool    AllocSarea(PGLOBAL, uint);
 DllExport void    FreeSarea(PGLOBAL);
-DllExport BOOL    PlugSubSet(PGLOBAL, void *, uint);
+DllExport BOOL    PlugSubSet(void *, uint);
 DllExport void   *PlugSubAlloc(PGLOBAL, void *, size_t);
 DllExport char   *PlugDup(PGLOBAL g, const char *str);
 DllExport void   *MakePtr(void *, OFFSET);
 DllExport void    htrc(char const *fmt, ...);
-DllExport int     GetTraceValue(void);
+DllExport void    xtrc(uint, char const* fmt, ...);
+DllExport uint    GetTraceValue(void);
 
 #if defined(__cplusplus)
 } // extern "C"
 #endif
+
+/***********************************************************************/
+/*  Non exported routine declarations.                                 */
+/***********************************************************************/
+//void *PlugSubAlloc(PGLOBAL, void *, size_t);	 // Does throw
 
 /*-------------------------- End of Global.H --------------------------*/

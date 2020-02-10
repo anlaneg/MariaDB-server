@@ -11,7 +11,7 @@
 
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
-   Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA */
+   Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1335  USA */
 
 #ifndef COMMON_H
 #define COMMON_H
@@ -77,8 +77,8 @@ void error_log_print(const char *fmt, ...)
   error_log_vprint(Level, fmt, args);
   va_end(args);
 }
-
-typedef char Error_message_buf[1024];
+#define ERRMSG_BUFSIZE 1024
+typedef char Error_message_buf[ERRMSG_BUFSIZE];
 const char* get_last_error_message(Error_message_buf);
 
 

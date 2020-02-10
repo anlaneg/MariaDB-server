@@ -67,6 +67,7 @@ void ydb_db_layer_get_status(YDB_DB_LAYER_STATUS statp);
 struct lt_on_create_callback_extra {
     DB_TXN *txn;
     FT_HANDLE ft_handle;
+    bool open_rw;
 };
 int toku_db_lt_on_create_callback(toku::locktree *lt, void *extra);
 void toku_db_lt_on_destroy_callback(toku::locktree *lt);
@@ -122,8 +123,7 @@ toku_db_destruct_autotxn(DB_TXN *txn, int r, bool changed) {
     return r; 
 }
 
-void create_iname_hint_for_dbdir(const char *dname, char *hint);
-void create_iname_hint(const char *dname, char *hint);
+void create_iname_hint(DB_ENV *env, const char *dname, char *hint);
 char *create_iname(DB_ENV *env,
                    uint64_t id1,
                    uint64_t id2,

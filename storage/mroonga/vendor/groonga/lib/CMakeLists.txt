@@ -11,7 +11,7 @@
 #
 # You should have received a copy of the GNU Lesser General Public
 # License along with this library; if not, write to the Free Software
-# Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
+# Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1335  USA
 
 add_definitions(
   -DGRN_DAT_EXPORT
@@ -177,3 +177,9 @@ if(GRN_WITH_MRUBY)
     FILES ${EXPRESSION_TREE_RUBY_SCRIPTS}
     DESTINATION "${GRN_RELATIVE_RUBY_SCRIPTS_DIR}/expression_tree")
 endif()
+
+# Workaround GCC ICE on ARM64
+IF(CMAKE_COMPILER_IS_GNUCXX AND CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64" AND
+   CMAKE_C_COMPILER_VERSION VERSION_GREATER "5")
+  ADD_COMPILE_FLAGS(ts/ts_expr_node.c COMPILE_FLAGS "-fno-tree-loop-vectorize")
+ENDIF()

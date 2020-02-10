@@ -12,7 +12,7 @@
 
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
-   Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02111-1301 USA */
+   Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1335 USA */
 
 #include "ma_fulltext.h"
 #include "ma_rt_index.h"
@@ -695,9 +695,7 @@ static int del(MARIA_HA *info, MARIA_KEY *key,
   key_start= keypos;
   if (tmp_key.flag & (SEARCH_USER_KEY_HAS_TRANSID |
                       SEARCH_PAGE_KEY_HAS_TRANSID))
-  {
     _ma_mark_page_with_transid(share, anc_page);
-  }
 
   /* Save pointer to next leaf on parent page */
   if (!(*keyinfo->get_key)(&ret_key, page_flag, share->base.key_reflength,
@@ -801,7 +799,7 @@ static int underflow(MARIA_HA *info, MARIA_KEYDEF *keyinfo,
   if ((keypos < anc_buff + anc_length && (info->state->records & 1)) ||
       first_key)
   {
-    size_t tmp_length;
+    uint tmp_length;
     uint next_page_flag;
     /* Use page right of anc-page */
     DBUG_PRINT("test",("use right page"));
@@ -968,7 +966,7 @@ static int underflow(MARIA_HA *info, MARIA_KEYDEF *keyinfo,
 					  (uchar*) 0, (uchar*) 0,
 					  &key_inserted);
       /* t_length will always be > 0 for a new page !*/
-      tmp_length= (size_t) ((next_page.buff + buff_length) - half_pos);
+      tmp_length= (uint) ((next_page.buff + buff_length) - half_pos);
       bmove(next_page.buff + p_length + t_length, half_pos, tmp_length);
       (*keyinfo->store_key)(keyinfo, next_page.buff + p_length, &key_inserted);
       new_buff_length= tmp_length + t_length + p_length;
@@ -1207,7 +1205,7 @@ static int underflow(MARIA_HA *info, MARIA_KEYDEF *keyinfo,
     DBUG_PRINT("info",("t_length: %d  length: %d",t_length, (int) tmp_length));
     bmove(leaf_buff+p_length+t_length, half_pos, tmp_length);
     (*keyinfo->store_key)(keyinfo,leaf_buff+p_length, &key_inserted);
-    new_leaf_length= tmp_length + t_length + p_length;
+    new_leaf_length= (uint)(tmp_length + t_length + p_length);
     DBUG_ASSERT(new_leaf_length <= share->max_index_block_size);
 
     leaf_page->size= new_leaf_length;

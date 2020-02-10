@@ -13,7 +13,7 @@
 
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
-   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA */
+   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1335  USA */
 
 #include <stdio.h>
 #include <mysql/plugin.h>
@@ -145,7 +145,7 @@ static void audit_null_notify(MYSQL_THD thd __attribute__((unused)),
       break;
     case MYSQL_AUDIT_TABLE_RENAME:
       snprintf(buf, sizeof(buf), "rename to %s.%s",
-               event_table->new_database, event_table->new_table);
+               event_table->new_database.str, event_table->new_table.str);
       buf[sizeof(buf)-1]= 0;
       op= buf;
       break;
@@ -154,7 +154,7 @@ static void audit_null_notify(MYSQL_THD thd __attribute__((unused)),
     fprintf(f, "%s[%s] @ %s [%s]\t%s.%s : %s\n",
             event_table->priv_user, event_table->user,
             event_table->host, ip,
-            event_table->database, event_table->table, op);
+            event_table->database.str, event_table->table.str, op);
   }
 }
 

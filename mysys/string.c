@@ -11,7 +11,7 @@
 
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
-   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA */
+   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1335  USA */
 
 /*
   Code for handling strings with can grow dynamicly.
@@ -178,9 +178,9 @@ my_bool dynstr_append_quoted(DYNAMIC_STRING *str,
                              const char *append, size_t len,
                              char quote)
 {
-  uint additional= (str->alloc_increment ? str->alloc_increment : 10);
-  uint lim= additional;
-  uint i;
+  size_t additional= (str->alloc_increment ? str->alloc_increment : 10);
+  size_t lim= additional;
+  size_t i;
   if (dynstr_realloc(str, len + additional + 2))
     return TRUE;
   str->str[str->length++]= quote;

@@ -12,7 +12,7 @@
 
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
-   Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02111-1301 USA */
+   Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1335 USA */
 
 /* Written by Sergei A. Golubchik, who has a shared copyright to this code */
 
@@ -28,9 +28,9 @@ FT_INFO *ft_init_search(uint flags, void *info, uint keynr,
 {
   FT_INFO *res;
   if (flags & FT_BOOL)
-    res= ft_init_boolean_search((MI_INFO *)info, keynr, query, query_len,cs);
+    res= ft_init_boolean_search((MI_INFO *)info, keynr, query, (uint)query_len,cs);
   else
-    res= ft_init_nlq_search((MI_INFO *)info, keynr, query, query_len, flags,
+    res= ft_init_nlq_search((MI_INFO *)info, keynr, query, (uint)query_len, flags,
 			    record);
   return res;
 }

@@ -15,7 +15,7 @@
 
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
-   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA */
+   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1335  USA */
 
 
 /* This file defines structures needed by udf functions */
@@ -137,7 +137,7 @@ class udf_handler :public Sql_alloc
 
 #ifdef HAVE_DLOPEN
 void udf_init(void),udf_free(void);
-udf_func *find_udf(const char *name, uint len, bool mark_used=0);
+udf_func *find_udf(const char *name, size_t size, bool mark_used=0);
 void free_udf(udf_func *udf);
 int mysql_create_function(THD *thd,udf_func *udf);
 int mysql_drop_function(THD *thd, const LEX_CSTRING *name);

@@ -1,4 +1,5 @@
 # Copyright (c) 2010, 2011, Oracle and/or its affiliates. All rights reserved.
+# Copyright (c) 2011, 2018, MariaDB Corporation
 # 
 # This program is free software; you can redistribute it and/or modify
 # it under the terms of the GNU General Public License as published by
@@ -11,7 +12,7 @@
 #
 # You should have received a copy of the GNU General Public License
 # along with this program; if not, write to the Free Software
-# Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA 
+# Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1335  USA 
 
 # This file includes build settings used for MySQL release
 
@@ -62,7 +63,7 @@ IF(FEATURE_SET)
     SET(WITH_NONE ON)
   ENDIF()
   
-  IF(num GREATER FEATURE_SET_xsmall)
+  IF(num GREATER FEATURE_SET_xsmall AND NOT WIN32)
     SET(WITH_EMBEDDED_SERVER ON CACHE BOOL "")
   ENDIF()
   IF(num GREATER FEATURE_SET_small)
@@ -85,27 +86,26 @@ IF(FEATURE_SET)
   ENDIF()
 ENDIF()
 
-OPTION(ENABLED_LOCAL_INFILE "" ON)
 SET(WITH_INNODB_SNAPPY OFF CACHE STRING "")
+SET(WITH_NUMA 0 CACHE BOOL "")
 IF(WIN32)
-  SET(WITH_LIBARCHIVE STATIC CACHE STRING "")
+  SET(INSTALL_MYSQLTESTDIR "" CACHE STRING "")
+  SET(INSTALL_SQLBENCHDIR  "" CACHE STRING "")
+  SET(INSTALL_SUPPORTFILESDIR ""  CACHE STRING "")
 ELSEIF(RPM)
   SET(WITH_SSL system CACHE STRING "")
   SET(WITH_ZLIB system CACHE STRING "")
-  SET(CHECKMODULE /usr/bin/checkmodule CACHE STRING "")
-  SET(SEMODULE_PACKAGE /usr/bin/semodule_package CACHE STRING "")
-  SET(WITH_LIBARCHIVE ON CACHE STRING "")
+  SET(CHECKMODULE /usr/bin/checkmodule CACHE FILEPATH "")
+  SET(SEMODULE_PACKAGE /usr/bin/semodule_package CACHE FILEPATH "")
 ELSEIF(DEB)
   SET(WITH_SSL system CACHE STRING "")
   SET(WITH_ZLIB system CACHE STRING "")
   SET(WITH_LIBWRAP ON)
   SET(HAVE_EMBEDDED_PRIVILEGE_CONTROL ON)
-  SET(WITH_LIBARCHIVE ON CACHE STRING "")
 ELSE()
   SET(WITH_SSL bundled CACHE STRING "")
   SET(WITH_ZLIB bundled CACHE STRING "")
   SET(WITH_JEMALLOC static CACHE STRING "")
-  SET(WITH_LIBARCHIVE STATIC CACHE STRING "")
 ENDIF()
 
 IF(NOT COMPILATION_COMMENT)
@@ -121,6 +121,7 @@ ENDIF()
 
 IF(UNIX)
   SET(WITH_EXTRA_CHARSETS all CACHE STRING "")
+  SET(PLUGIN_AUTH_PAM YES)
 
   IF(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     IF(NOT IGNORE_AIO_CHECK)

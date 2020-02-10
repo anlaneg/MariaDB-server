@@ -11,7 +11,7 @@
 
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software Foundation,
-   51 Franklin Street, Suite 500, Boston, MA 02110-1335 USA */
+   51 Franklin Street, Fifth Floor, Boston, MA 02110-1335 USA */
 
 #include "mariadb.h"
 #include "sql_priv.h"
@@ -637,7 +637,7 @@ Event_queue::get_top_for_execution_if_time(THD *thd,
     }
 
     if (!(*event_name= new Event_queue_element_for_exec()) ||
-        (*event_name)->init(top->dbname, top->name))
+        (*event_name)->init(&top->dbname, &top->name))
     {
       ret= TRUE;
       break;

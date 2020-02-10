@@ -2,11 +2,11 @@
 /*                                                                     */
 /* PROGRAM NAME: PLUGUTIL                                              */
 /* -------------                                                       */
-/*  Version 3.0                                                        */
+/*  Version 3.1                                                        */
 /*                                                                     */
 /* COPYRIGHT:                                                          */
 /* ----------                                                          */
-/*  (C) Copyright to the author Olivier BERTRAND          1993-2017    */
+/*  (C) Copyright to the author Olivier BERTRAND          1993-2019    */
 /*                                                                     */
 /* WHAT THIS PROGRAM DOES:                                             */
 /* -----------------------                                             */
@@ -111,21 +111,31 @@ ACTIVITY defActivity = {            /* Describes activity and language */
 #endif   // UNIX
 
 /**************************************************************************/
+/*  Conditional tracing output function.                                  */
+/**************************************************************************/
+void xtrc(uint x, char const *fmt, ...)
+{
+	if (GetTraceValue() & x) {
+		va_list ap;
+		va_start(ap, fmt);
+
+		vfprintf(stderr, fmt, ap);
+		va_end(ap);
+	} // endif x
+
+} // end of xtrc
+
+/**************************************************************************/
 /*  Tracing output function.                                              */
 /**************************************************************************/
-void htrc(char const *fmt, ...)
-  {
-  va_list ap;
-  va_start (ap, fmt);
+void htrc(char const* fmt, ...)
+{
+	va_list ap;
+	va_start(ap, fmt);
 
-
-//if (trace == 1)
-//  vfprintf(debug, fmt, ap);
-//else
-    vfprintf(stderr, fmt, ap);
-
-  va_end (ap);
-  } // end of htrc
+	vfprintf(stderr, fmt, ap);
+	va_end(ap);
+} // end of htrc
 
 /***********************************************************************/
 /*  Plug initialization routine.                                       */
@@ -136,7 +146,7 @@ PGLOBAL PlugInit(LPCSTR Language, uint worksize)
 {
 	PGLOBAL g;
 
-	if (trace > 1)
+	if (trace(2))
 		htrc("PlugInit: Language='%s'\n",
 			((!Language) ? "Null" : (char*)Language));
 
@@ -205,7 +215,7 @@ LPSTR PlugRemoveType(LPSTR pBuff, LPCSTR FileName)
 
   _splitpath(FileName, drive, direc, fname, ftype);
 
-  if (trace > 1) {
+  if (trace(2)) {
     htrc("after _splitpath: FileName=%s\n", FileName);
     htrc("drive=%s dir=%s fname=%s ext=%s\n",
           SVP(drive), direc, fname, ftype);
@@ -213,7 +223,7 @@ LPSTR PlugRemoveType(LPSTR pBuff, LPCSTR FileName)
 
   _makepath(pBuff, drive, direc, fname, "");
 
-  if (trace > 1)
+  if (trace(2))
     htrc("buff='%s'\n", pBuff);
 
   return pBuff;
@@ -246,7 +256,7 @@ LPCSTR PlugSetPath(LPSTR pBuff, LPCSTR prefix, LPCSTR FileName, LPCSTR defpath)
   char *drive = NULL, *defdrv = NULL;
 #endif
 
-	if (trace > 1)
+	if (trace(2))
 		htrc("prefix=%s fn=%s path=%s\n", prefix, FileName, defpath);
 
   if (!strncmp(FileName, "//", 2) || !strncmp(FileName, "\\\\", 2)) {
@@ -263,7 +273,7 @@ LPCSTR PlugSetPath(LPSTR pBuff, LPCSTR prefix, LPCSTR FileName, LPCSTR defpath)
 #if !defined(__WIN__)
   if (*FileName == '~') {
     if (_fullpath(pBuff, FileName, _MAX_PATH)) {
-      if (trace > 1)
+      if (trace(2))
         htrc("pbuff='%s'\n", pBuff);
 
      return pBuff;
@@ -298,7 +308,7 @@ LPCSTR PlugSetPath(LPSTR pBuff, LPCSTR prefix, LPCSTR FileName, LPCSTR defpath)
 
   _splitpath(tmpdir, defdrv, defdir, NULL, NULL);
 
-  if (trace > 1) {
+  if (trace(2)) {
     htrc("after _splitpath: FileName=%s\n", FileName);
 #if defined(__WIN__)
     htrc("drive=%s dir=%s fname=%s ext=%s\n", drive, direc, fname, ftype);
@@ -325,11 +335,11 @@ LPCSTR PlugSetPath(LPSTR pBuff, LPCSTR prefix, LPCSTR FileName, LPCSTR defpath)
 
   _makepath(newname, drive, direc, fname, ftype);
 
-  if (trace > 1)
+  if (trace(2))
     htrc("newname='%s'\n", newname);
 
   if (_fullpath(pBuff, newname, _MAX_PATH)) {
-    if (trace > 1)
+    if (trace(2))
       htrc("pbuff='%s'\n", pBuff);
 
     return pBuff;
@@ -470,7 +480,7 @@ bool AllocSarea(PGLOBAL g, uint size)
 #if defined(DEVELOPMENT)
 	if (true) {
 #else
-	if (trace) {
+	if (trace(8)) {
 #endif
     if (g->Sarea)
       htrc("Work area of %u allocated at %p\n", size, g->Sarea);
@@ -498,7 +508,7 @@ void FreeSarea(PGLOBAL g)
 #if defined(DEVELOPMENT)
 		if (true)
 #else
-		if (trace)
+		if (trace(8))
 #endif
 			htrc("Freeing Sarea at %p size = %d\n", g->Sarea, g->Sarea_Size);
 
@@ -514,27 +524,31 @@ void FreeSarea(PGLOBAL g)
 /*  Here there should be some verification done such as validity of    */
 /*  the address and size not larger than memory size.                  */
 /***********************************************************************/
-BOOL PlugSubSet(PGLOBAL g __attribute__((unused)), void *memp, uint size)
+BOOL PlugSubSet(void *memp, uint size)
   {
   PPOOLHEADER pph = (PPOOLHEADER)memp;
 
   pph->To_Free = (OFFSET)sizeof(POOLHEADER);
   pph->FreeBlk = size - pph->To_Free;
-
   return FALSE;
   } /* end of PlugSubSet */
 
 /***********************************************************************/
+/*  Use it to export a function that do throwing.                      */
+/***********************************************************************/
+static void *DoThrow(int n)
+{
+	throw n;
+} /* end of DoThrow */
+
+/***********************************************************************/
 /*  Program for sub-allocating one item in a storage area.             */
-/*  Note: SubAlloc routines of OS/2 are no more used to increase the   */
-/*  code portability and avoid problems when a grammar compiled under  */
-/*  one version of OS/2 is used under another version.                 */
-/*  The simple way things are done here is also based on the fact      */
-/*  that no freeing of suballocated blocks is permitted in Plug.       */
+/*  The simple way things are done here is based on the fact           */
+/*  that no freeing of suballocated blocks is permitted in CONNECT.    */
 /***********************************************************************/
 void *PlugSubAlloc(PGLOBAL g, void *memp, size_t size)
-  {
-  PPOOLHEADER pph;                           /* Points on area header. */
+{
+	PPOOLHEADER pph;                           /* Points on area header. */
 
   if (!memp)
     /*******************************************************************/
@@ -545,7 +559,7 @@ void *PlugSubAlloc(PGLOBAL g, void *memp, size_t size)
   size = ((size + 7) / 8) * 8;       /* Round up size to multiple of 8 */
   pph = (PPOOLHEADER)memp;
 
-  if (trace > 3)
+  if (trace(16))
     htrc("SubAlloc in %p size=%d used=%d free=%d\n",
           memp, size, pph->To_Free, pph->FreeBlk);
 
@@ -556,11 +570,11 @@ void *PlugSubAlloc(PGLOBAL g, void *memp, size_t size)
       "Not enough memory in %s area for request of %u (used=%d free=%d)",
                           pname, (uint)size, pph->To_Free, pph->FreeBlk);
 
-    if (trace)
+    if (trace(1))
       htrc("PlugSubAlloc: %s\n", g->Message);
 
-    abort();
-    } /* endif size OS32 code */
+    DoThrow(1234);
+  } /* endif size OS32 code */
 
   /*********************************************************************/
   /*  Do the suballocation the simplest way.                           */
@@ -569,12 +583,12 @@ void *PlugSubAlloc(PGLOBAL g, void *memp, size_t size)
   pph->To_Free += (OFFSET)size;       /* New offset of pool free block */
   pph->FreeBlk -= (uint)size;         /* New size   of pool free block */
 
-  if (trace > 3)
+  if (trace(16))
     htrc("Done memp=%p used=%d free=%d\n",
           memp, pph->To_Free, pph->FreeBlk);
 
   return (memp);
-  } /* end of PlugSubAlloc */
+} /* end of PlugSubAlloc */
 
 /***********************************************************************/
 /*  Program for sub-allocating and copying a string in a storage area. */

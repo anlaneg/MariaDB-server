@@ -12,7 +12,7 @@
 
   You should have received a copy of the GNU General Public License
   along with this program; if not, write to the Free Software
-  Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA */
+  Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1335  USA */
 
 /*
 
@@ -1517,7 +1517,7 @@ static FEDERATED_SHARE *get_share(const char *table_name, TABLE *table)
   */
   query.length(0);
 
-  init_alloc_root(&mem_root, 256, 0, MYF(0));
+  init_alloc_root(&mem_root, "federated_share", 256, 0, MYF(0));
 
   mysql_mutex_lock(&federated_mutex);
 
@@ -3410,7 +3410,7 @@ maria_declare_plugin(federated)
   &federated_storage_engine,
   "FEDERATED",
   "Patrick Galbraith and Brian Aker, MySQL AB",
-  "Federated MySQL storage engine",
+  "Allows to access tables on other MariaDB servers",
   PLUGIN_LICENSE_GPL,
   federated_db_init, /* Plugin Init */
   federated_done, /* Plugin Deinit */

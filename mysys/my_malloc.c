@@ -13,7 +13,7 @@
 
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
-   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA */
+   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1335  USA */
 
 #include "mysys_priv.h"
 #include "mysys_err.h"
@@ -117,6 +117,7 @@ void *my_malloc(size_t size, myf my_flags)
                       MY_TEST(my_flags & MY_THREAD_SPECIFIC));
     update_malloc_size(size + MALLOC_PREFIX_SIZE,
                        MY_TEST(my_flags & MY_THREAD_SPECIFIC));
+    TRASH_ALLOC(point, size);
     DBUG_EXECUTE_IF("simulate_out_of_memory",
                     {
                       /* my_free() handles memory accounting */
@@ -212,6 +213,13 @@ void my_free(void *ptr)
     my_bool old_flags;
     old_size= MALLOC_SIZE_AND_FLAG(ptr, &old_flags);
     update_malloc_size(- (longlong) old_size - MALLOC_PREFIX_SIZE, old_flags);
+#ifndef SAFEMALLOC
+    /*
+      Trash memory if not safemalloc. We don't have to do this if safemalloc
+      is used as safemalloc will also do trashing
+    */
+    TRASH_FREE(ptr, old_size);
+#endif
     sf_free(MALLOC_FIX_POINTER_FOR_FREE(ptr));
   }
   DBUG_VOID_RETURN;

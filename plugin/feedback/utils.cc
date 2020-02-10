@@ -11,7 +11,7 @@
 
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
-   Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02111-1301 USA */
+   Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1335 USA */
 
 #include "feedback.h"
 
@@ -92,12 +92,19 @@ static int uname(struct utsname *buf)
 {
   OSVERSIONINFOEX ver;
   ver.dwOSVersionInfoSize = (DWORD)sizeof(ver);
+  /* GetVersionEx got deprecated, we need it anyway, so disable deprecation warnings. */
+#ifdef _MSC_VER
+#pragma warning (disable : 4996)
+#endif
+#ifdef __clang__
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+#endif
   if (!GetVersionEx((OSVERSIONINFO *)&ver))
     return -1;
 
   buf->nodename[0]= 0;
   strcpy(buf->sysname, "Windows");
-  sprintf(buf->release, "%d.%d", ver.dwMajorVersion, ver.dwMinorVersion);
+  sprintf(buf->release, "%d.%d", (int)ver.dwMajorVersion, (int)ver.dwMinorVersion);
 
   const char *version_str= get_os_version_name(&ver);
   if(version_str && version_str[0])
@@ -106,7 +113,7 @@ static int uname(struct utsname *buf)
   {
     /* Fallback for unknown versions, e.g "Windows <major_ver>.<minor_ver>" */
     sprintf(buf->version, "Windows %d.%d%s",
-      ver.dwMajorVersion, ver.dwMinorVersion,
+      (int)ver.dwMajorVersion, (int)ver.dwMinorVersion,
       (ver.wProductType == VER_NT_WORKSTATION ? "" : " Server"));
   }
 

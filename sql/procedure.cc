@@ -11,7 +11,7 @@
 
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
-   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA */
+   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1335  USA */
 
 
 /* Procedures (functions with changes output of select) */
@@ -96,7 +96,7 @@ setup_procedure(THD *thd,ORDER *param,select_result *result,
       DBUG_RETURN(proc);
     }
   }
-  my_error(ER_UNKNOWN_PROCEDURE, MYF(0), (*param->item)->name);
+  my_error(ER_UNKNOWN_PROCEDURE, MYF(0), (*param->item)->name.str);
   *error=1;
   DBUG_RETURN(0);
 }

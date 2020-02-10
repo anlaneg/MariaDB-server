@@ -1,7 +1,7 @@
 /*****************************************************************************
 
-Copyright (c) 1996, 2016, Oracle and/or its affiliates. All Rights Reserved.
-Copyright (c) 2017, MariaDB Corporation.
+Copyright (c) 1996, 2018, Oracle and/or its affiliates. All Rights Reserved.
+Copyright (c) 2017, 2018, MariaDB Corporation.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License as published by the Free Software
@@ -13,7 +13,7 @@ FOR A PARTICULAR PURPOSE. See the GNU General Public License for more details.
 
 You should have received a copy of the GNU General Public License along with
 this program; if not, write to the Free Software Foundation, Inc.,
-51 Franklin Street, Suite 500, Boston, MA 02110-1335 USA
+51 Franklin Street, Fifth Floor, Boston, MA 02110-1335 USA
 
 *****************************************************************************/
 
@@ -28,23 +28,13 @@ Created 12/27/1996 Heikki Tuuri
 #define row0upd_h
 
 #include "data0data.h"
+#include "rem0types.h"
 #include "row0types.h"
 #include "btr0types.h"
-#include "dict0types.h"
 #include "trx0types.h"
-#include <stack>
 #include "btr0pcur.h"
 #include "que0types.h"
 #include "pars0types.h"
-
-/** The std::deque to store cascade update nodes, that uses mem_heap_t
-as allocator. */
-typedef std::deque<upd_node_t*, mem_heap_allocator<upd_node_t*> >
-	deque_mem_heap_t;
-
-/** Double-ended queue of update nodes to be processed for cascade
-operations */
-typedef deque_mem_heap_t upd_cascade_t;
 
 /*********************************************************************//**
 Creates an update vector object.
@@ -134,10 +124,9 @@ row_upd_rec_sys_fields(
 	page_zip_des_t*	page_zip,/*!< in/out: compressed page whose
 				uncompressed part will be updated, or NULL */
 	dict_index_t*	index,	/*!< in: clustered index */
-	const ulint*	offsets,/*!< in: rec_get_offsets(rec, index) */
+	const offset_t*	offsets,/*!< in: rec_get_offsets(rec, index) */
 	const trx_t*	trx,	/*!< in: transaction */
-	roll_ptr_t	roll_ptr);/*!< in: roll ptr of the undo log record,
-				  can be 0 during IMPORT */
+	roll_ptr_t	roll_ptr);/*!< in: DB_ROLL_PTR to the undo log */
 /*********************************************************************//**
 Sets the trx id or roll ptr field of a clustered index entry. */
 void
@@ -177,7 +166,7 @@ ibool
 row_upd_changes_field_size_or_external(
 /*===================================*/
 	dict_index_t*	index,	/*!< in: index */
-	const ulint*	offsets,/*!< in: rec_get_offsets(rec, index) */
+	const offset_t*	offsets,/*!< in: rec_get_offsets(rec, index) */
 	const upd_t*	update);/*!< in: update vector */
 /***********************************************************//**
 Returns true if row update contains disowned external fields.
@@ -198,7 +187,7 @@ row_upd_rec_in_place(
 /*=================*/
 	rec_t*		rec,	/*!< in/out: record where replaced */
 	dict_index_t*	index,	/*!< in: the index the record belongs to */
-	const ulint*	offsets,/*!< in: array returned by rec_get_offsets() */
+	const offset_t*	offsets,/*!< in: array returned by rec_get_offsets() */
 	const upd_t*	update,	/*!< in: update vector */
 	page_zip_des_t*	page_zip);/*!< in: compressed page with enough space
 				available, or NULL */
@@ -213,7 +202,7 @@ row_upd_build_sec_rec_difference_binary(
 /*====================================*/
 	const rec_t*	rec,	/*!< in: secondary index record */
 	dict_index_t*	index,	/*!< in: index */
-	const ulint*	offsets,/*!< in: rec_get_offsets(rec, index) */
+	const offset_t*	offsets,/*!< in: rec_get_offsets(rec, index) */
 	const dtuple_t*	entry,	/*!< in: entry to insert */
 	mem_heap_t*	heap)	/*!< in: memory heap from which allocated */
 	MY_ATTRIBUTE((warn_unused_result, nonnull));
@@ -231,6 +220,7 @@ the equal ordering fields. NOTE: we compare the fields as binary strings!
 @param[in]	heap		memory heap from which allocated
 @param[in,out]	mysql_table	NULL, or mysql table object when
 				user thread invokes dml
+@param[out]	error		error number in case of failure
 @return own: update vector of differing fields, excluding roll ptr and
 trx id */
 upd_t*
@@ -238,12 +228,13 @@ row_upd_build_difference_binary(
 	dict_index_t*	index,
 	const dtuple_t*	entry,
 	const rec_t*	rec,
-	const ulint*	offsets,
+	const offset_t*	offsets,
 	bool		no_sys,
 	trx_t*		trx,
 	mem_heap_t*	heap,
-	TABLE*		mysql_table)
-	MY_ATTRIBUTE((nonnull(1,2,3,7), warn_unused_result));
+	TABLE*		mysql_table,
+	dberr_t*	error)
+	MY_ATTRIBUTE((nonnull(1,2,3,7,9), warn_unused_result));
 /** Apply an update vector to an index entry.
 @param[in,out]	entry	index entry to be updated; the clustered index record
 			must be covered by a lock or a page latch to prevent
@@ -409,7 +400,7 @@ row_upd_rec_sys_fields_in_recovery(
 /*===============================*/
 	rec_t*		rec,	/*!< in/out: record */
 	page_zip_des_t*	page_zip,/*!< in/out: compressed page, or NULL */
-	const ulint*	offsets,/*!< in: array returned by rec_get_offsets() */
+	const offset_t*	offsets,/*!< in: array returned by rec_get_offsets() */
 	ulint		pos,	/*!< in: TRX_ID position in rec */
 	trx_id_t	trx_id,	/*!< in: transaction id */
 	roll_ptr_t	roll_ptr);/*!< in: roll ptr of the undo log record */
@@ -485,11 +476,16 @@ struct upd_t{
 		return(false);
 	}
 
-	/** Determine if the update affects a system versioned column. */
+	/** Determine if the update affects a system versioned column or row_end. */
 	bool affects_versioned() const
 	{
 		for (ulint i = 0; i < n_fields; i++) {
-			if (fields[i].new_val.type.vers_sys_field()) {
+			dtype_t type = fields[i].new_val.type;
+			if (type.is_versioned()) {
+				return true;
+			}
+			// versioned DELETE is UPDATE SET row_end=NOW
+			if (type.vers_sys_end()) {
 				return true;
 			}
 		}
@@ -528,44 +524,18 @@ struct upd_node_t{
 	ibool		searched_update;
 				/* TRUE if searched update, FALSE if
 				positioned */
-	ibool		in_mysql_interface;
-				/* TRUE if the update node was created
+	bool		in_mysql_interface;
+				/* whether the update node was created
 				for the MySQL interface */
 	dict_foreign_t*	foreign;/* NULL or pointer to a foreign key
 				constraint if this update node is used in
 				doing an ON DELETE or ON UPDATE operation */
-
-	bool		cascade_top;
-				/*!< true if top level in cascade */
-
-	upd_cascade_t*	cascade_upd_nodes;
-				/*!< Queue of update nodes to handle the
-				cascade of update and delete operations in an
-				iterative manner.  Their parent/child
-				relations are properly maintained. All update
-				nodes point to this same queue.  All these
-				nodes are allocated in heap pointed to by
-				upd_node_t::cascade_heap. */
-
-	upd_cascade_t*	new_upd_nodes;
-				/*!< Intermediate list of update nodes in a
-				cascading update/delete operation.  After
-				processing one update node, this will be
-				concatenated to cascade_upd_nodes.  This extra
-				list is needed so that retry because of
-				DB_LOCK_WAIT works corrrectly. */
-
-	upd_cascade_t*	processed_cascades;
-				/*!< List of processed update nodes in a
-				cascading update/delete operation.  All the
-				cascade nodes are stored here, so that memory
-				can be freed. */
-
+	upd_node_t*	cascade_node;/* NULL or an update node template which
+				is used to implement ON DELETE/UPDATE CASCADE
+				or ... SET NULL for foreign keys */
 	mem_heap_t*	cascade_heap;
-				/*!< NULL or a mem heap where cascade_upd_nodes
-				are created.  This heap is owned by the node
-				that has cascade_top=true. */
-
+				/*!< NULL or a mem heap where cascade
+				node is created.*/
 	sel_node_t*	select;	/*!< query graph subtree implementing a base
 				table cursor: the rows returned will be
 				updated */
@@ -600,6 +570,12 @@ struct upd_node_t{
 	dtuple_t*	row;	/*!< NULL, or a copy (also fields copied to
 				heap) of the row to update; this must be reset
 				to NULL after a successful update */
+	dtuple_t*	historical_row;	/*!< historical row used in
+				CASCADE UPDATE/SET NULL;
+				allocated from historical_heap  */
+	mem_heap_t*	historical_heap; /*!< heap for historical row insertion;
+				created when row to update is located;
+				freed right before row update */
 	row_ext_t*	ext;	/*!< NULL, or prefixes of the externally
 				stored columns in the old row */
 	dtuple_t*	upd_row;/* NULL, or a copy of the updated row */
@@ -612,25 +588,34 @@ struct upd_node_t{
 	sym_node_t*	table_sym;/* table node in symbol table */
 	que_node_t*	col_assign_list;
 				/* column assignment list */
-
-	doc_id_t	fts_doc_id;
-				/* The FTS doc id of the row that is now
-				pointed to by the pcur. */
-
-	doc_id_t	fts_next_doc_id;
-				/* The new fts doc id that will be used
-				in update operation */
-
 	ulint		magic_n;
 
-#ifndef DBUG_OFF
-	/** Print information about this object into the trace log file. */
-	void dbug_trace();
+private:
+	/** Appends row_start or row_end field to update vector and sets a
+	CURRENT_TIMESTAMP/trx->id value to it.
+	Supposed to be called only by make_versioned_update() and
+	make_versioned_delete().
+	@param[in]	trx	transaction
+	@param[in]	vers_sys_idx	table->row_start or table->row_end */
+	void make_versioned_helper(const trx_t* trx, ulint idx);
 
-	/** Ensure that the member cascade_upd_nodes has only one update node
-	for each of the tables.  This is useful for testing purposes. */
-	void check_cascade_only_once();
-#endif /* !DBUG_OFF */
+public:
+	/** Also set row_start = CURRENT_TIMESTAMP/trx->id
+	@param[in]	trx	transaction */
+	void make_versioned_update(const trx_t* trx)
+	{
+		make_versioned_helper(trx, table->vers_start);
+	}
+
+	/** Only set row_end = CURRENT_TIMESTAMP/trx->id.
+	Do not touch other fields at all.
+	@param[in]	trx	transaction */
+	void make_versioned_delete(const trx_t* trx)
+	{
+		update->n_fields = 0;
+		is_delete = VERSIONED_DELETE;
+		make_versioned_helper(trx, table->vers_end);
+	}
 };
 
 #define	UPD_NODE_MAGIC_N	1579975

@@ -11,7 +11,7 @@
 
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
-   Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02111-1301 USA */
+   Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1335 USA */
 
 #include <tap.h>                                /* Includes my_global.h */
 #include <my_sys.h>
@@ -54,7 +54,7 @@ int test_file(PAGECACHE_FILE file, char *file_name,
   LARGE_INTEGER li;
   if(GetFileAttributesEx(file_name, GetFileExInfoStandard, &file_attr) == 0)
   {
-    diag("Can't GetFileAttributesEx %s (errno: %d)\n", file_name,
+    diag("Can't GetFileAttributesEx %s (errno: %lu)\n", file_name,
       GetLastError());
     res= 0;
     goto err;

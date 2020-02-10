@@ -13,7 +13,7 @@
 
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
-   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA */
+   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1335  USA */
 
 
 /*
@@ -93,6 +93,7 @@ mysql_handle_derived(LEX *lex, uint phases)
 	 sl= sl->next_select_in_list())
     {
       TABLE_LIST *cursor= sl->get_table_list();
+      sl->changed_elements|= TOUCHED_SEL_DERIVED;
       /*
         DT_MERGE_FOR_INSERT is not needed for views/derived tables inside
         subqueries. Views and derived tables of subqueries should be
@@ -174,10 +175,11 @@ mysql_handle_single_derived(LEX *lex, TABLE_LIST *derived, uint phases)
   DBUG_ENTER("mysql_handle_single_derived");
   DBUG_PRINT("enter", ("phases: 0x%x  allowed: 0x%x  alias: '%s'",
                        phases, allowed_phases,
-                       (derived->alias ? derived->alias : "<NULL>")));
+                       (derived->alias.str ? derived->alias.str : "<NULL>")));
   if (!lex->derived_tables)
     DBUG_RETURN(FALSE);
 
+  derived->select_lex->changed_elements|= TOUCHED_SEL_DERIVED;
   lex->thd->derived_tables_processing= TRUE;
 
   for (uint phase= 0; phase < DT_PHASES; phase++)
@@ -199,36 +201,6 @@ mysql_handle_single_derived(LEX *lex, TABLE_LIST *derived, uint phases)
   }
   lex->thd->derived_tables_processing= FALSE;
   DBUG_RETURN(res);
-}
-
-
-/**
-  Run specified phases for derived tables/views in the given list
-
-  @param lex        LEX for this thread
-  @param table_list list of derived tables/view to handle
-  @param phase_map  phases to process tables/views through
-
-  @details
-  This function runs phases specified by the 'phases_map' on derived
-  tables/views found in the 'dt_list' with help of the
-  TABLE_LIST::handle_derived function.
-  'lex' is passed as an argument to the TABLE_LIST::handle_derived.
-
-  @return FALSE ok
-  @return TRUE  error
-*/
-
-bool
-mysql_handle_list_of_derived(LEX *lex, TABLE_LIST *table_list, uint phases)
-{
-  for (TABLE_LIST *tl= table_list; tl; tl= tl->next_local)
-  {
-    if (tl->is_view_or_derived() &&
-        tl->handle_derived(lex, phases))
-      return TRUE;
-  }
-  return FALSE;
 }
 
 
@@ -365,11 +337,15 @@ bool mysql_derived_merge(THD *thd, LEX *lex, TABLE_LIST *derived)
   Query_arena *arena, backup;
   DBUG_ENTER("mysql_derived_merge");
   DBUG_PRINT("enter", ("Alias: '%s'  Unit: %p",
-                       (derived->alias ? derived->alias : "<NULL>"),
+                       (derived->alias.str ? derived->alias.str : "<NULL>"),
                        derived->get_unit()));
 
   if (derived->merged)
+  {
+
+    DBUG_PRINT("info", ("Irreversibly merged: exit"));
     DBUG_RETURN(FALSE);
+  }
 
   if (dt_select->uncacheable & UNCACHEABLE_RAND)
   {
@@ -384,7 +360,6 @@ bool mysql_derived_merge(THD *thd, LEX *lex, TABLE_LIST *derived)
    thd->save_prep_leaf_list= TRUE;
 
   arena= thd->activate_stmt_arena_if_needed(&backup);  // For easier test
-  derived->merged= TRUE;
 
   if (!derived->merged_for_insert || 
       (derived->is_multitable() && 
@@ -448,6 +423,7 @@ bool mysql_derived_merge(THD *thd, LEX *lex, TABLE_LIST *derived)
     if (parent_lex->join) 
       parent_lex->join->table_count+= dt_select->join->table_count - 1;
   }
+  derived->merged= TRUE;
   if (derived->get_unit()->prepared)
   {
     Item *expr= derived->on_expr;
@@ -461,9 +437,7 @@ bool mysql_derived_merge(THD *thd, LEX *lex, TABLE_LIST *derived)
       derived->prep_on_expr= expr->copy_andor_structure(thd);
     }
     if (derived->on_expr &&
-        ((!derived->on_expr->fixed &&
-          derived->on_expr->fix_fields(thd, &derived->on_expr)) ||
-          derived->on_expr->check_cols(1)))
+        derived->on_expr->fix_fields_if_needed_for_bool(thd, &derived->on_expr))
     {
       res= TRUE; /* purecov: inspected */
       goto exit_merge;
@@ -514,7 +488,7 @@ bool mysql_derived_merge_for_insert(THD *thd, LEX *lex, TABLE_LIST *derived)
 {
   DBUG_ENTER("mysql_derived_merge_for_insert");
   DBUG_PRINT("enter", ("Alias: '%s'  Unit: %p",
-                       (derived->alias ? derived->alias : "<NULL>"),
+                       (derived->alias.str ? derived->alias.str : "<NULL>"),
                        derived->get_unit()));
   DBUG_PRINT("info", ("merged_for_insert: %d  is_materialized_derived: %d  "
                       "is_multitable: %d  single_table_updatable: %d  "
@@ -572,7 +546,7 @@ bool mysql_derived_init(THD *thd, LEX *lex, TABLE_LIST *derived)
   SELECT_LEX_UNIT *unit= derived->get_unit();
   DBUG_ENTER("mysql_derived_init");
   DBUG_PRINT("enter", ("Alias: '%s'  Unit: %p",
-                       (derived->alias ? derived->alias : "<NULL>"),
+                       (derived->alias.str ? derived->alias.str : "<NULL>"),
                        derived->get_unit()));
 
   // Skip already prepared views/DT
@@ -647,11 +621,10 @@ bool mysql_derived_init(THD *thd, LEX *lex, TABLE_LIST *derived)
 bool mysql_derived_prepare(THD *thd, LEX *lex, TABLE_LIST *derived)
 {
   SELECT_LEX_UNIT *unit= derived->get_unit();
-  DBUG_ENTER("mysql_derived_prepare");
   bool res= FALSE;
-  DBUG_PRINT("enter", ("Alias: '%s'  Unit: %p",
-                       (derived->alias ? derived->alias : "<NULL>"),
-                       unit));
+  DBUG_ENTER("mysql_derived_prepare");
+  DBUG_PRINT("enter", ("unit: %p  table_list: %p  alias: '%s'",
+                       unit, derived, derived->alias.str));
 
   if (!unit)
     DBUG_RETURN(FALSE);
@@ -671,7 +644,8 @@ bool mysql_derived_prepare(THD *thd, LEX *lex, TABLE_LIST *derived)
       table reference from a subquery for this.
     */
     DBUG_ASSERT(derived->with->get_sq_rec_ref());
-    if (mysql_derived_prepare(lex->thd, lex, derived->with->get_sq_rec_ref()))
+    if (unlikely(mysql_derived_prepare(lex->thd, lex,
+                                       derived->with->get_sq_rec_ref())))
       DBUG_RETURN(TRUE);
   }
 
@@ -692,10 +666,10 @@ bool mysql_derived_prepare(THD *thd, LEX *lex, TABLE_LIST *derived)
                                   (first_select->options |
                                    thd->variables.option_bits |
                                    TMP_TABLE_ALL_COLUMNS),
-                                  derived->alias, FALSE, FALSE, FALSE, 0);
+                                  &derived->alias, FALSE, FALSE, FALSE, 0);
     thd->create_tmp_table_for_derived= FALSE;
 
-    if (!res && !derived->table)
+    if (likely(!res) && !derived->table)
     {
       derived->derived_result->set_unit(unit);
       derived->table= derived->derived_result->table;
@@ -715,7 +689,39 @@ bool mysql_derived_prepare(THD *thd, LEX *lex, TABLE_LIST *derived)
        !(derived->is_multitable() &&
          (thd->lex->sql_command == SQLCOM_UPDATE_MULTI ||
           thd->lex->sql_command == SQLCOM_DELETE_MULTI))))
+  {
+    /*
+       System versioned tables may still require to get versioning conditions
+       when modifying view (see vers_setup_conds()). Only UPDATE and DELETE are
+       affected because they use WHERE condition.
+    */
+    if (!unit->prepared &&
+        derived->table->versioned() &&
+        derived->merge_underlying_list &&
+        /* choose only those merged views that do not select from other views */
+        !derived->merge_underlying_list->merge_underlying_list)
+    {
+      switch (thd->lex->sql_command)
+      {
+      case SQLCOM_DELETE:
+      case SQLCOM_DELETE_MULTI:
+      case SQLCOM_UPDATE:
+      case SQLCOM_UPDATE_MULTI:
+        if ((res= first_select->vers_setup_conds(thd,
+                                                 derived->merge_underlying_list)))
+          goto exit;
+        if (derived->merge_underlying_list->where)
+        {
+          Query_arena_stmt on_stmt_arena(thd);
+          derived->where= and_items(thd, derived->where,
+                                    derived->merge_underlying_list->where);
+        }
+      default:
+        break;
+      }
+    }
     DBUG_RETURN(FALSE);
+  }
 
   /* prevent name resolving out of derived table */
   for (SELECT_LEX *sl= first_select; sl; sl= sl->next_select())
@@ -744,7 +750,16 @@ bool mysql_derived_prepare(THD *thd, LEX *lex, TABLE_LIST *derived)
     }
   }
 
-  unit->derived= derived;
+  /*
+    Above cascade call of prepare is important for PS protocol, but after it
+    is called we can check if we really need prepare for this derived
+  */
+  if (derived->merged)
+  {
+    DBUG_PRINT("info", ("Irreversibly merged: exit"));
+    DBUG_RETURN(FALSE);
+  }
+
   derived->fill_me= FALSE;
 
   if (!(derived->derived_result= new (thd->mem_root) select_unit(thd)))
@@ -752,7 +767,7 @@ bool mysql_derived_prepare(THD *thd, LEX *lex, TABLE_LIST *derived)
 
   lex->context_analysis_only|= CONTEXT_ANALYSIS_ONLY_DERIVED;
   // st_select_lex_unit::prepare correctly work for single select
-  if ((res= unit->prepare(thd, derived->derived_result, 0)))
+  if ((res= unit->prepare(derived, derived->derived_result, 0)))
     goto exit;
   if (derived->with &&
       (res= derived->with->rename_columns_of_derived_unit(thd, unit)))
@@ -785,7 +800,7 @@ bool mysql_derived_prepare(THD *thd, LEX *lex, TABLE_LIST *derived)
                                                    (first_select->options |
                                                    thd->variables.option_bits |
                                                    TMP_TABLE_ALL_COLUMNS),
-                                                   derived->alias,
+                                                   &derived->alias,
                                                    FALSE, FALSE, FALSE,
                                                    0))
   { 
@@ -810,8 +825,8 @@ exit:
         thd->get_stmt_da()->sql_errno() == ER_SP_DOES_NOT_EXIST))
     {
       thd->clear_error();
-      my_error(ER_VIEW_INVALID, MYF(0), derived->db,
-               derived->table_name);
+      my_error(ER_VIEW_INVALID, MYF(0), derived->db.str,
+               derived->table_name.str);
     }
   }
 
@@ -824,7 +839,7 @@ exit:
   {
     if (!derived->is_with_table_recursive_reference())
     {
-      if (derived->table)
+      if (derived->table && derived->table->s->tmp_table)
         free_tmp_table(thd, derived->table);
       delete derived->derived_result;
     }
@@ -881,12 +896,16 @@ bool mysql_derived_optimize(THD *thd, LEX *lex, TABLE_LIST *derived)
   SELECT_LEX_UNIT *unit= derived->get_unit();
   SELECT_LEX *first_select= unit->first_select();
   SELECT_LEX *save_current_select= lex->current_select;
-
   bool res= FALSE;
   DBUG_ENTER("mysql_derived_optimize");
   DBUG_PRINT("enter", ("Alias: '%s'  Unit: %p",
-                       (derived->alias ? derived->alias : "<NULL>"),
+                       (derived->alias.str ? derived->alias.str : "<NULL>"),
                        derived->get_unit()));
+  if (derived->merged)
+  {
+    DBUG_PRINT("info", ("Irreversibly merged: exit"));
+    DBUG_RETURN(FALSE);
+  }
 
   lex->current_select= first_select;
 
@@ -966,7 +985,7 @@ bool mysql_derived_create(THD *thd, LEX *lex, TABLE_LIST *derived)
 {
   DBUG_ENTER("mysql_derived_create");
   DBUG_PRINT("enter", ("Alias: '%s'  Unit: %p",
-                       (derived->alias ? derived->alias : "<NULL>"),
+                       (derived->alias.str ? derived->alias.str : "<NULL>"),
                        derived->get_unit()));
   TABLE *table= derived->table;
   SELECT_LEX_UNIT *unit= derived->get_unit();
@@ -989,6 +1008,20 @@ bool mysql_derived_create(THD *thd, LEX *lex, TABLE_LIST *derived)
   table->file->extra(HA_EXTRA_WRITE_CACHE);
   table->file->extra(HA_EXTRA_IGNORE_DUP_KEY);
   DBUG_RETURN(FALSE);
+}
+
+
+void TABLE_LIST::register_as_derived_with_rec_ref(With_element *rec_elem)
+{
+  rec_elem->derived_with_rec_ref.link_in_list(this, &this->next_with_rec_ref);
+  is_derived_with_recursive_reference= true;
+  get_unit()->uncacheable|= UNCACHEABLE_DEPENDENT;
+}
+
+
+bool TABLE_LIST::is_nonrecursive_derived_with_rec_ref()
+{
+  return is_derived_with_recursive_reference;
 }
 
 
@@ -1067,7 +1100,7 @@ bool mysql_derived_fill(THD *thd, LEX *lex, TABLE_LIST *derived)
   bool res= FALSE;
   DBUG_ENTER("mysql_derived_fill");
   DBUG_PRINT("enter", ("Alias: '%s'  Unit: %p",
-                       (derived->alias ? derived->alias : "<NULL>"),
+                       (derived->alias.str ? derived->alias.str : "<NULL>"),
                        derived->get_unit()));
 
   if (unit->executed && !unit->uncacheable && !unit->describe &&
@@ -1077,6 +1110,7 @@ bool mysql_derived_fill(THD *thd, LEX *lex, TABLE_LIST *derived)
   DBUG_ASSERT(derived->table && derived->table->is_created());
   select_unit *derived_result= derived->derived_result;
   SELECT_LEX *save_current_select= lex->current_select;
+  bool derived_recursive_is_filled= false;
 
   if (unit->executed && !derived_is_recursive &&
       (unit->uncacheable & UNCACHEABLE_DEPENDENT))
@@ -1105,6 +1139,7 @@ bool mysql_derived_fill(THD *thd, LEX *lex, TABLE_LIST *derived)
     {
       /* In this case all iteration are performed */
       res= derived->fill_recursive(thd);
+      derived_recursive_is_filled= true;
     }
   }
   else if (unit->is_unit_op())
@@ -1160,7 +1195,8 @@ bool mysql_derived_fill(THD *thd, LEX *lex, TABLE_LIST *derived)
     }
   }
 err:
-  if (res || (!lex->describe && !derived_is_recursive && !unit->uncacheable))
+  if (res || (!lex->describe && !unit->uncacheable &&
+              (!derived_is_recursive || derived_recursive_is_filled)))
     unit->cleanup();
   lex->current_select= save_current_select;
 
@@ -1189,7 +1225,7 @@ bool mysql_derived_reinit(THD *thd, LEX *lex, TABLE_LIST *derived)
 {
   DBUG_ENTER("mysql_derived_reinit");
   DBUG_PRINT("enter", ("Alias: '%s'  Unit: %p",
-                       (derived->alias ? derived->alias : "<NULL>"),
+                       (derived->alias.str ? derived->alias.str : "<NULL>"),
                        derived->get_unit()));
   st_select_lex_unit *unit= derived->get_unit();
 
@@ -1404,4 +1440,3 @@ bool pushdown_cond_for_derived(THD *thd, Item *cond, TABLE_LIST *derived)
   thd->lex->current_select= save_curr_select;
   DBUG_RETURN(false);
 }
-

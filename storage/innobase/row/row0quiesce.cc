@@ -1,7 +1,7 @@
 /*****************************************************************************
 
 Copyright (c) 2012, 2016, Oracle and/or its affiliates. All Rights Reserved.
-Copyright (c) 2017, MariaDB Corporation.
+Copyright (c) 2017, 2018, MariaDB Corporation.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License as published by the Free Software
@@ -13,7 +13,7 @@ FOR A PARTICULAR PURPOSE. See the GNU General Public License for more details.
 
 You should have received a copy of the GNU General Public License along with
 this program; if not, write to the Free Software Foundation, Inc.,
-51 Franklin Street, Suite 500, Boston, MA 02110-1335 USA
+51 Franklin Street, Fifth Floor, Boston, MA 02110-1335 USA
 
 *****************************************************************************/
 
@@ -24,14 +24,11 @@ Quiesce a tablespace.
 Created 2012-02-08 by Sunny Bains.
 *******************************************************/
 
-#include "ha_prototypes.h"
-
 #include "row0quiesce.h"
 #include "row0mysql.h"
 #include "ibuf0ibuf.h"
 #include "srv0start.h"
 #include "trx0purge.h"
-#include "fsp0sysspace.h"
 
 #ifdef HAVE_MY_AES_H
 #include <my_aes.h>
@@ -67,7 +64,7 @@ row_quiesce_write_index_fields(
 
 			ib_senderrf(
 				thd, IB_LOG_LEVEL_WARN, ER_IO_WRITE_ERROR,
-				errno, strerror(errno),
+				(ulong) errno, strerror(errno),
 				"while writing index fields.");
 
 			return(DB_IO_ERROR);
@@ -87,7 +84,7 @@ row_quiesce_write_index_fields(
 
 			ib_senderrf(
 				thd, IB_LOG_LEVEL_WARN, ER_IO_WRITE_ERROR,
-				errno, strerror(errno),
+				(ulong) errno, strerror(errno),
 				"while writing index column.");
 
 			return(DB_IO_ERROR);
@@ -121,7 +118,7 @@ row_quiesce_write_indexes(
 		if (fwrite(row, 1,  sizeof(row), file) != sizeof(row)) {
 			ib_senderrf(
 				thd, IB_LOG_LEVEL_WARN, ER_IO_WRITE_ERROR,
-				errno, strerror(errno),
+				(ulong) errno, strerror(errno),
 				"while writing index count.");
 
 			return(DB_IO_ERROR);
@@ -145,7 +142,7 @@ row_quiesce_write_indexes(
 		mach_write_to_8(ptr, index->id);
 		ptr += sizeof(index_id_t);
 
-		mach_write_to_4(ptr, index->space);
+		mach_write_to_4(ptr, table->space_id);
 		ptr += sizeof(ib_uint32_t);
 
 		mach_write_to_4(ptr, index->page);
@@ -175,7 +172,7 @@ row_quiesce_write_indexes(
 
 			ib_senderrf(
 				thd, IB_LOG_LEVEL_WARN, ER_IO_WRITE_ERROR,
-				errno, strerror(errno),
+				(ulong) errno, strerror(errno),
 				"while writing index meta-data.");
 
 			return(DB_IO_ERROR);
@@ -196,7 +193,7 @@ row_quiesce_write_indexes(
 
 			ib_senderrf(
 				thd, IB_LOG_LEVEL_WARN, ER_IO_WRITE_ERROR,
-				errno, strerror(errno),
+				(ulong) errno, strerror(errno),
 				"while writing index name.");
 
 			return(DB_IO_ERROR);
@@ -239,7 +236,11 @@ row_quiesce_write_table(
 		mach_write_to_4(ptr, col->len);
 		ptr += sizeof(ib_uint32_t);
 
-		mach_write_to_4(ptr, col->mbminmaxlen);
+		/* FIXME: This will not work if mbminlen>4.
+		This field is also redundant, because the lengths
+		are a property of the character set encoding, which
+		in turn is encodedin prtype above. */
+		mach_write_to_4(ptr, ulint(col->mbmaxlen * 5 + col->mbminlen));
 		ptr += sizeof(ib_uint32_t);
 
 		mach_write_to_4(ptr, col->ind);
@@ -256,7 +257,7 @@ row_quiesce_write_table(
 		if (fwrite(row, 1,  sizeof(row), file) != sizeof(row)) {
 			ib_senderrf(
 				thd, IB_LOG_LEVEL_WARN, ER_IO_WRITE_ERROR,
-				errno, strerror(errno),
+				(ulong) errno, strerror(errno),
 				"while writing table column data.");
 
 			return(DB_IO_ERROR);
@@ -283,7 +284,7 @@ row_quiesce_write_table(
 
 			ib_senderrf(
 				thd, IB_LOG_LEVEL_WARN, ER_IO_WRITE_ERROR,
-				errno, strerror(errno),
+				(ulong) errno, strerror(errno),
 				"while writing column name.");
 
 			return(DB_IO_ERROR);
@@ -315,7 +316,7 @@ row_quiesce_write_header(
 	if (fwrite(&value, 1,  sizeof(value), file) != sizeof(value)) {
 		ib_senderrf(
 			thd, IB_LOG_LEVEL_WARN, ER_IO_WRITE_ERROR,
-			errno, strerror(errno),
+			(ulong) errno, strerror(errno),
 			"while writing meta-data version number.");
 
 		return(DB_IO_ERROR);
@@ -345,7 +346,7 @@ row_quiesce_write_header(
 
 		ib_senderrf(
 			thd, IB_LOG_LEVEL_WARN, ER_IO_WRITE_ERROR,
-			errno, strerror(errno),
+			(ulong) errno, strerror(errno),
 			"while writing hostname.");
 
 		return(DB_IO_ERROR);
@@ -365,7 +366,7 @@ row_quiesce_write_header(
 
 		ib_senderrf(
 			thd, IB_LOG_LEVEL_WARN, ER_IO_WRITE_ERROR,
-			errno, strerror(errno),
+			(ulong) errno, strerror(errno),
 			"while writing table name.");
 
 		return(DB_IO_ERROR);
@@ -381,7 +382,7 @@ row_quiesce_write_header(
 	if (fwrite(row, 1,  sizeof(ib_uint64_t), file) != sizeof(ib_uint64_t)) {
 		ib_senderrf(
 			thd, IB_LOG_LEVEL_WARN, ER_IO_WRITE_ERROR,
-			errno, strerror(errno),
+			(ulong) errno, strerror(errno),
 			"while writing table autoinc value.");
 
 		return(DB_IO_ERROR);
@@ -390,7 +391,7 @@ row_quiesce_write_header(
 	byte*		ptr = row;
 
 	/* Write the system page size. */
-	mach_write_to_4(ptr, UNIV_PAGE_SIZE);
+	mach_write_to_4(ptr, srv_page_size);
 	ptr += sizeof(ib_uint32_t);
 
 	/* Write the table->flags. */
@@ -405,7 +406,7 @@ row_quiesce_write_header(
 	if (fwrite(row, 1,  sizeof(row), file) != sizeof(row)) {
 		ib_senderrf(
 			thd, IB_LOG_LEVEL_WARN, ER_IO_WRITE_ERROR,
-			errno, strerror(errno),
+			(ulong) errno, strerror(errno),
 			"while writing table meta-data.");
 
 		return(DB_IO_ERROR);
@@ -458,7 +459,7 @@ row_quiesce_write_cfg(
 
 			ib_senderrf(
 				thd, IB_LOG_LEVEL_WARN, ER_IO_WRITE_ERROR,
-				errno, strerror(errno), msg);
+				(ulong) errno, strerror(errno), msg);
 		}
 
 		if (fclose(file) != 0) {
@@ -468,7 +469,7 @@ row_quiesce_write_cfg(
 
 			ib_senderrf(
 				thd, IB_LOG_LEVEL_WARN, ER_IO_WRITE_ERROR,
-				errno, strerror(errno), msg);
+				(ulong) errno, strerror(errno), msg);
 		}
 	}
 
@@ -517,15 +518,15 @@ row_quiesce_table_start(
 
 	ut_a(trx->mysql_thd != 0);
 
-	ut_ad(fil_space_get(table->space) != NULL);
+	ut_ad(table->space != NULL);
 	ib::info() << "Sync to disk of " << table->name << " started.";
 
 	if (srv_undo_sources) {
-		trx_purge_stop();
+		purge_sys.stop();
 	}
 
 	for (ulint count = 0;
-	     ibuf_merge_space(table->space) != 0
+	     ibuf_merge_space(table->space_id) != 0
 	     && !trx_is_interrupted(trx);
 	     ++count) {
 		if (!(count % 20)) {
@@ -537,7 +538,8 @@ row_quiesce_table_start(
 	if (!trx_is_interrupted(trx)) {
 		{
 			FlushObserver observer(table->space, trx, NULL);
-			buf_LRU_flush_or_remove_pages(table->space, &observer);
+			buf_LRU_flush_or_remove_pages(table->space_id,
+						      &observer);
 		}
 
 		if (trx_is_interrupted(trx)) {
@@ -604,7 +606,7 @@ row_quiesce_table_complete(
 	}
 
 	if (srv_undo_sources) {
-		trx_purge_run();
+		purge_sys.resume();
 	}
 
 	dberr_t	err = row_quiesce_set_state(table, QUIESCE_NONE, trx);
@@ -630,13 +632,13 @@ row_quiesce_set_state(
 
 		return(DB_UNSUPPORTED);
 
-	} else if (dict_table_is_temporary(table)) {
+	} else if (table->is_temporary()) {
 
 		ib_senderrf(trx->mysql_thd, IB_LOG_LEVEL_WARN,
 			    ER_CANNOT_DISCARD_TEMPORARY_TABLE);
 
 		return(DB_UNSUPPORTED);
-	} else if (table->space == srv_sys_space.space_id()) {
+	} else if (table->space_id == TRX_SYS_SPACE) {
 
 		char	table_name[MAX_FULL_NAME_LEN + 1];
 

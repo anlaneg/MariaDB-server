@@ -11,7 +11,7 @@
 
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
-   Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02111-1301 USA */
+   Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1335 USA */
 
 /* Written by Sergei A. Golubchik, who has a shared copyright to this code */
 
@@ -28,9 +28,9 @@ FT_INFO *maria_ft_init_search(uint flags, void *info, uint keynr,
   FT_INFO *res;
   if (flags & FT_BOOL)
     res= maria_ft_init_boolean_search((MARIA_HA *) info, keynr, query,
-				      query_len, cs);
+				      (uint)query_len, cs);
   else
-    res= maria_ft_init_nlq_search((MARIA_HA *) info, keynr, query, query_len,
+    res= maria_ft_init_nlq_search((MARIA_HA *) info, keynr, query, (uint)query_len,
 				  flags, record);
   return res;
 }

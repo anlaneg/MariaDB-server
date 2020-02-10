@@ -12,17 +12,17 @@
 
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
-   Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA */
+   Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1335  USA */
 
 #ifndef SQL_ERROR_H
 #define SQL_ERROR_H
 
 #include "sql_list.h" 	/* Sql_alloc, MEM_ROOT, list */
-#include "m_string.h"		/* LEX_STRING */
-#include "sql_string.h"       /* String */
-#include "sql_plist.h"        /* I_P_List */
-#include "mysql_com.h"        /* MYSQL_ERRMSG_SIZE */
-#include "my_time.h"          /* MYSQL_TIME */
+#include "sql_type_int.h" // Longlong_hybrid
+#include "sql_string.h"                        /* String */
+#include "sql_plist.h" /* I_P_List */
+#include "mysql_com.h" /* MYSQL_ERRMSG_SIZE */
+#include "my_time.h"   /* MYSQL_TIME */
 #include "decimal.h"
 
 class THD;
@@ -591,7 +591,7 @@ private:
     @return true if the Warning_info contains an SQL-condition with the given
     message.
   */
-  bool has_sql_condition(const char *message_str, ulong message_length) const;
+  bool has_sql_condition(const char *message_str, size_t message_length) const;
 
   /**
     Reset the warning information. Clear all warnings,
@@ -843,13 +843,11 @@ public:
   }
 };
 
-class ErrConvInteger : public ErrConv
+class ErrConvInteger : public ErrConv, public Longlong_hybrid
 {
-  longlong m_value;
-  bool m_unsigned;
 public:
   ErrConvInteger(longlong num_arg, bool unsigned_flag= false) :
-    ErrConv(), m_value(num_arg), m_unsigned(unsigned_flag) {}
+    ErrConv(), Longlong_hybrid(num_arg, unsigned_flag) {}
   const char *ptr() const
   {
     return m_unsigned ? ullstr(m_value, err_buffer) :
@@ -1089,7 +1087,7 @@ public:
   ulong current_statement_warn_count() const
   { return get_warning_info()->current_statement_warn_count(); }
 
-  bool has_sql_condition(const char *message_str, ulong message_length) const
+  bool has_sql_condition(const char *message_str, size_t message_length) const
   { return get_warning_info()->has_sql_condition(message_str, message_length); }
 
   void reset_for_next_command()
@@ -1174,7 +1172,7 @@ public:
 
   void copy_non_errors_from_wi(THD *thd, const Warning_info *src_wi);
 
-protected:
+private:
   Warning_info *get_warning_info() { return m_wi_stack.front(); }
 
   const Warning_info *get_warning_info() const { return m_wi_stack.front(); }
@@ -1240,12 +1238,12 @@ void push_warning_printf(THD *thd, Sql_condition::enum_warning_level level,
 
 bool mysqld_show_warnings(THD *thd, ulong levels_to_show);
 
-uint32 convert_error_message(char *to, uint32 to_length,
+size_t convert_error_message(char *to, size_t to_length,
                              CHARSET_INFO *to_cs,
-                             const char *from, uint32 from_length,
+                             const char *from, size_t from_length,
                              CHARSET_INFO *from_cs, uint *errors);
 
-extern const LEX_STRING warning_level_names[];
+extern const LEX_CSTRING warning_level_names[];
 
 bool is_sqlstate_valid(const LEX_CSTRING *sqlstate);
 /**

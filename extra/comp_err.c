@@ -13,7 +13,7 @@
 
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
-   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA
+   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1335  USA
 */
 
 /*
@@ -969,6 +969,7 @@ static struct errors *generate_empty_message(uint d_code, my_bool skip)
   new_error->d_code=    d_code;
   new_error->sql_code1= empty_string;
   new_error->sql_code2= empty_string;
+  new_error->next_error= 0;
 
   message.text= 0;              /* If skip set, don't generate a text */
 
@@ -998,6 +999,7 @@ static struct errors *parse_error_string(char *str, int er_count)
                                                MYF(MY_WME))))
     DBUG_RETURN(0);
 
+  new_error->next_error= 0;
   if (my_init_dynamic_array(&new_error->msg, sizeof(struct message), 0, 0, MYF(0)))
     DBUG_RETURN(0);				/* OOM: Fatal error */
 

@@ -11,7 +11,7 @@
 
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
-   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA */
+   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1335  USA */
 
 #ifndef _SQL_PROFILE_H
 #define _SQL_PROFILE_H
@@ -227,7 +227,7 @@ private:
   QUERY_PROFILE(PROFILING *profiling_arg, const char *status_arg);
   ~QUERY_PROFILE();
 
-  void set_query_source(char *query_source_arg, uint query_length_arg);
+  void set_query_source(char *query_source_arg, size_t query_length_arg);
 
   /* Add a profile status change to the current profile. */
   void new_status(const char *status_arg,
@@ -275,7 +275,7 @@ public:
 
     This must be called exactly once per descrete statement.
   */
-  void set_query_source(char *query_source_arg, uint query_length_arg)
+  void set_query_source(char *query_source_arg, size_t query_length_arg)
   {
     if (unlikely(current))
       current->set_query_source(query_source_arg, query_length_arg);

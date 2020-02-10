@@ -12,7 +12,7 @@
 
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software Foundation,
-   51 Franklin Street, Suite 500, Boston, MA 02110-1335 USA */
+   51 Franklin Street, Fifth Floor, Boston, MA 02110-1335 USA */
 
 
 /**
@@ -252,16 +252,11 @@ static void track_table_access(THD *thd, TABLE **tables, size_t count)
 {
   if (thd->variables.session_track_transaction_info > TX_TRACK_NONE)
   {
-    Transaction_state_tracker *tst= (Transaction_state_tracker *)
-      thd->session_tracker.get_tracker(TRANSACTION_INFO_TRACKER);
-
     while (count--)
     {
-      TABLE *t= tables[count];
-
-      if (t)
-        tst->add_trx_state(thd,  t->reginfo.lock_type,
-                           t->file->has_transaction_manager());
+      if (TABLE *t= tables[count])
+        thd->session_tracker.transaction_info.add_trx_state(thd,
+          t->reginfo.lock_type, t->file->has_transaction_manager());
     }
   }
 }
@@ -379,7 +374,7 @@ end:
 
 static int lock_external(THD *thd, TABLE **tables, uint count)
 {
-  reg1 uint i;
+  uint i;
   int lock_type,error;
   DBUG_ENTER("lock_external");
 
@@ -393,7 +388,7 @@ static int lock_external(THD *thd, TABLE **tables, uint count)
 	 (*tables)->reginfo.lock_type <= TL_READ_NO_INSERT))
       lock_type=F_RDLCK;
 
-    if ((error=(*tables)->file->ha_external_lock(thd,lock_type)))
+    if (unlikely((error=(*tables)->file->ha_external_lock(thd,lock_type))))
     {
       (*tables)->file->print_error(error, MYF(0));
       while (--i)
@@ -439,7 +434,7 @@ void mysql_unlock_tables(THD *thd, MYSQL_LOCK *sql_lock, bool free_lock)
     DBUG_ASSERT(!(sql_lock->flags & GET_LOCK_ON_THD));
     my_free(sql_lock);
   }
-  if (!errors)
+  if (likely(!errors))
     thd->clear_error();
   THD_STAGE_INFO(thd, org_stage);
   DBUG_VOID_RETURN;
@@ -539,7 +534,7 @@ void mysql_lock_remove(THD *thd, MYSQL_LOCK *locked,TABLE *table)
 {
   if (locked)
   {
-    reg1 uint i;
+    uint i;
     for (i=0; i < locked->table_count; i++)
     {
       if (locked->table[i] == table)
@@ -593,22 +588,6 @@ void mysql_lock_remove(THD *thd, MYSQL_LOCK *locked,TABLE *table)
       }
     }
   }
-}
-
-
-/** Abort all other threads waiting to get lock in table. */
-
-void mysql_lock_abort(THD *thd, TABLE *table, bool upgrade_lock)
-{
-  MYSQL_LOCK *locked;
-  DBUG_ENTER("mysql_lock_abort");
-
-  if ((locked= get_lock_data(thd, &table, 1, GET_LOCK_UNLOCK | GET_LOCK_ON_THD)))
-  {
-    for (uint i=0; i < locked->lock_count; i++)
-      thr_abort_locks(locked->locks[i]->lock, upgrade_lock);
-  }
-  DBUG_VOID_RETURN;
 }
 
 
@@ -726,7 +705,7 @@ static int unlock_external(THD *thd, TABLE **table,uint count)
     if ((*table)->current_lock != F_UNLCK)
     {
       (*table)->current_lock = F_UNLCK;
-      if ((error=(*table)->file->ha_external_lock(thd, F_UNLCK)))
+      if (unlikely((error=(*table)->file->ha_external_lock(thd, F_UNLCK))))
       {
         error_code= error;
         (*table)->file->print_error(error, MYF(0));
@@ -747,6 +726,7 @@ static int unlock_external(THD *thd, TABLE **table,uint count)
            - GET_LOCK_UNLOCK      : If we should send TL_IGNORE to store lock
            - GET_LOCK_STORE_LOCKS : Store lock info in TABLE
            - GET_LOCK_SKIP_SEQUENCES : Ignore sequences (for temporary unlock)
+           - GET_LOCK_ON_THD      : Store lock in thd->mem_root
 */
 
 MYSQL_LOCK *get_lock_data(THD *thd, TABLE **table_ptr, uint count, uint flags)
@@ -1093,8 +1073,8 @@ void Global_read_lock::unlock_global_read_lock(THD *thd)
         int ret = wsrep->resync(wsrep);
         if (ret != WSREP_OK)
         {
-          WSREP_WARN("resync failed %d for FTWRL: db: %s, query: %s", ret,
-                     (thd->db ? thd->db : "(null)"), thd->query());
+          WSREP_WARN("resync failed %d for FTWRL: db: %s, query: %s",
+                     ret, thd->get_db(), thd->query());
           DBUG_VOID_RETURN;
         }
       }
@@ -1180,7 +1160,7 @@ bool Global_read_lock::make_global_read_lock_block_commit(THD *thd)
     if (rcode != WSREP_OK)
     {
       WSREP_WARN("FTWRL desync failed %d for schema: %s, query: %s",
-                 rcode, (thd->db ? thd->db : "(null)"), thd->query());
+                 rcode, thd->get_db(), thd->query());
       my_message(ER_LOCK_DEADLOCK, "wsrep desync failed for FTWRL", MYF(0));
       DBUG_RETURN(TRUE);
     }

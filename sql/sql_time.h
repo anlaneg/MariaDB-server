@@ -12,7 +12,7 @@
 
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
-   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA */
+   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1335  USA */
 
 #ifndef SQL_TIME_INCLUDED
 #define SQL_TIME_INCLUDED
@@ -38,18 +38,17 @@ bool time_to_datetime(MYSQL_TIME *ltime);
 void time_to_daytime_interval(MYSQL_TIME *l_time);
 bool get_date_from_daynr(long daynr,uint *year, uint *month, uint *day);
 my_time_t TIME_to_timestamp(THD *thd, const MYSQL_TIME *t, uint *error_code);
-bool str_to_datetime_with_warn(CHARSET_INFO *cs, const char *str,
-                               uint length, MYSQL_TIME *l_time,
+bool str_to_datetime_with_warn(CHARSET_INFO *cs, const char *str, size_t length, MYSQL_TIME *l_time,
                                ulonglong flags);
 bool double_to_datetime_with_warn(double value, MYSQL_TIME *ltime,
                                   ulonglong fuzzydate,
-                                  const char *name);
+                                  const TABLE_SHARE *s, const char *name);
 bool decimal_to_datetime_with_warn(const my_decimal *value, MYSQL_TIME *ltime,
                                    ulonglong fuzzydate,
-                                   const char *name);
+                                   const TABLE_SHARE *s, const char *name);
 bool int_to_datetime_with_warn(bool neg, ulonglong value, MYSQL_TIME *ltime,
                                ulonglong fuzzydate,
-                               const char *name);
+                               const TABLE_SHARE *s, const char *name);
 
 bool time_to_datetime(THD *thd, const MYSQL_TIME *tm, MYSQL_TIME *dt);
 bool time_to_datetime_with_warn(THD *thd,
@@ -119,15 +118,15 @@ void make_truncated_value_warning(THD *thd,
                                   Sql_condition::enum_warning_level level,
                                   const ErrConv *str_val,
                                   timestamp_type time_type,
-                                  const char *field_name);
+                                  const TABLE_SHARE *s, const char *field_name);
 
 static inline void make_truncated_value_warning(THD *thd,
                 Sql_condition::enum_warning_level level, const char *str_val,
-                uint str_length, timestamp_type time_type,
-                const char *field_name)
+		size_t str_length, timestamp_type time_type,
+                const TABLE_SHARE *s, const char *field_name)
 {
   const ErrConvString str(str_val, str_length, &my_charset_bin);
-  make_truncated_value_warning(thd, level, &str, time_type, field_name);
+  make_truncated_value_warning(thd, level, &str, time_type, s, field_name);
 }
 
 extern DATE_TIME_FORMAT *date_time_format_make(timestamp_type format_type,
@@ -141,9 +140,11 @@ bool my_TIME_to_str(const MYSQL_TIME *ltime, String *str, uint dec);
 
 /* MYSQL_TIME operations */
 bool date_add_interval(MYSQL_TIME *ltime, interval_type int_type,
-                       INTERVAL interval);
+                       const INTERVAL &interval);
 bool calc_time_diff(const MYSQL_TIME *l_time1, const MYSQL_TIME *l_time2,
                     int l_sign, longlong *seconds_out, long *microseconds_out);
+int append_interval(String *str, interval_type int_type,
+                    const INTERVAL &interval);
 /**
   Calculate time difference between two MYSQL_TIME values and
   store the result as an out MYSQL_TIME value in MYSQL_TIMESTAMP_TIME format.
@@ -179,12 +180,12 @@ bool parse_date_time_format(timestamp_type format_type,
                             const char *format, uint format_length,
                             DATE_TIME_FORMAT *date_time_format);
 /* Character set-aware version of str_to_time() */
-bool str_to_time(CHARSET_INFO *cs, const char *str,uint length,
+bool str_to_time(CHARSET_INFO *cs, const char *str,size_t length,
                  MYSQL_TIME *l_time, ulonglong fuzzydate,
                  MYSQL_TIME_STATUS *status);
 /* Character set-aware version of str_to_datetime() */
 bool str_to_datetime(CHARSET_INFO *cs,
-                     const char *str, uint length,
+                     const char *str, size_t length,
                      MYSQL_TIME *l_time, ulonglong flags,
                      MYSQL_TIME_STATUS *status);
 
@@ -232,5 +233,9 @@ bool check_date_with_warn(const MYSQL_TIME *ltime, ulonglong fuzzy_date,
 bool make_date_with_warn(MYSQL_TIME *ltime,
                          ulonglong fuzzy_date, timestamp_type ts_type);
 bool adjust_time_range_with_warn(MYSQL_TIME *ltime, uint dec);
+
+longlong pack_time(const MYSQL_TIME *my_time);
+void unpack_time(longlong packed, MYSQL_TIME *my_time,
+                 enum_mysql_timestamp_type ts_type);
 
 #endif /* SQL_TIME_INCLUDED */

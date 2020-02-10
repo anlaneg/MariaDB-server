@@ -40,6 +40,9 @@ extern const char *toku_patent_string;
 const char *toku_copyright_string = "Copyright (c) 2006, 2015, Percona and/or its affiliates. All rights reserved.";
 
 #include <my_global.h>
+
+extern int writing_rollback;
+
 #include <db.h>
 #include <errno.h>
 #include <string.h>
@@ -87,6 +90,10 @@ const char *toku_copyright_string = "Copyright (c) 2006, 2015, Percona and/or it
  int toku_set_trace_file (const char *fname __attribute__((__unused__))) { return 0; }
  int toku_close_trace_file (void) { return 0; } 
 #endif
+
+extern "C" {
+  uint force_recovery = 0;
+}
 
 // Set when env is panicked, never cleared.
 static int env_is_panicked = 0;
@@ -186,9 +193,12 @@ toku_ydb_init(void) {
 // Do not clean up resources if env is panicked, just exit ugly
 void 
 toku_ydb_destroy(void) {
+    if (!ydb_layer_status.initialized)
+        return;
     if (env_is_panicked == 0) {
         toku_ft_layer_destroy();
     }
+    ydb_layer_status.initialized = false;
 }
 
 static int
@@ -221,6 +231,9 @@ env_fs_redzone(DB_ENV *env, uint64_t total) {
 // Check the available space in the file systems used by tokuft and erect barriers when available space gets low.
 static int
 env_fs_poller(void *arg) {
+    if(force_recovery == 6) {
+	    return 0;
+    }
     DB_ENV *env = (DB_ENV *) arg;
     int r;
 
@@ -228,7 +241,7 @@ env_fs_poller(void *arg) {
     int in_red;    // set true to prevent certain operations (returning ENOSPC)
 
     // get the fs sizes for the home dir
-    uint64_t avail_size, total_size;
+    uint64_t avail_size = 0, total_size = 0;
     r = toku_get_filesystem_sizes(env->i->dir, &avail_size, NULL, &total_size);
     assert(r == 0);
     in_yellow = (avail_size < 2 * env_fs_redzone(env, total_size));
@@ -305,6 +318,9 @@ env_fs_init(DB_ENV *env) {
 // Initialize the minicron that polls file system space
 static int
 env_fs_init_minicron(DB_ENV *env) {
+    if(force_recovery == 6) {
+        return 0;
+    }
     int r = toku_minicron_setup(&env->i->fs_poller, env->i->fs_poll_time*1000, env_fs_poller, env); 
     if (r == 0)
         env->i->fs_poller_is_init = true;
@@ -644,7 +660,7 @@ static int validate_env(DB_ENV *env,
     path = toku_construct_full_name(
         2, env->i->dir, toku_product_name_strings.environmentdictionary);
     assert(path);
-    r = toku_stat(path, &buf);
+    r = toku_stat(path, &buf, toku_uninstrumented);
     if (r == 0) {
         expect_newenv = false;  // persistent info exists
     } else {
@@ -669,7 +685,7 @@ static int validate_env(DB_ENV *env,
         path = toku_construct_full_name(
             2, env->i->dir, toku_product_name_strings.rollback_cachefile);
         assert(path);
-        r = toku_stat(path, &buf);
+        r = toku_stat(path, &buf, toku_uninstrumented);
         if (r == 0) {
             if (expect_newenv)  // rollback cachefile exists, but persistent env
                                 // is missing
@@ -707,11 +723,11 @@ static int validate_env(DB_ENV *env,
     }
 
     // Test for fileops directory
-    if (r == 0) {
+    if (r == 0 && force_recovery != 6) {
         path = toku_construct_full_name(
             2, env->i->dir, toku_product_name_strings.fileopsdirectory);
         assert(path);
-        r = toku_stat(path, &buf);
+        r = toku_stat(path, &buf, toku_uninstrumented);
         if (r == 0) {
             if (expect_newenv)  // fileops directory exists, but persistent env
                                 // is missing
@@ -750,7 +766,7 @@ static int validate_env(DB_ENV *env,
     }
 
     // Test for recovery log
-    if ((r == 0) && (env->i->open_flags & DB_INIT_LOG)) {
+    if ((r == 0) && (env->i->open_flags & DB_INIT_LOG) && force_recovery != 6) {
         // if using transactions, test for existence of log
         r = ydb_recover_log_exists(env);  // return 0 or ENOENT
         if (expect_newenv && (r != ENOENT))
@@ -811,6 +827,27 @@ unlock_single_process(DB_ENV *env) {
 // (The set of necessary files is defined in the function validate_env() above.)
 static int 
 env_open(DB_ENV * env, const char *home, uint32_t flags, int mode) {
+
+    if(force_recovery == 6) {
+        {
+            const int len = strlen(toku_product_name_strings.rollback_cachefile);
+            toku_product_name_strings.rollback_cachefile[len] = '2';
+            toku_product_name_strings.rollback_cachefile[len+1] = 0;
+        }
+
+        {
+            const int len = strlen(toku_product_name_strings.single_process_lock);
+            toku_product_name_strings.single_process_lock[len] = '2';
+            toku_product_name_strings.single_process_lock[len+1] = 0;
+        }
+
+        {
+            const int len = strlen(toku_product_name_strings.environmentdictionary);
+            toku_product_name_strings.environmentdictionary[len] = '2';
+            toku_product_name_strings.environmentdictionary[len+1] = 0;
+        }
+    }
+
     HANDLE_PANICKED_ENV(env);
     int r;
     bool newenv;  // true iff creating a new environment
@@ -857,10 +894,11 @@ env_open(DB_ENV * env, const char *home, uint32_t flags, int mode) {
 
     // Verify that the home exists.
     toku_struct_stat buf;
-    r = toku_stat(home, &buf);
+    r = toku_stat(home, &buf, toku_uninstrumented);
     if (r != 0) {
         int e = get_error_errno();
-        r = toku_ydb_do_error(env, e, "Error from toku_stat(\"%s\",...)\n", home);
+        r = toku_ydb_do_error(
+            env, e, "Error from toku_stat(\"%s\",...)\n", home);
         goto cleanup;
     }
     unused_flags &= ~DB_PRIVATE;
@@ -876,13 +914,22 @@ env_open(DB_ENV * env, const char *home, uint32_t flags, int mode) {
     env->i->open_flags = flags;
     env->i->open_mode = mode;
 
+    // Instrumentation probe start
+    TOKU_PROBE_START(toku_instr_probe_1);
+
     env_setup_real_data_dir(env);
     env_setup_real_log_dir(env);
     env_setup_real_tmp_dir(env);
 
-    r = toku_single_process_lock(env->i->dir, "environment", &env->i->envdir_lockfd);
-    if (r!=0) goto cleanup;
-    r = toku_single_process_lock(env->i->real_data_dir, "data", &env->i->datadir_lockfd);
+    // Instrumentation probe stop
+    toku_instr_probe_1->stop();
+
+    r = toku_single_process_lock(
+        env->i->dir, "environment", &env->i->envdir_lockfd);
+    if (r != 0)
+        goto cleanup;
+    r = toku_single_process_lock(
+        env->i->real_data_dir, "data", &env->i->datadir_lockfd);
     if (r!=0) goto cleanup;
     r = toku_single_process_lock(env->i->real_log_dir, "logs", &env->i->logdir_lockfd);
     if (r!=0) goto cleanup;
@@ -891,7 +938,7 @@ env_open(DB_ENV * env, const char *home, uint32_t flags, int mode) {
 
     bool need_rollback_cachefile;
     need_rollback_cachefile = false;
-    if (flags & (DB_INIT_TXN | DB_INIT_LOG)) {
+    if (flags & (DB_INIT_TXN | DB_INIT_LOG) && force_recovery != 6) {
         need_rollback_cachefile = true;
     }
 
@@ -904,7 +951,7 @@ env_open(DB_ENV * env, const char *home, uint32_t flags, int mode) {
     r = ydb_maybe_upgrade_env(env, &last_lsn_of_clean_shutdown_read_from_log, &upgrade_in_progress);
     if (r!=0) goto cleanup;
 
-    if (upgrade_in_progress) {
+    if (upgrade_in_progress || force_recovery == 6) {
         // Delete old rollback file.  There was a clean shutdown, so it has nothing useful,
         // and there is no value in upgrading it.  It is simpler to just create a new one.
         char* rollback_filename = toku_construct_full_name(2, env->i->dir, toku_product_name_strings.rollback_cachefile);
@@ -922,9 +969,13 @@ env_open(DB_ENV * env, const char *home, uint32_t flags, int mode) {
 
     unused_flags &= ~DB_INIT_TXN & ~DB_INIT_LOG;
 
+    if(force_recovery == 6) {
+        flags |= DB_INIT_LOG | DB_INIT_TXN;
+    }
+
     // do recovery only if there exists a log and recovery is requested
     // otherwise, a log is created when the logger is opened later
-    if (!newenv) {
+    if (!newenv && force_recovery == 0) {
         if (flags & DB_INIT_LOG) {
             // the log does exist
             if (flags & DB_RECOVER) {
@@ -993,7 +1044,7 @@ env_open(DB_ENV * env, const char *home, uint32_t flags, int mode) {
         assert (using_txns);
         toku_logger_set_cachetable(env->i->logger, env->i->cachetable);
         if (!toku_logger_rollback_is_open(env->i->logger)) {
-            bool create_new_rollback_file = newenv | upgrade_in_progress;
+            bool create_new_rollback_file = newenv | upgrade_in_progress | (force_recovery == 6);
             r = toku_logger_open_rollback(env->i->logger, env->i->cachetable, create_new_rollback_file);
             if (r != 0) {
                 r = toku_ydb_do_error(env, r, "Cant open rollback\n");
@@ -1012,6 +1063,7 @@ env_open(DB_ENV * env, const char *home, uint32_t flags, int mode) {
         assert_zero(r);
         r = toku_db_use_builtin_key_cmp(env->i->persistent_environment);
         assert_zero(r);
+	writing_rollback++;
         r = toku_db_open_iname(env->i->persistent_environment, txn, toku_product_name_strings.environmentdictionary, DB_CREATE, mode);
         if (r != 0) {
             r = toku_ydb_do_error(env, r, "Cant open persistent env\n");
@@ -1044,6 +1096,7 @@ env_open(DB_ENV * env, const char *home, uint32_t flags, int mode) {
             assert_zero(r);
         }
         capture_persistent_env_contents(env, txn);
+	writing_rollback--;
     }
     {
         r = toku_db_create(&env->i->directory, env, 0);
@@ -1062,8 +1115,10 @@ env_open(DB_ENV * env, const char *home, uint32_t flags, int mode) {
         txn = NULL;
     }
     cp = toku_cachetable_get_checkpointer(env->i->cachetable);
-    r = toku_checkpoint(cp, env->i->logger, NULL, NULL, NULL, NULL, STARTUP_CHECKPOINT);
-    assert_zero(r);
+    if (!force_recovery) {
+        r = toku_checkpoint(cp, env->i->logger, NULL, NULL, NULL, NULL, STARTUP_CHECKPOINT);
+    }
+    writing_rollback--;
     env_fs_poller(env);          // get the file system state at startup
     r = env_fs_init_minicron(env);
     if (r != 0) {
@@ -2932,7 +2987,8 @@ toku_env_create(DB_ENV ** envp, uint32_t flags) {
     result->i->open_dbs_by_dname->create();
     XMALLOC(result->i->open_dbs_by_dict_id);
     result->i->open_dbs_by_dict_id->create();
-    toku_pthread_rwlock_init(&result->i->open_dbs_rwlock, NULL);
+    toku_pthread_rwlock_init(
+        *result_i_open_dbs_rwlock_key, &result->i->open_dbs_rwlock, nullptr);
 
     *envp = result;
     r = 0;

@@ -1,6 +1,7 @@
 /*****************************************************************************
 
 Copyright (c) 2013, 2016, Oracle and/or its affiliates. All Rights Reserved.
+Copyright (c) 2018, MariaDB Corporation.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License as published by the Free Software
@@ -12,7 +13,7 @@ FOR A PARTICULAR PURPOSE. See the GNU General Public License for more details.
 
 You should have received a copy of the GNU General Public License along with
 this program; if not, write to the Free Software Foundation, Inc.,
-51 Franklin Street, Suite 500, Boston, MA 02110-1335 USA
+51 Franklin Street, Fifth Floor, Boston, MA 02110-1335 USA
 
 *****************************************************************************/
 
@@ -26,12 +27,9 @@ Created 2013-7-26 by Kevin Lewis
 #ifndef fsp0file_h
 #define fsp0file_h
 
-#include "ha_prototypes.h"
-#include "log0log.h"
 #include "mem0mem.h"
 #include "os0file.h"
-#include "fil0crypt.h"
-#include <vector>
+#include "fil0fil.h"
 
 /** Types of raw partitions in innodb_data_file_path */
 enum device_t {
@@ -316,6 +314,25 @@ public:
 		return(m_last_os_error);
 	}
 
+	/** Check whether the file is empty.
+	@return true if file is empty */
+	bool	is_empty_file()		const
+	{
+#ifdef _WIN32
+		os_offset_t	offset =
+			(os_offset_t) m_file_info.nFileSizeLow
+			| ((os_offset_t) m_file_info.nFileSizeHigh << 32);
+
+		return (offset == 0);
+#else
+		return (m_file_info.st_size == 0);
+#endif
+	}
+
+	/** Check if the file exist.
+	@return true if file exists. */
+	bool exists()	const { return m_exists; }
+
 	/** Test if the filepath provided looks the same as this filepath
 	by string comparison. If they are two different paths to the same
 	file, same_as() will be used to show that after the files are opened.
@@ -363,7 +380,7 @@ private:
 	@param[in]	read_only_mode	if true, then readonly mode checks
 					are enforced.
 	@return DB_SUCCESS or DB_IO_ERROR if page cannot be read */
-	dberr_t read_first_page(bool read_first_page)
+	dberr_t read_first_page(bool read_only_mode)
 		MY_ATTRIBUTE((warn_unused_result));
 
 	/** Free the first page from memory when it is no longer needed. */
@@ -416,7 +433,8 @@ private:
 	/** Flags to use for opening the data file */
 	os_file_create_t	m_open_flags;
 
-	/** size in database pages */
+	/** size in megabytes or pages; converted from megabytes to
+	pages in SysTablespace::normalize_size() */
 	ulint			m_size;
 
 	/** ordinal position of this datafile in the tablespace */
@@ -479,7 +497,7 @@ public:
 		/* No op - base constructor is called. */
 	}
 
-	RemoteDatafile(const char* name, ulint size, ulint order)
+	RemoteDatafile(const char*, ulint, ulint)
 		:
 		m_link_filepath()
 	{
@@ -500,12 +518,6 @@ public:
 	{
 		return(m_link_filepath);
 	}
-
-	/** Set the link filepath. Use default datadir, the base name of
-	the path provided without its suffix, plus DOT_ISL.
-	@param[in]	path	filepath which contains a basename to use.
-				If NULL, use m_name as the basename. */
-	void set_link_filepath(const char* path);
 
 	/** Create a link filename based on the contents of m_name,
 	open that file, and read the contents into m_filepath.

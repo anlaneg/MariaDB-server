@@ -12,7 +12,7 @@
 
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
-   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA */
+   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1335  USA */
 
 #include "mariadb.h" // For HAVE_REPLICATION
 #include "sql_priv.h"
@@ -42,7 +42,8 @@ Master_info::Master_info(LEX_CSTRING *connection_name_arg,
    using_gtid(USE_GTID_NO), events_queued_since_last_gtid(0),
    gtid_reconnect_event_skip_count(0), gtid_event_seen(false),
    in_start_all_slaves(0), in_stop_all_slaves(0), in_flush_all_relay_logs(0),
-   users(0), killed(0)
+   users(0), killed(0),
+   total_ddl_groups(0), total_non_trans_groups(0), total_trans_groups(0)
 {
   char *tmp;
   host[0] = 0; user[0] = 0; password[0] = 0;
@@ -114,15 +115,6 @@ void Master_info::wait_until_free()
 Master_info::~Master_info()
 {
   wait_until_free();
-#ifdef WITH_WSREP
-  /*
-    Do not free "wsrep" rpl_filter. It will eventually be freed by
-    free_all_rpl_filters() when server terminates.
-  */
-  if (strncmp(connection_name.str, STRING_WITH_LEN("wsrep")))
-#endif
-  rpl_filters.delete_element(connection_name.str, connection_name.length,
-                             (void (*)(const char*, uchar*)) free_rpl_filter);
   my_free(const_cast<char*>(connection_name.str));
   delete_dynamic(&ignore_server_ids);
   mysql_mutex_destroy(&run_lock);
@@ -677,7 +669,7 @@ file '%s')", fname);
   mi->rli.is_relay_log_recovery= FALSE;
   // now change cache READ -> WRITE - must do this before flush_master_info
   reinit_io_cache(&mi->file, WRITE_CACHE, 0L, 0, 1);
-  if ((error= MY_TEST(flush_master_info(mi, TRUE, TRUE))))
+  if (unlikely((error= MY_TEST(flush_master_info(mi, TRUE, TRUE)))))
     sql_print_error("Failed to flush master info file");
   mysql_mutex_unlock(&mi->data_lock);
   DBUG_RETURN(error);
@@ -1181,7 +1173,7 @@ bool Master_info_index::init_all_master_info()
     }
     else
     {
-      /* Initialization of Master_info succeded. Add it to HASH */
+      /* Initialization of Master_info succeeded. Add it to HASH */
       if (global_system_variables.log_warnings > 1)
         sql_print_information("Initialized Master_info from '%s'",
                               buf_master_info_file);
@@ -1232,7 +1224,7 @@ bool Master_info_index::init_all_master_info()
   if (!err_num) // No Error on read Master_info
   {
     if (global_system_variables.log_warnings > 1)
-      sql_print_information("Reading of all Master_info entries succeded");
+      sql_print_information("Reading of all Master_info entries succeeded");
     DBUG_RETURN(0);
   }
   if (succ_num) // Have some Error and some Success
@@ -1360,7 +1352,7 @@ Master_info_index::get_master_info(const LEX_CSTRING *connection_name,
 {
   Master_info *mi;
   char buff[MAX_CONNECTION_NAME+1], *res;
-  uint buff_length;
+  size_t buff_length;
   DBUG_ENTER("get_master_info");
   DBUG_PRINT("enter",
              ("connection_name: '%.*s'", (int) connection_name->length,
@@ -1648,7 +1640,7 @@ bool Master_info_index::start_all_slaves(THD *thd)
     error= start_slave(thd, mi, 1);
     mi->release();
     mysql_mutex_lock(&LOCK_active_mi);
-    if (error)
+    if (unlikely(error))
     {
       my_error(ER_CANT_START_STOP_SLAVE, MYF(0),
                "START",
@@ -1721,7 +1713,7 @@ bool Master_info_index::stop_all_slaves(THD *thd)
     error= stop_slave(thd, mi, 1);
     mi->release();
     mysql_mutex_lock(&LOCK_active_mi);
-    if (error)
+    if (unlikely(error))
     {
       my_error(ER_CANT_START_STOP_SLAVE, MYF(0),
                "STOP",
@@ -1914,7 +1906,7 @@ char *Domain_id_filter::as_string(enum_list_type type)
     return NULL;
 
   // Store the total number of elements followed by the individual elements.
-  ulong cur_len= sprintf(buf, "%u", ids->elements);
+  size_t cur_len= sprintf(buf, "%u", ids->elements);
   sz-= cur_len;
 
   for (uint i= 0; i < ids->elements; i++)
@@ -2020,7 +2012,7 @@ bool Master_info_index::flush_all_relay_logs()
     mi->release();
     mysql_mutex_lock(&LOCK_active_mi);
 
-    if (error)
+    if (unlikely(error))
     {
       result= true;
       break;

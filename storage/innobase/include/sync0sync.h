@@ -20,7 +20,7 @@ FOR A PARTICULAR PURPOSE. See the GNU General Public License for more details.
 
 You should have received a copy of the GNU General Public License along with
 this program; if not, write to the Free Software Foundation, Inc.,
-51 Franklin Street, Suite 500, Boston, MA 02110-1335 USA
+51 Franklin Street, Fifth Floor, Boston, MA 02110-1335 USA
 
 *****************************************************************************/
 
@@ -35,7 +35,6 @@ Created 9/5/1995 Heikki Tuuri
 #define sync0sync_h
 
 #include "univ.i"
-#include "ut0counter.h"
 
 #if defined UNIV_PFS_MUTEX || defined UNIV_PFS_RWLOCK
 
@@ -93,11 +92,7 @@ extern mysql_pfs_key_t	rw_lock_mutex_key;
 extern mysql_pfs_key_t	srv_innodb_monitor_mutex_key;
 extern mysql_pfs_key_t	srv_misc_tmpfile_mutex_key;
 extern mysql_pfs_key_t	srv_monitor_file_mutex_key;
-# ifdef UNIV_DEBUG
-extern mysql_pfs_key_t	sync_thread_mutex_key;
-# endif /* UNIV_DEBUG */
 extern mysql_pfs_key_t	buf_dblwr_mutex_key;
-extern mysql_pfs_key_t	trx_undo_mutex_key;
 extern mysql_pfs_key_t	trx_mutex_key;
 extern mysql_pfs_key_t	trx_pool_mutex_key;
 extern mysql_pfs_key_t	trx_pool_manager_mutex_key;

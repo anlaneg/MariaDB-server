@@ -13,6 +13,14 @@ set global server_audit_incl_users=null;
 set global server_audit_file_path='server_audit.log';
 set global server_audit_output_type=file;
 set global server_audit_logging=on;
+
+--error ER_WRONG_VALUE_FOR_VAR
+set global server_audit_incl_users= repeat("'root',", 10000);
+show variables like 'server_audit_incl_users';
+--error ER_WRONG_VALUE_FOR_VAR
+set global server_audit_excl_users= repeat("'root',", 10000);
+show variables like 'server_audit_excl_users';
+
 --sleep 2
 connect (con1,localhost,root,,mysql);
 connection default;
@@ -42,8 +50,10 @@ select 1,
         3;
 insert into t2 values (1), (2);
 select * from t2;
+--disable_ps_protocol
 --error ER_NO_SUCH_TABLE
 select * from t_doesnt_exist;
+--enable_ps_protocol
 --error 1064
 syntax_error_query;
 drop table renamed_t1, t2;
@@ -119,6 +129,36 @@ select 2;
 /*! select 2*/;
 /*comment*/ select 2;
 drop table t1;
+set global server_audit_events='query_dml_no_select';
+create table t1(id int);
+insert into t1 values (1), (2);
+select * from t1;
+select 2;
+drop table t1;
+
+set global server_audit_events='table';
+set global server_audit_incl_users='user1';
+
+create user user1@localhost;
+grant all on sa_db.* to user1@localhost;
+
+connect (cn1,localhost,user1,,sa_db);
+connection cn1;
+
+create table t1(id int) engine=myisam;
+insert delayed into t1 values (1), (2);
+connection default;
+--echo # Waiting until INSERT DELAYED thread does the insert.
+let $wait_condition= SELECT COUNT(*) = 2 FROM t1;
+--source include/wait_condition.inc
+drop table t1;
+
+set global server_audit_logging= off;
+set global server_audit_incl_users='root';
+set global server_audit_logging= on;
+disconnect cn1;
+drop user user1@localhost;
+
 set global server_audit_events='';
 
 set global server_audit_query_log_limit= 15;

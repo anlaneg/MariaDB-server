@@ -11,7 +11,7 @@
 
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
-   Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02111-1301 USA */
+   Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1335 USA */
 
 /* Written by Sergei A. Golubchik, who has a shared copyright to this code */
 
@@ -348,7 +348,8 @@ MYSQL_FTPARSER_PARAM* maria_ftparser_alloc_param(MARIA_HA *info)
     info->ftparser_param= (MYSQL_FTPARSER_PARAM *)
       my_malloc(MAX_PARAM_NR * sizeof(MYSQL_FTPARSER_PARAM) *
                 info->s->ftkeys, MYF(MY_WME | MY_ZEROFILL));
-    init_alloc_root(&info->ft_memroot, FTPARSER_MEMROOT_ALLOC_SIZE, 0, MYF(0));
+    init_alloc_root(&info->ft_memroot, "fulltext_parser",
+                    FTPARSER_MEMROOT_ALLOC_SIZE, 0, MYF(0));
   }
   return info->ftparser_param;
 }

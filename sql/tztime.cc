@@ -12,7 +12,7 @@
 
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
-   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA */
+   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1335  USA */
 
 /*
    Most of the following code and structures were derived from
@@ -147,6 +147,7 @@ typedef struct st_time_zone_info
 
 static my_bool prepare_tz_info(TIME_ZONE_INFO *sp, MEM_ROOT *storage);
 
+my_bool opt_leap, opt_verbose, opt_skip_write_binlog;
 
 #if defined(TZINFO2SQL) || defined(TESTTIME)
 
@@ -166,7 +167,7 @@ static my_bool
 tz_load(const char *name, TIME_ZONE_INFO *sp, MEM_ROOT *storage)
 {
   uchar *p;
-  int read_from_file;
+  ssize_t read_from_file;
   uint i;
   MYSQL_FILE *file;
 
@@ -187,7 +188,7 @@ tz_load(const char *name, TIME_ZONE_INFO *sp, MEM_ROOT *storage)
     uint ttisgmtcnt;
     char *tzinfo_buf;
 
-    read_from_file= mysql_file_fread(file, u.buf, sizeof(u.buf), MYF(MY_WME));
+    read_from_file= (ssize_t)mysql_file_fread(file, u.buf, sizeof(u.buf), MYF(MY_WME));
 
     if (mysql_file_fclose(file, MYF(MY_WME)) != 0)
       return 1;
@@ -1333,7 +1334,7 @@ Time_zone_offset::Time_zone_offset(long tz_offset_arg):
 {
   uint hours= abs((int)(offset / SECS_PER_HOUR));
   uint minutes= abs((int)(offset % SECS_PER_HOUR / SECS_PER_MIN));
-  ulong length= my_snprintf(name_buff, sizeof(name_buff), "%s%02d:%02d",
+  size_t length= my_snprintf(name_buff, sizeof(name_buff), "%s%02d:%02d",
                             (offset>=0) ? "+" : "-", hours, minutes);
   name.set(name_buff, length, &my_charset_latin1);
 }
@@ -1476,18 +1477,13 @@ static bool time_zone_tables_exist= 1;
   for dynamical loading of time zone descriptions.
 */
 
-static const LEX_STRING tz_tables_names[MY_TZ_TABLES_COUNT]=
+static const LEX_CSTRING tz_tables_names[MY_TZ_TABLES_COUNT]=
 {
-  { C_STRING_WITH_LEN("time_zone_name")},
-  { C_STRING_WITH_LEN("time_zone")},
-  { C_STRING_WITH_LEN("time_zone_transition_type")},
-  { C_STRING_WITH_LEN("time_zone_transition")}
+  { STRING_WITH_LEN("time_zone_name")},
+  { STRING_WITH_LEN("time_zone")},
+  { STRING_WITH_LEN("time_zone_transition_type")},
+  { STRING_WITH_LEN("time_zone_transition")}
 };
-
-/* Name of database to which those tables belong. */
-
-static const LEX_STRING tz_tables_db_name= { C_STRING_WITH_LEN("mysql")};
-
 
 class Tz_names_entry: public Sql_alloc
 {
@@ -1536,16 +1532,10 @@ my_offset_tzs_get_key(Time_zone_offset *entry,
 static void
 tz_init_table_list(TABLE_LIST *tz_tabs)
 {
-  bzero(tz_tabs, sizeof(TABLE_LIST) * MY_TZ_TABLES_COUNT);
-
   for (int i= 0; i < MY_TZ_TABLES_COUNT; i++)
   {
-    tz_tabs[i].alias= tz_tabs[i].table_name= tz_tables_names[i].str;
-    tz_tabs[i].table_name_length= tz_tables_names[i].length;
-    tz_tabs[i].db= tz_tables_db_name.str;
-    tz_tabs[i].db_length= tz_tables_db_name.length;
-    tz_tabs[i].lock_type= TL_READ;
-
+    tz_tabs[i].init_one_table(&MYSQL_SCHEMA_NAME, tz_tables_names + i,
+                              NULL, TL_READ);
     if (i != MY_TZ_TABLES_COUNT - 1)
       tz_tabs[i].next_global= tz_tabs[i].next_local= &tz_tabs[i+1];
     if (i != 0)
@@ -1606,9 +1596,9 @@ my_tz_init(THD *org_thd, const char *default_tzname, my_bool bootstrap)
   THD *thd;
   TABLE_LIST tz_tables[1+MY_TZ_TABLES_COUNT];
   TABLE *table;
+  const LEX_CSTRING tmp_table_name= { STRING_WITH_LEN("time_zone_leap_second") };
   Tz_names_entry *tmp_tzname;
   my_bool return_val= 1;
-  char db[]= "mysql";
   int res;
   DBUG_ENTER("my_tz_init");
 
@@ -1638,7 +1628,7 @@ my_tz_init(THD *org_thd, const char *default_tzname, my_bool bootstrap)
     my_hash_free(&tz_names);
     goto end;
   }
-  init_sql_alloc(&tz_storage, 32 * 1024, 0, MYF(0));
+  init_sql_alloc(&tz_storage, "timezone_storage", 32 * 1024, 0, MYF(0));
   mysql_mutex_init(key_tz_LOCK, &tz_LOCK, MY_MUTEX_INIT_FAST);
   tz_inited= 1;
 
@@ -1660,7 +1650,7 @@ my_tz_init(THD *org_thd, const char *default_tzname, my_bool bootstrap)
   {
     /* If we are in bootstrap mode we should not load time zone tables */
     return_val= time_zone_tables_exist= 0;
-    goto end_with_setting_default_tz;
+    goto end_with_cleanup;
   }
 
   /*
@@ -1669,13 +1659,10 @@ my_tz_init(THD *org_thd, const char *default_tzname, my_bool bootstrap)
     leap seconds shared by all time zones.
   */
 
-  thd->set_db(db, sizeof(db)-1);
+  thd->set_db(&MYSQL_SCHEMA_NAME);
   bzero((char*) &tz_tables[0], sizeof(TABLE_LIST));
-  tz_tables[0].alias= tz_tables[0].table_name=
-    (char*)"time_zone_leap_second";
-  tz_tables[0].table_name_length= 21;
-  tz_tables[0].db= db;
-  tz_tables[0].db_length= sizeof(db)-1;
+  tz_tables[0].alias= tz_tables[0].table_name= tmp_table_name;
+  tz_tables[0].db= MYSQL_SCHEMA_NAME;
   tz_tables[0].lock_type= TL_READ;
 
   tz_init_table_list(tz_tables+1);
@@ -1778,7 +1765,8 @@ end_with_setting_default_tz:
       most of them once more, but this is OK for system tables open
       for READ.
     */
-    if (!(global_system_variables.time_zone= my_tz_find(thd, &tmp_tzname2)))
+    if (unlikely(!(global_system_variables.time_zone=
+                   my_tz_find(thd, &tmp_tzname2))))
     {
       sql_print_error("Fatal error: Illegal or unknown default time zone '%s'",
                       default_tzname);
@@ -1793,7 +1781,7 @@ end_with_close:
 end_with_cleanup:
 
   /* if there were error free time zone describing structs */
-  if (return_val)
+  if (unlikely(return_val))
     my_tz_free();
 end:
   delete thd;
@@ -2441,6 +2429,14 @@ print_tz_leaps_as_sql(const TIME_ZONE_INFO *sp)
     We are assuming that there are only one list of leap seconds
     For all timezones.
   */
+  if (!opt_skip_write_binlog)
+      printf("\\d |\n"
+        "IF (select count(*) from information_schema.global_variables where\n"
+        "variable_name='wsrep_on' and variable_value='ON') = 1 THEN\n"
+        "ALTER TABLE time_zone_leap_second ENGINE=InnoDB;\n"
+        "END IF|\n"
+        "\\d ;\n");
+
   printf("TRUNCATE TABLE time_zone_leap_second;\n");
 
   if (sp->leapcnt)
@@ -2452,6 +2448,14 @@ print_tz_leaps_as_sql(const TIME_ZONE_INFO *sp)
              sp->lsis[i].ls_trans, sp->lsis[i].ls_corr);
     printf(";\n");
   }
+
+  if (!opt_skip_write_binlog)
+      printf("\\d |\n"
+        "IF (select count(*) from information_schema.global_variables where\n"
+        "variable_name='wsrep_on' and variable_value='ON') = 1 THEN\n"
+        "ALTER TABLE time_zone_leap_second ENGINE=MyISAM;\n"
+        "END IF|\n"
+        "\\d ;\n");
 
   printf("ALTER TABLE time_zone_leap_second ORDER BY Transition_time;\n");
 }
@@ -2564,7 +2568,8 @@ scan_tz_dir(char * name_end, uint symlink_recursion_level, uint verbose)
       }
       else if (MY_S_ISREG(cur_dir->dir_entry[i].mystat->st_mode))
       {
-        init_alloc_root(&tz_storage, 32768, 0, MYF(MY_THREAD_SPECIFIC));
+        init_alloc_root(&tz_storage, "timezone_storage", 32768, 0,
+                        MYF(MY_THREAD_SPECIFIC));
         if (!tz_load(fullname, &tz_info, &tz_storage))
           print_tz_as_sql(root_name_end + 1, &tz_info);
         else
@@ -2609,8 +2614,6 @@ scan_tz_dir(char * name_end, uint symlink_recursion_level, uint verbose)
 }
 
 
-my_bool opt_leap, opt_verbose;
-
 static const char *load_default_groups[]=
 { "mysql_tzinfo_to_sql", 0};
 
@@ -2631,6 +2634,8 @@ static struct my_option my_long_options[] =
    &opt_verbose, &opt_verbose, 0, GET_BOOL, NO_ARG, 0, 0, 0, 0, 0, 0},
   {"version", 'V', "Output version information and exit.",
    0, 0, 0, GET_NO_ARG, NO_ARG, 0, 0, 0, 0, 0, 0},
+  {"skip-write-binlog", 'S', "Do not replicate changes to time zone tables to other nodes in a Galera cluster",
+   &opt_skip_write_binlog,&opt_skip_write_binlog, 0, GET_BOOL, NO_ARG, 0, 0, 0, 0, 0, 0},
   { 0, 0, 0, 0, 0, 0, GET_NO_ARG, NO_ARG, 0, 0, 0, 0, 0, 0}
 };
 
@@ -2686,9 +2691,7 @@ main(int argc, char **argv)
   char **default_argv;
   MY_INIT(argv[0]);
 
-  if (load_defaults("my",load_default_groups,&argc,&argv))
-    exit(1);
-
+  load_defaults_or_exit("my", load_default_groups, &argc, &argv);
   default_argv= argv;
 
   if ((handle_options(&argc, &argv, my_long_options, get_one_option)))
@@ -2701,17 +2704,35 @@ main(int argc, char **argv)
     return 1;
   }
 
-  // Replicate MyISAM DDL for this session, cf. lp:1161432
-  // timezone info unfixable in XtraDB Cluster
-  printf("set @prep=if((select count(*) from information_schema.global_variables where variable_name='wsrep_on'), 'SET GLOBAL wsrep_replicate_myisam=?', 'do ?');\n"
-         "prepare set_wsrep_myisam from @prep;\n"
-         "set @toggle=1; execute set_wsrep_myisam using @toggle;\n");
+  if (opt_skip_write_binlog)
+    /* If skip_write_binlog is set and wsrep is compiled in we disable
+       sql_log_bin and wsrep_on to avoid Galera replicating below
+       truncate table clauses. This will allow user to set different
+       time zones to nodes in Galera cluster. */
+    printf("set @prep1=if((select count(*) from information_schema.global_variables where variable_name='wsrep_on' and variable_value='ON'), 'SET SESSION SQL_LOG_BIN=?, WSREP_ON=OFF;', 'do ?');\n"
+           "prepare set_wsrep_write_binlog from @prep1;\n"
+           "set @toggle=0; execute set_wsrep_write_binlog using @toggle;\n");
 
   if (argc == 1 && !opt_leap)
   {
     /* Argument is timezonedir */
 
     root_name_end= strmake_buf(fullname, argv[0]);
+
+    if(!opt_skip_write_binlog)
+    {
+      // Alter time zone tables to InnoDB if wsrep_on is enabled
+      // to allow changes to them to replicate with Galera
+      printf("\\d |\n"
+        "IF (select count(*) from information_schema.global_variables where\n"
+        "variable_name='wsrep_on' and variable_value='ON') = 1 THEN\n"
+        "ALTER TABLE time_zone ENGINE=InnoDB;\n"
+        "ALTER TABLE time_zone_name ENGINE=InnoDB;\n"
+        "ALTER TABLE time_zone_transition ENGINE=InnoDB;\n"
+        "ALTER TABLE time_zone_transition_type ENGINE=InnoDB;\n"
+        "END IF|\n"
+        "\\d ;\n");
+    }
 
     printf("TRUNCATE TABLE time_zone;\n");
     printf("TRUNCATE TABLE time_zone_name;\n");
@@ -2738,7 +2759,7 @@ main(int argc, char **argv)
       First argument is timezonefile.
       The second is timezonename if opt_leap is not given
     */
-    init_alloc_root(&tz_storage, 32768, 0, MYF(0));
+    init_alloc_root(&tz_storage, "timezone_storage", 32768, 0, MYF(0));
 
     if (tz_load(argv[0], &tz_info, &tz_storage))
     {
@@ -2754,8 +2775,19 @@ main(int argc, char **argv)
     free_root(&tz_storage, MYF(0));
   }
 
-  // Reset wsrep_replicate_myisam. lp:1161432
-  printf("set @toggle=0; execute set_wsrep_myisam using @toggle;\n");
+  if(!opt_skip_write_binlog)
+  {
+      // Fall back to MyISAM
+      printf("\\d |\n"
+        "IF (select count(*) from information_schema.global_variables where\n"
+        "variable_name='wsrep_on' and variable_value='ON') = 1 THEN\n"
+        "ALTER TABLE time_zone ENGINE=MyISAM;\n"
+        "ALTER TABLE time_zone_name ENGINE=MyISAM;\n"
+        "ALTER TABLE time_zone_transition ENGINE=MyISAM;\n"
+        "ALTER TABLE time_zone_transition_type ENGINE=MyISAM;\n"
+        "END IF|\n"
+        "\\d ;\n");
+  }
 
   free_defaults(default_argv);
   my_end(0);
@@ -2812,7 +2844,7 @@ main(int argc, char **argv)
 
   MY_INIT(argv[0]);
 
-  init_alloc_root(&tz_storage, 32768, MYF(0));
+  init_alloc_root(&tz_storage, "timezone_storage", 32768, MYF(0));
 
   /* let us set some well known timezone */
   setenv("TZ", "MET", 1);

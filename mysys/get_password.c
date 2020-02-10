@@ -12,7 +12,7 @@
 
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
-   Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA */
+   Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1335  USA */
 
 /*
 ** Ask for a password from tty
@@ -64,7 +64,6 @@ char *get_tty_password(const char *opt_message)
 {
   char to[80];
   char *pos=to,*end=to+sizeof(to)-1;
-  int i=0;
   DBUG_ENTER("get_tty_password");
   _cputs(opt_message ? opt_message : "Enter password: ");
   for (;;)

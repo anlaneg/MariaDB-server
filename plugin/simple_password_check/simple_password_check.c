@@ -12,7 +12,7 @@
 
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
-   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA */
+   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1335  USA */
 
 #include <mysqld_error.h>
 #include <my_attribute.h>
@@ -25,7 +25,7 @@ static unsigned min_length, min_digits, min_letters, min_others;
 static int validate(MYSQL_CONST_LEX_STRING *username,
                     MYSQL_CONST_LEX_STRING *password)
 {
-  unsigned digits=0 , uppers=0 , lowers=0, others=0, length= password->length;
+  unsigned digits=0 , uppers=0 , lowers=0, others=0, length= (unsigned)password->length;
   const char *ptr= password->str, *end= ptr + length;
 
   if (strncmp(password->str, username->str, length) == 0)

@@ -12,7 +12,7 @@
 
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
-   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA */
+   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1335  USA */
 
 /**
   @file
@@ -115,7 +115,7 @@ void unregister_slave(THD* thd, bool only_mine, bool need_mutex)
     1	Error.   Error message sent to client
 */
 
-int register_slave(THD* thd, uchar* packet, uint packet_length)
+int register_slave(THD* thd, uchar* packet, size_t packet_length)
 {
   int res;
   SLAVE_INFO *si;

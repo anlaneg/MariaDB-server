@@ -1,6 +1,6 @@
 --- instant_alter.result
 +++ instant_alter,4k.result
-@@ -181,7 +181,7 @@
+@@ -241,7 +241,7 @@
  SELECT clust_index_size FROM INFORMATION_SCHEMA.INNODB_SYS_TABLESTATS
  WHERE name = 'test/t2';
  clust_index_size
@@ -9,7 +9,7 @@
  connection default;
  ROLLBACK;
  connection analyze;
-@@ -250,7 +250,7 @@
+@@ -251,7 +251,7 @@
  SELECT clust_index_size FROM INFORMATION_SCHEMA.INNODB_SYS_TABLESTATS
  WHERE name = 'test/t2';
  clust_index_size
@@ -18,7 +18,7 @@
  connection default;
  BEGIN;
  UPDATE t2 SET d1 = repeat(id, 200);
-@@ -261,7 +261,7 @@
+@@ -262,7 +262,7 @@
  SELECT clust_index_size FROM INFORMATION_SCHEMA.INNODB_SYS_TABLESTATS
  WHERE name = 'test/t2';
  clust_index_size
@@ -27,7 +27,7 @@
  connection default;
  ROLLBACK;
  connection analyze;
-@@ -271,7 +271,7 @@
+@@ -272,7 +272,7 @@
  SELECT clust_index_size FROM INFORMATION_SCHEMA.INNODB_SYS_TABLESTATS
  WHERE name = 'test/t2';
  clust_index_size
@@ -36,7 +36,54 @@
  connection default;
  ALTER TABLE t2 DROP p;
  affected rows: 0
-@@ -374,7 +374,7 @@
+@@ -320,8 +320,14 @@
+ affected rows: 0
+ info: Records: 0  Duplicates: 0  Warnings: 0
+ ALTER TABLE t3 ADD COLUMN b BLOB NOT NULL;
++ERROR 42000: Row size too large. The maximum row size for the used table type, not counting BLOBs, is 1979. This includes storage overhead, check the manual. You have to change some columns to TEXT or BLOBs
++SET innodb_strict_mode = OFF;
+ affected rows: 0
+-info: Records: 0  Duplicates: 0  Warnings: 0
++ALTER TABLE t3 ADD COLUMN b BLOB NOT NULL;
++affected rows: 0
++info: Records: 0  Duplicates: 0  Warnings: 1
++Warnings:
++Warning	139	Row size too large (> 1979). Changing some columns to TEXT or BLOB or using ROW_FORMAT=DYNAMIC or ROW_FORMAT=COMPRESSED may help. In current row format, BLOB prefix of 768 bytes is stored inline.
+ INSERT INTO t3 SET id=4;
+ ERROR HY000: Field 'c2' doesn't have a default value
+ INSERT INTO t3 SET id=4, c2=0, b=0xf09f98b1;
+@@ -334,7 +340,9 @@
+ ALTER TABLE t3 CHANGE t phrase TEXT DEFAULT 0xc3a4c3a448,
+ CHANGE b b BLOB NOT NULL DEFAULT 'binary line of business';
+ affected rows: 4
+-info: Records: 4  Duplicates: 0  Warnings: 0
++info: Records: 4  Duplicates: 0  Warnings: 1
++Warnings:
++Warning	139	Row size too large (> 1979). Changing some columns to TEXT or BLOB or using ROW_FORMAT=DYNAMIC or ROW_FORMAT=COMPRESSED may help. In current row format, BLOB prefix of 768 bytes is stored inline.
+ INSERT INTO t3 SET id=5, c2=9;
+ Warnings:
+ Note	1265	Data truncated for column 'c7' at row 1
+@@ -348,7 +356,9 @@
+ 5	9	POLYGON((1 1,2 2,3 3,1 1))	1970-01-01 03:00:42	1970-01-01 03:00:42	NULL	03:00:42	1970-01-01	ääH	binary line of business
+ ALTER TABLE t3 DROP c3, DROP c7;
+ affected rows: 0
+-info: Records: 0  Duplicates: 0  Warnings: 0
++info: Records: 0  Duplicates: 0  Warnings: 1
++Warnings:
++Warning	139	Row size too large (> 1979). Changing some columns to TEXT or BLOB or using ROW_FORMAT=DYNAMIC or ROW_FORMAT=COMPRESSED may help. In current row format, BLOB prefix of 768 bytes is stored inline.
+ SELECT * FROM t3;
+ id	c2	c4	c5	c6	c8	phrase	b
+ 1	1	1970-01-01 03:00:42	1970-01-01 03:00:42	NULL	1970-01-01	The quick brown fox jumps over the lazy dog	
+@@ -376,6 +386,8 @@
+ (id INT PRIMARY KEY, c1 VARCHAR(4000), c2 VARCHAR(4000), c3 VARCHAR(1000),
+ p POINT NOT NULL DEFAULT ST_GeomFromText('POINT(0 0)'), SPATIAL INDEX(p))
+ ENGINE=InnoDB ROW_FORMAT=REDUNDANT;
++Warnings:
++Warning	139	Row size too large (> 1979). Changing some columns to TEXT or BLOB or using ROW_FORMAT=DYNAMIC or ROW_FORMAT=COMPRESSED may help. In current row format, BLOB prefix of 768 bytes is stored inline.
+ BEGIN;
+ INSERT INTO big
+ SET id=1, c1=REPEAT('a', 200), c2=REPEAT('b', 200), c3=REPEAT('c', 159);
+@@ -393,13 +405,15 @@
  SELECT clust_index_size FROM INFORMATION_SCHEMA.INNODB_SYS_TABLESTATS
  WHERE name = 'test/big';
  clust_index_size
@@ -45,7 +92,16 @@
  connection default;
  ALTER TABLE big ADD COLUMN
  (d1 INT DEFAULT 0, d2 VARCHAR(20) DEFAULT 'abcde',
-@@ -397,7 +397,7 @@
+ d3 TIMESTAMP NOT NULL DEFAULT current_timestamp ON UPDATE current_timestamp);
+ affected rows: 0
+-info: Records: 0  Duplicates: 0  Warnings: 0
++info: Records: 0  Duplicates: 0  Warnings: 1
++Warnings:
++Warning	139	Row size too large (> 1979). Changing some columns to TEXT or BLOB or using ROW_FORMAT=DYNAMIC or ROW_FORMAT=COMPRESSED may help. In current row format, BLOB prefix of 768 bytes is stored inline.
+ CHECKSUM TABLE big;
+ Table	Checksum
+ test.big	1705165209
+@@ -416,7 +430,7 @@
  SELECT clust_index_size FROM INFORMATION_SCHEMA.INNODB_SYS_TABLESTATS
  WHERE name = 'test/big';
  clust_index_size
@@ -54,7 +110,7 @@
  connection default;
  ROLLBACK;
  CHECKSUM TABLE big;
-@@ -410,7 +410,7 @@
+@@ -429,7 +443,7 @@
  SELECT clust_index_size FROM INFORMATION_SCHEMA.INNODB_SYS_TABLESTATS
  WHERE name = 'test/big';
  clust_index_size
@@ -62,8 +118,17 @@
 +8
  connection default;
  InnoDB		0 transactions not purged
- DROP TABLE t1,t2,t3,big;
-@@ -600,7 +600,7 @@
+ DROP TABLE t1,t2,t3,t4,big;
+@@ -515,6 +529,8 @@
+ CREATE TABLE t1 (a INT, b VARCHAR(500), c TEXT, UNIQUE(a,b)) ENGINE=InnoDB ROW_FORMAT=REDUNDANT;
+ ALTER TABLE t1 ADD d TEXT;
+ ALTER TABLE t1 ADD PRIMARY KEY (a,b);
++Warnings:
++Warning	139	Row size too large (> 1979). Changing some columns to TEXT or BLOB or using ROW_FORMAT=DYNAMIC or ROW_FORMAT=COMPRESSED may help. In current row format, BLOB prefix of 768 bytes is stored inline.
+ ALTER TABLE t1 ADD va INT AS (a) VIRTUAL;
+ DROP TABLE t1;
+ CREATE TABLE t1
+@@ -703,7 +719,7 @@
  SELECT clust_index_size FROM INFORMATION_SCHEMA.INNODB_SYS_TABLESTATS
  WHERE name = 'test/t2';
  clust_index_size
@@ -72,7 +137,7 @@
  connection default;
  ROLLBACK;
  connection analyze;
-@@ -610,7 +610,7 @@
+@@ -713,7 +729,7 @@
  SELECT clust_index_size FROM INFORMATION_SCHEMA.INNODB_SYS_TABLESTATS
  WHERE name = 'test/t2';
  clust_index_size
@@ -81,7 +146,7 @@
  connection default;
  BEGIN;
  UPDATE t2 SET d1 = repeat(id, 200);
-@@ -621,7 +621,7 @@
+@@ -724,7 +740,7 @@
  SELECT clust_index_size FROM INFORMATION_SCHEMA.INNODB_SYS_TABLESTATS
  WHERE name = 'test/t2';
  clust_index_size
@@ -90,7 +155,7 @@
  connection default;
  ROLLBACK;
  connection analyze;
-@@ -631,7 +631,7 @@
+@@ -734,7 +750,7 @@
  SELECT clust_index_size FROM INFORMATION_SCHEMA.INNODB_SYS_TABLESTATS
  WHERE name = 'test/t2';
  clust_index_size
@@ -99,7 +164,49 @@
  connection default;
  ALTER TABLE t2 DROP p;
  affected rows: 0
-@@ -734,7 +734,7 @@
+@@ -783,7 +799,9 @@
+ info: Records: 0  Duplicates: 0  Warnings: 0
+ ALTER TABLE t3 ADD COLUMN b BLOB NOT NULL;
+ affected rows: 0
+-info: Records: 0  Duplicates: 0  Warnings: 0
++info: Records: 0  Duplicates: 0  Warnings: 1
++Warnings:
++Warning	139	Row size too large (> 1982). Changing some columns to TEXT or BLOB or using ROW_FORMAT=DYNAMIC or ROW_FORMAT=COMPRESSED may help. In current row format, BLOB prefix of 768 bytes is stored inline.
+ INSERT INTO t3 SET id=4;
+ ERROR HY000: Field 'c2' doesn't have a default value
+ INSERT INTO t3 SET id=4, c2=0, b=0xf09f98b1;
+@@ -796,7 +814,9 @@
+ ALTER TABLE t3 CHANGE t phrase TEXT DEFAULT 0xc3a4c3a448,
+ CHANGE b b BLOB NOT NULL DEFAULT 'binary line of business';
+ affected rows: 4
+-info: Records: 4  Duplicates: 0  Warnings: 0
++info: Records: 4  Duplicates: 0  Warnings: 1
++Warnings:
++Warning	139	Row size too large (> 1982). Changing some columns to TEXT or BLOB or using ROW_FORMAT=DYNAMIC or ROW_FORMAT=COMPRESSED may help. In current row format, BLOB prefix of 768 bytes is stored inline.
+ INSERT INTO t3 SET id=5, c2=9;
+ Warnings:
+ Note	1265	Data truncated for column 'c7' at row 1
+@@ -810,7 +830,9 @@
+ 5	9	POLYGON((1 1,2 2,3 3,1 1))	1970-01-01 03:00:42	1970-01-01 03:00:42	NULL	03:00:42	1970-01-01	ääH	binary line of business
+ ALTER TABLE t3 DROP c3, DROP c7;
+ affected rows: 0
+-info: Records: 0  Duplicates: 0  Warnings: 0
++info: Records: 0  Duplicates: 0  Warnings: 1
++Warnings:
++Warning	139	Row size too large (> 1982). Changing some columns to TEXT or BLOB or using ROW_FORMAT=DYNAMIC or ROW_FORMAT=COMPRESSED may help. In current row format, BLOB prefix of 768 bytes is stored inline.
+ SELECT * FROM t3;
+ id	c2	c4	c5	c6	c8	phrase	b
+ 1	1	1970-01-01 03:00:42	1970-01-01 03:00:42	NULL	1970-01-01	The quick brown fox jumps over the lazy dog	
+@@ -838,6 +860,8 @@
+ (id INT PRIMARY KEY, c1 VARCHAR(4000), c2 VARCHAR(4000), c3 VARCHAR(1000),
+ p POINT NOT NULL DEFAULT ST_GeomFromText('POINT(0 0)'), SPATIAL INDEX(p))
+ ENGINE=InnoDB ROW_FORMAT=COMPACT;
++Warnings:
++Warning	139	Row size too large (> 1982). Changing some columns to TEXT or BLOB or using ROW_FORMAT=DYNAMIC or ROW_FORMAT=COMPRESSED may help. In current row format, BLOB prefix of 768 bytes is stored inline.
+ BEGIN;
+ INSERT INTO big
+ SET id=1, c1=REPEAT('a', 200), c2=REPEAT('b', 200), c3=REPEAT('c', 159);
+@@ -855,13 +879,15 @@
  SELECT clust_index_size FROM INFORMATION_SCHEMA.INNODB_SYS_TABLESTATS
  WHERE name = 'test/big';
  clust_index_size
@@ -108,7 +215,16 @@
  connection default;
  ALTER TABLE big ADD COLUMN
  (d1 INT DEFAULT 0, d2 VARCHAR(20) DEFAULT 'abcde',
-@@ -757,7 +757,7 @@
+ d3 TIMESTAMP NOT NULL DEFAULT current_timestamp ON UPDATE current_timestamp);
+ affected rows: 0
+-info: Records: 0  Duplicates: 0  Warnings: 0
++info: Records: 0  Duplicates: 0  Warnings: 1
++Warnings:
++Warning	139	Row size too large (> 1982). Changing some columns to TEXT or BLOB or using ROW_FORMAT=DYNAMIC or ROW_FORMAT=COMPRESSED may help. In current row format, BLOB prefix of 768 bytes is stored inline.
+ CHECKSUM TABLE big;
+ Table	Checksum
+ test.big	1705165209
+@@ -878,7 +904,7 @@
  SELECT clust_index_size FROM INFORMATION_SCHEMA.INNODB_SYS_TABLESTATS
  WHERE name = 'test/big';
  clust_index_size
@@ -117,7 +233,7 @@
  connection default;
  ROLLBACK;
  CHECKSUM TABLE big;
-@@ -770,7 +770,7 @@
+@@ -891,7 +917,7 @@
  SELECT clust_index_size FROM INFORMATION_SCHEMA.INNODB_SYS_TABLESTATS
  WHERE name = 'test/big';
  clust_index_size
@@ -125,8 +241,17 @@
 +7
  connection default;
  InnoDB		0 transactions not purged
- DROP TABLE t1,t2,t3,big;
-@@ -960,7 +960,7 @@
+ DROP TABLE t1,t2,t3,t4,big;
+@@ -977,6 +1003,8 @@
+ CREATE TABLE t1 (a INT, b VARCHAR(500), c TEXT, UNIQUE(a,b)) ENGINE=InnoDB ROW_FORMAT=COMPACT;
+ ALTER TABLE t1 ADD d TEXT;
+ ALTER TABLE t1 ADD PRIMARY KEY (a,b);
++Warnings:
++Warning	139	Row size too large (> 1982). Changing some columns to TEXT or BLOB or using ROW_FORMAT=DYNAMIC or ROW_FORMAT=COMPRESSED may help. In current row format, BLOB prefix of 768 bytes is stored inline.
+ ALTER TABLE t1 ADD va INT AS (a) VIRTUAL;
+ DROP TABLE t1;
+ CREATE TABLE t1
+@@ -1165,7 +1193,7 @@
  SELECT clust_index_size FROM INFORMATION_SCHEMA.INNODB_SYS_TABLESTATS
  WHERE name = 'test/t2';
  clust_index_size
@@ -135,7 +260,7 @@
  connection default;
  ROLLBACK;
  connection analyze;
-@@ -970,7 +970,7 @@
+@@ -1175,7 +1203,7 @@
  SELECT clust_index_size FROM INFORMATION_SCHEMA.INNODB_SYS_TABLESTATS
  WHERE name = 'test/t2';
  clust_index_size
@@ -144,7 +269,7 @@
  connection default;
  BEGIN;
  UPDATE t2 SET d1 = repeat(id, 200);
-@@ -981,7 +981,7 @@
+@@ -1186,7 +1214,7 @@
  SELECT clust_index_size FROM INFORMATION_SCHEMA.INNODB_SYS_TABLESTATS
  WHERE name = 'test/t2';
  clust_index_size
@@ -153,7 +278,7 @@
  connection default;
  ROLLBACK;
  connection analyze;
-@@ -991,7 +991,7 @@
+@@ -1196,7 +1224,7 @@
  SELECT clust_index_size FROM INFORMATION_SCHEMA.INNODB_SYS_TABLESTATS
  WHERE name = 'test/t2';
  clust_index_size
@@ -162,7 +287,7 @@
  connection default;
  ALTER TABLE t2 DROP p;
  affected rows: 0
-@@ -1094,7 +1094,7 @@
+@@ -1317,7 +1345,7 @@
  SELECT clust_index_size FROM INFORMATION_SCHEMA.INNODB_SYS_TABLESTATS
  WHERE name = 'test/big';
  clust_index_size
@@ -171,7 +296,7 @@
  connection default;
  ALTER TABLE big ADD COLUMN
  (d1 INT DEFAULT 0, d2 VARCHAR(20) DEFAULT 'abcde',
-@@ -1117,7 +1117,7 @@
+@@ -1340,7 +1368,7 @@
  SELECT clust_index_size FROM INFORMATION_SCHEMA.INNODB_SYS_TABLESTATS
  WHERE name = 'test/big';
  clust_index_size
@@ -180,7 +305,7 @@
  connection default;
  ROLLBACK;
  CHECKSUM TABLE big;
-@@ -1130,7 +1130,7 @@
+@@ -1353,7 +1381,7 @@
  SELECT clust_index_size FROM INFORMATION_SCHEMA.INNODB_SYS_TABLESTATS
  WHERE name = 'test/big';
  clust_index_size
@@ -188,4 +313,11 @@
 +7
  connection default;
  InnoDB		0 transactions not purged
- DROP TABLE t1,t2,t3,big;
+ DROP TABLE t1,t2,t3,t4,big;
+@@ -1446,5 +1474,5 @@
+ FROM information_schema.global_status
+ WHERE variable_name = 'innodb_instant_alter_column';
+ instants
+-57
++58
+ SET GLOBAL innodb_purge_rseg_truncate_frequency= @saved_frequency;

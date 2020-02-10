@@ -12,7 +12,7 @@
 # You should have received a copy of the GNU General Public License
 # along with this program; see the file COPYING. If not, write to the
 # Free Software Foundation, Inc., 51 Franklin St, Fifth Floor, Boston
-# MA  02110-1301  USA.
+# MA  02110-1335  USA.
 
 # This is a common command line parser to be sourced by other SST scripts
 
@@ -20,13 +20,20 @@ set -u
 
 WSREP_SST_OPT_BYPASS=0
 WSREP_SST_OPT_BINLOG=""
-WSREP_SST_OPT_CONF_SUFFIX=""
+WSREP_SST_OPT_BINLOG_INDEX=""
 WSREP_SST_OPT_DATA=""
 WSREP_SST_OPT_AUTH=${WSREP_SST_OPT_AUTH:-}
 WSREP_SST_OPT_USER=${WSREP_SST_OPT_USER:-}
 WSREP_SST_OPT_PSWD=${WSREP_SST_OPT_PSWD:-}
 WSREP_SST_OPT_DEFAULT=""
 WSREP_SST_OPT_EXTRA_DEFAULT=""
+WSREP_SST_OPT_SUFFIX_DEFAULT=""
+WSREP_SST_OPT_SUFFIX_VALUE=""
+WSREP_SST_OPT_MYSQLD=""
+INNODB_DATA_HOME_DIR_ARG=""
+INNODB_LOG_GROUP_HOME_ARG=""
+INNODB_UNDO_DIR_ARG=""
+LOG_BIN_ARG=""
 
 while [ $# -gt 0 ]; do
 case "$1" in
@@ -35,19 +42,39 @@ case "$1" in
         #
         # Break address string into host:port/path parts
         #
-        if echo $WSREP_SST_OPT_ADDR | grep -qe '^\[.*\]'
-        then
-            # IPv6 notation
-            readonly WSREP_SST_OPT_HOST=${WSREP_SST_OPT_ADDR/\]*/\]}
-            readonly WSREP_SST_OPT_HOST_UNESCAPED=$(echo $WSREP_SST_OPT_HOST | \
-                 cut -d '[' -f 2 | cut -d ']' -f 1)
-        else
-            # "traditional" notation
+        case "${WSREP_SST_OPT_ADDR}" in
+        \[*)
+            # IPv6
+            addr_no_bracket=${WSREP_SST_OPT_ADDR#\[}
+            readonly WSREP_SST_OPT_HOST_UNESCAPED=${addr_no_bracket%%\]*}
+            readonly WSREP_SST_OPT_HOST="[${WSREP_SST_OPT_HOST_UNESCAPED}]"
+            readonly WSREP_SST_OPT_HOST_ESCAPED="\\[${WSREP_SST_OPT_HOST_UNESCAPED}\\]"
+            ;;
+        *)
             readonly WSREP_SST_OPT_HOST=${WSREP_SST_OPT_ADDR%%[:/]*}
-        fi
-        readonly WSREP_SST_OPT_ADDR_PORT=$(echo $WSREP_SST_OPT_ADDR | \
-                cut -d ']' -f 2 | cut -s -d ':' -f 2 | cut -d '/' -f 1)
+            readonly WSREP_SST_OPT_HOST_UNESCAPED=$WSREP_SST_OPT_HOST
+            readonly WSREP_SST_OPT_HOST_ESCAPED=$WSREP_SST_OPT_HOST
+            ;;
+        esac
+        remain=${WSREP_SST_OPT_ADDR#${WSREP_SST_OPT_HOST_ESCAPED}}
+        remain=${remain#:}
+        readonly WSREP_SST_OPT_ADDR_PORT=${remain%%/*}
+        remain=${remain#*/}
+        readonly WSREP_SST_OPT_MODULE=${remain%%/*}
         readonly WSREP_SST_OPT_PATH=${WSREP_SST_OPT_ADDR#*/}
+        remain=${WSREP_SST_OPT_PATH#*/}
+        if [ "$remain" != "${WSREP_SST_OPT_PATH}" ]; then
+            readonly WSREP_SST_OPT_LSN=${remain%%/*}
+            remain=${remain#*/}
+            if [ "$remain" != "${WSREP_SST_OPT_LSN}" ]; then
+                readonly WSREP_SST_OPT_SST_VER=${remain%%/*}
+            else
+                readonly WSREP_SST_OPT_SST_VER=""
+            fi
+        else
+            readonly WSREP_SST_OPT_LSN=""
+            readonly WSREP_SST_OPT_SST_VER=""
+        fi
         shift
         ;;
     '--bypass')
@@ -55,6 +82,22 @@ case "$1" in
         ;;
     '--datadir')
         readonly WSREP_SST_OPT_DATA="$2"
+        shift
+        ;;
+    '--innodb-data-home-dir')
+        readonly INNODB_DATA_HOME_DIR_ARG="$2"
+        shift
+        ;;
+    '--innodb-log-group-home-dir')
+        readonly INNODB_LOG_GROUP_HOME_ARG="$2"
+        shift
+        ;;
+    '--innodb-undo-directory')
+        readonly INNODB_UNDO_DIR_ARG="$2"
+        shift
+        ;;
+    '--log-bin')
+        readonly LOG_BIN_ARG="$2"
         shift
         ;;
     '--defaults-file')
@@ -66,7 +109,8 @@ case "$1" in
         shift
         ;;
     '--defaults-group-suffix')
-        WSREP_SST_OPT_CONF_SUFFIX="$2"
+        readonly WSREP_SST_OPT_SUFFIX_DEFAULT="$1=$2"
+        readonly WSREP_SST_OPT_SUFFIX_VALUE="$2"
         shift
         ;;
     '--host')
@@ -109,9 +153,57 @@ case "$1" in
         WSREP_SST_OPT_BINLOG="$2"
         shift
         ;;
+    '--binlog-index')
+	WSREP_SST_OPT_BINLOG_INDEX="$2"
+	shift
+	;;
     '--gtid-domain-id')
         readonly WSREP_SST_OPT_GTID_DOMAIN_ID="$2"
         shift
+        ;;
+    '--mysqld-args')
+        original_cmd=""
+        shift
+        while [ $# -gt 0 ]; do
+           option=${1%%=*}
+           if [[ "$option" != "--defaults-file" && \
+                 "$option" != "--defaults-extra-file" && \
+                 "$option" != "--defaults-group-suffix" && \
+                 "$option" != "--port" && \
+                 "$option" != "--socket" ]]; then
+              value=${1#*=}
+              case "$option" in
+                  '--innodb-data-home-dir')
+                      if [ -z "$INNODB_DATA_HOME_DIR_ARG" ]; then
+                          readonly INNODB_DATA_HOME_DIR_ARG="$value"
+                      fi
+                      ;;
+                  '--innodb-log-group-home-dir')
+                      if [ -z "$INNODB_LOG_GROUP_HOME_ARG" ]; then
+                          readonly INNODB_LOG_GROUP_HOME_ARG="$value"
+                      fi
+                      ;;
+                  '--innodb-undo-directory')
+                      if [ -z "$INNODB_UNDO_DIR_ARG" ]; then
+                          readonly INNODB_UNDO_DIR_ARG="$value"
+                      fi
+                      ;;
+                  '--log-bin')
+                      if [ -z "$LOG_BIN_ARG" ]; then
+                          readonly LOG_BIN_ARG="$value"
+                      fi
+                      ;;
+              esac
+              if [ -z "$original_cmd" ]; then
+                  original_cmd="$1"
+              else
+                  original_cmd="$original_cmd $1"
+              fi
+           fi
+           shift
+        done
+        readonly WSREP_SST_OPT_MYSQLD="$original_cmd"
+        break
         ;;
     *) # must be command
        # usage
@@ -122,12 +214,12 @@ shift
 done
 readonly WSREP_SST_OPT_BYPASS
 readonly WSREP_SST_OPT_BINLOG
-readonly WSREP_SST_OPT_CONF_SUFFIX
+readonly WSREP_SST_OPT_BINLOG_INDEX
 
-if [ -n "${WSREP_SST_OPT_ADDR:-}" ]; then
+if [ -n "${WSREP_SST_OPT_ADDR_PORT:-}" ]; then
   if [ -n "${WSREP_SST_OPT_PORT:-}" ]; then
-    if [ -n "$WSREP_SST_OPT_ADDR_PORT" -a "$WSREP_SST_OPT_PORT" != "$WSREP_SST_OPT_ADDR_PORT" ]; then
-      wsrep_log_error "port in --port=$WSREP_SST_OPT_PORT differs from port in --address=$WSREP_SST_OPT_ADDR"
+    if [ "$WSREP_SST_OPT_PORT" != "$WSREP_SST_OPT_ADDR_PORT" ]; then
+      echo "WSREP_SST: [ERROR] port in --port=$WSREP_SST_OPT_PORT differs from port in --address=$WSREP_SST_OPT_ADDR" >&2
       exit 2
     fi
   else
@@ -144,13 +236,13 @@ CLIENT_DIR="$SCRIPTS_DIR/../client"
 if [ -x "$CLIENT_DIR/mysql" ]; then
     MYSQL_CLIENT="$CLIENT_DIR/mysql"
 else
-    MYSQL_CLIENT=$(which mysql)
+    MYSQL_CLIENT=mysql
 fi
 
 if [ -x "$CLIENT_DIR/mysqldump" ]; then
     MYSQLDUMP="$CLIENT_DIR/mysqldump"
 else
-    MYSQLDUMP=$(which mysqldump)
+    MYSQLDUMP=mysqldump
 fi
 
 if [ -x "$SCRIPTS_DIR/my_print_defaults" ]; then
@@ -158,22 +250,29 @@ if [ -x "$SCRIPTS_DIR/my_print_defaults" ]; then
 elif [ -x "$EXTRA_DIR/my_print_defaults" ]; then
     MY_PRINT_DEFAULTS="$EXTRA_DIR/my_print_defaults"
 else
-    MY_PRINT_DEFAULTS=$(which my_print_defaults)
+    MY_PRINT_DEFAULTS=my_print_defaults
 fi
 
-readonly WSREP_SST_OPT_CONF="$WSREP_SST_OPT_DEFAULT $WSREP_SST_OPT_EXTRA_DEFAULT"
-MY_PRINT_DEFAULTS="$MY_PRINT_DEFAULTS $WSREP_SST_OPT_CONF"
+wsrep_defaults="$WSREP_SST_OPT_DEFAULT"
+if [ -n "$wsrep_defaults" ]; then
+   wsrep_defaults="$wsrep_defaults "
+fi
+wsrep_defaults="$wsrep_defaults$WSREP_SST_OPT_EXTRA_DEFAULT"
+if [ -n "$wsrep_defaults" ]; then
+   wsrep_defaults="$wsrep_defaults "
+fi
+readonly WSREP_SST_OPT_CONF="$wsrep_defaults$WSREP_SST_OPT_SUFFIX_DEFAULT"
+readonly MY_PRINT_DEFAULTS="$MY_PRINT_DEFAULTS $WSREP_SST_OPT_CONF"
+
 wsrep_auth_not_set()
 {
     [ -z "$WSREP_SST_OPT_AUTH" -o "$WSREP_SST_OPT_AUTH" = "(null)" ]
 }
 
-# For Bug:1200727
-if $MY_PRINT_DEFAULTS sst | grep -q "wsrep_sst_auth"
-then
-    if wsrep_auth_not_set
-    then
-        WSREP_SST_OPT_AUTH=$($MY_PRINT_DEFAULTS sst | grep -- "--wsrep_sst_auth" | cut -d= -f2)
+# State Snapshot Transfer authentication password was displayed in the ps output. Bug fixed #1200727.
+if $MY_PRINT_DEFAULTS sst | grep -q "wsrep_sst_auth"; then
+    if wsrep_auth_not_set; then
+            WSREP_SST_OPT_AUTH=$($MY_PRINT_DEFAULTS sst | grep -- "--wsrep_sst_auth" | cut -d= -f2)
     fi
 fi
 readonly WSREP_SST_OPT_AUTH
@@ -226,10 +325,10 @@ wsrep_check_program()
 {
     local prog=$1
 
-    if ! which $prog >/dev/null
+    if ! command -v $prog >/dev/null
     then
         echo "'$prog' not found in PATH"
-        return 2 # no such file or directory
+        exit 2 # ENOENT no such file or directory
     fi
 }
 
@@ -239,19 +338,17 @@ wsrep_check_programs()
 
     while [ $# -gt 0 ]
     do
-        wsrep_check_program $1 || ret=$?
+        wsrep_check_program $1
         shift
     done
-
-    return $ret
 }
 
 #
-# user can specify xtrabackup specific settings that will be used during sst
+# user can specify mariabackup specific settings that will be used during sst
 # process like encryption, etc.....
 # parse such configuration option. (group for xb settings is [sst] in my.cnf
 #
-# 1st param: group : name of the config file section, e.g. mysqld
+# 1st param: group (config file section like sst) or my_print_defaults argument (like --mysqld)
 # 2nd param: var : name of the variable in the section, e.g. server-id
 # 3rd param: - : default value for the param
 parse_cnf()
@@ -260,24 +357,15 @@ parse_cnf()
     local var=$2
     local reval=""
 
-    # print the default settings for given group using my_print_default.
     # normalize the variable names specified in cnf file (user can use _ or - for example log-bin or log_bin)
-    # then grep for needed variable
+    # then search for needed variable
     # finally get the variable value (if variables has been specified multiple time use the last value only)
 
-    # look in group+suffix
-    if [ -n $WSREP_SST_OPT_CONF_SUFFIX ]; then
-        reval=$($MY_PRINT_DEFAULTS "${group}${WSREP_SST_OPT_CONF_SUFFIX}" | awk -F= '{if ($1 ~ /_/) { gsub(/_/,"-",$1); print $1"="$2 } else { print $0 }}' | grep -- "--$var=" | cut -d= -f2- | tail -1)
-    fi
-
-    # look in group
-    if [ -z $reval ]; then
-        reval=$($MY_PRINT_DEFAULTS $group | awk -F= '{if ($1 ~ /_/) { gsub(/_/,"-",$1); print $1"="$2 } else { print $0 }}' | grep -- "--$var=" | cut -d= -f2- | tail -1)
-    fi
+    reval=$($MY_PRINT_DEFAULTS "${group}" | awk -v var="${var}" 'BEGIN { OFS=FS="=" } { gsub(/_/,"-",$1); if ( $1=="--"var) lastval=substr($0,length($1)+2) } END { print lastval}')
 
     # use default if we haven't found a value
-    if [ -z $reval ]; then
-        [ -n $3 ] && reval=$3
+    if [ -z "$reval" ]; then
+        [ -n "$3" ] && reval=$3
     fi
     echo $reval
 }

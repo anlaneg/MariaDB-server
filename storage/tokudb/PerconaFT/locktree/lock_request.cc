@@ -32,6 +32,20 @@ Copyright (c) 2006, 2015, Percona and/or its affiliates. All rights reserved.
 
     You should have received a copy of the GNU Affero General Public License
     along with PerconaFT.  If not, see <http://www.gnu.org/licenses/>.
+
+----------------------------------------
+
+   Licensed under the Apache License, Version 2.0 (the "License");
+   you may not use this file except in compliance with the License.
+   You may obtain a copy of the License at
+
+       http://www.apache.org/licenses/LICENSE-2.0
+
+   Unless required by applicable law or agreed to in writing, software
+   distributed under the License is distributed on an "AS IS" BASIS,
+   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+   See the License for the specific language governing permissions and
+   limitations under the License.
 ======= */
 
 #ident "Copyright (c) 2006, 2015, Percona and/or its affiliates. All rights reserved."
@@ -62,7 +76,7 @@ void lock_request::create(void) {
     m_state = state::UNINITIALIZED;
     m_info = nullptr;
 
-    toku_cond_init(&m_wait_cond, nullptr);
+    toku_cond_init(*lock_request_m_wait_cond_key, &m_wait_cond, nullptr);
 
     m_start_test_callback = nullptr;
     m_start_before_pending_test_callback = nullptr;

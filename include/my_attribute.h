@@ -11,7 +11,7 @@
 
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
-   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA */
+   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1335  USA */
 
 /*
   Helper macros used for setting different __attributes__
@@ -34,9 +34,9 @@
   compilation warnings.
 */
 #ifndef __attribute__
-# if !defined(__GNUC__)
+# if !defined(__GNUC__) && !defined(__clang__)
 #  define __attribute__(A)
-# else
+# elif defined(__GNUC__)
 #  ifndef GCC_VERSION
 #   define GCC_VERSION (__GNUC__ * 1000 + __GNUC_MINOR__)
 #  endif

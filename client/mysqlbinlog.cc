@@ -1,6 +1,6 @@
 /*
    Copyright (c) 2000, 2014, Oracle and/or its affiliates.
-   Copyright (c) 2009, 2014, MariaDB
+   Copyright (c) 2009, 2019, MariaDB
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -13,7 +13,7 @@
 
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
-   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA
+   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1335  USA
 */
 
 /* 
@@ -82,7 +82,8 @@ ulong bytes_sent = 0L, bytes_received = 0L;
 ulong mysqld_net_retry_count = 10L;
 ulong open_files_limit;
 ulong opt_binlog_rows_event_max_size;
-uint test_flags = 0; 
+ulonglong test_flags = 0;
+ulong opt_binlog_rows_event_max_encoded_size= MAX_MAX_ALLOWED_PACKET;
 static uint opt_protocol= 0;
 static FILE *result_file;
 static char *result_file_name= 0;
@@ -232,9 +233,8 @@ bool print_annotate_event(PRINT_EVENT_INFO *print_event_info)
   bool error= 0;
   if (annotate_event)
   {
-    error= annotate_event->print(result_file, print_event_info);
-    delete annotate_event;  // the event should not be printed more than once
-    annotate_event= 0;
+    annotate_event->print(result_file, print_event_info);
+    free_annotate_event();
   }
   return error;
 }
@@ -439,7 +439,7 @@ File Load_log_processor::prepare_new_file_for_old_format(Load_log_event *le,
     return -1;
   }
   
-  le->set_fname_outside_temp_buf(filename,len+(uint) strlen(tail));
+  le->set_fname_outside_temp_buf(filename,len+strlen(tail));
   
   return file;
 }
@@ -537,7 +537,7 @@ Exit_status Load_log_processor::process_first_event(const char *bname,
                                                     uint file_id,
                                                     Create_file_log_event *ce)
 {
-  uint full_len= target_dir_name_len + blen + 9 + 9 + 1;
+  size_t full_len= target_dir_name_len + blen + 9 + 9 + 1;
   Exit_status retval= OK_CONTINUE;
   char *fname, *ptr;
   File file;
@@ -583,7 +583,7 @@ Exit_status Load_log_processor::process_first_event(const char *bname,
   }
 
   if (ce)
-    ce->set_fname_outside_temp_buf(fname, (uint) strlen(fname));
+    ce->set_fname_outside_temp_buf(fname, strlen(fname));
 
   if (my_write(file, (uchar*)block, block_len, MYF(MY_WME|MY_NABP)))
   {
@@ -852,8 +852,14 @@ write_event_header_and_base64(Log_event *ev, FILE *result_file,
   DBUG_ENTER("write_event_header_and_base64");
 
   /* Write header and base64 output to cache */
-  if (ev->print_header(head, print_event_info, FALSE) ||
-      ev->print_base64(body, print_event_info, FALSE))
+  if (ev->print_header(head, print_event_info, FALSE))
+    DBUG_RETURN(ERROR_STOP);
+
+  DBUG_ASSERT(print_event_info->base64_output_mode == BASE64_OUTPUT_ALWAYS);
+
+  if (ev->print_base64(body, print_event_info,
+                       print_event_info->base64_output_mode !=
+                       BASE64_OUTPUT_DECODE_ROWS))
     DBUG_RETURN(ERROR_STOP);
 
   /* Read data from cache and write to result file */
@@ -889,12 +895,13 @@ static bool print_base64(PRINT_EVENT_INFO *print_event_info, Log_event *ev)
             type_str);
     return 1;
   }
+
   return ev->print(result_file, print_event_info);
 }
 
 
 static bool print_row_event(PRINT_EVENT_INFO *print_event_info, Log_event *ev,
-                            ulong table_id, bool is_stmt_end)
+                            ulonglong table_id, bool is_stmt_end)
 {
   Table_map_log_event *ignored_map= 
     print_event_info->m_table_map_ignored.get_table(table_id);
@@ -1541,12 +1548,11 @@ end:
       {
         my_fwrite(result_file, (const uchar *) tmp_str.str, tmp_str.length,
                   MYF(MY_NABP));
+        fflush(result_file);
         my_free(tmp_str.str);
       }
     }
 
-    if (remote_opt)
-      ev->temp_buf= 0;
     if (destroy_evt) /* destroy it later if not set (ignored table map) */
       delete ev;
   }
@@ -1769,6 +1775,15 @@ that may lead to an endless loop.",
    "This value must be a multiple of 256.",
    &opt_binlog_rows_event_max_size, &opt_binlog_rows_event_max_size, 0,
    GET_ULONG, REQUIRED_ARG, UINT_MAX,  256, ULONG_MAX,  0, 256,  0},
+#ifndef DBUG_OFF
+  {"debug-binlog-row-event-max-encoded-size", 0,
+   "The maximum size of base64-encoded rows-event in one BINLOG pseudo-query "
+   "instance. When the computed actual size exceeds the limit "
+   "the BINLOG's argument string is fragmented in two.",
+   &opt_binlog_rows_event_max_encoded_size,
+   &opt_binlog_rows_event_max_encoded_size, 0,
+   GET_ULONG, REQUIRED_ARG, UINT_MAX/4,  256, ULONG_MAX,  0, 256,  0},
+#endif
   {"verify-binlog-checksum", 'c', "Verify checksum binlog events.",
    (uchar**) &opt_verify_binlog_checksum, (uchar**) &opt_verify_binlog_checksum,
    0, GET_BOOL, NO_ARG, 0, 0, 0, 0, 0, 0},
@@ -2904,7 +2919,7 @@ static Exit_status dump_local_log_entries(PRINT_EVENT_INFO *print_event_info,
       stdin in binary mode. Errors on setting this mode result in 
       halting the function and printing an error message to stderr.
     */
-#if defined (__WIN__) || (_WIN64)
+#if defined (__WIN__) || defined(_WIN64)
     if (_setmode(fileno(stdin), O_BINARY) == -1)
     {
       error("Could not set binary mode on stdin.");
@@ -3008,9 +3023,7 @@ int main(int argc, char** argv)
   my_init_time(); // for time functions
   tzset(); // set tzname
 
-  if (load_defaults("my", load_groups, &argc, &argv))
-    exit(1);
-
+  load_defaults_or_exit("my", load_groups, &argc, &argv);
   defaults_argv= argv;
 
   if (!(binlog_filter= new Rpl_filter))
@@ -3214,17 +3227,24 @@ err:
   DBUG_RETURN(retval == ERROR_STOP ? 1 : 0);
 }
 
+uint e_key_get_latest_version_func(uint) { return 1; }
+uint e_key_get_func(uint, uint, uchar*, uint*) { return 1; }
+uint e_ctx_size_func(uint, uint) { return 1; }
+int e_ctx_init_func(void *, const uchar*, uint, const uchar*, uint,
+                    int, uint, uint) { return 1; }
+int e_ctx_update_func(void *, const uchar*, uint, uchar*, uint*) { return 1; }
+int e_ctx_finish_func(void *, uchar*, uint*) { return 1; }
+uint e_encrypted_length_func(uint, uint, uint) { return 1; }
 
-uint dummy1() { return 1; }
 struct encryption_service_st encryption_handler=
 {
-  (uint(*)(uint))dummy1,
-  (uint(*)(uint, uint, uchar*, uint*))dummy1,
-  (uint(*)(uint, uint))dummy1,
-  (int (*)(void*, const uchar*, uint, const uchar*, uint, int, uint, uint))dummy1,
-  (int (*)(void*, const uchar*, uint, uchar*, uint*))dummy1,
-  (int (*)(void*, uchar*, uint*))dummy1,
-  (uint (*)(uint, uint, uint))dummy1
+  e_key_get_latest_version_func,
+  e_key_get_func,
+  e_ctx_size_func,
+  e_ctx_init_func,
+  e_ctx_update_func,
+  e_ctx_finish_func,
+  e_encrypted_length_func
 };
 
 /*

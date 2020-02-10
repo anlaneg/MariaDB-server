@@ -1,7 +1,7 @@
 /*****************************************************************************
 
 Copyright (c) 2014, 2016, Oracle and/or its affiliates. All Rights Reserved.
-Copyright (c) 2017, MariaDB Corporation.
+Copyright (c) 2017, 2018, MariaDB Corporation.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License as published by the Free Software
@@ -13,7 +13,7 @@ FOR A PARTICULAR PURPOSE. See the GNU General Public License for more details.
 
 You should have received a copy of the GNU General Public License along with
 this program; if not, write to the Free Software Foundation, Inc.,
-51 Franklin Street, Suite 500, Boston, MA 02110-1335 USA
+51 Franklin Street, Fifth Floor, Boston, MA 02110-1335 USA
 
 *****************************************************************************/
 
@@ -27,24 +27,8 @@ Created 2013/03/27 Jimmy Yang and Allen Lai
 #ifndef gis0rtree_h
 #define gis0rtree_h
 
-#include "univ.i"
-
-#include "data0type.h"
-#include "data0types.h"
-#include "dict0types.h"
-#include "hash0hash.h"
-#include "mem0mem.h"
-#include "page0page.h"
-#include "rem0types.h"
-#include "row0types.h"
-#include "trx0types.h"
-#include "ut0vec.h"
-#include "ut0wqueue.h"
-#include "que0types.h"
-#include "gis0geo.h"
-#include "gis0type.h"
-#include "btr0types.h"
 #include "btr0cur.h"
+#include "rem0types.h"
 
 /* Whether MBR 'a' contains 'b' */
 #define	MBR_CONTAIN_CMP(a, b)					\
@@ -87,10 +71,8 @@ rtr_index_build_node_ptr(
 					pointer */
 	ulint			page_no,/*!< in: page number to put in node
 					pointer */
-	mem_heap_t*		heap,	/*!< in: memory heap where pointer
+	mem_heap_t*		heap);	/*!< in: memory heap where pointer
 					created */
-	ulint			level);	/*!< in: level of rec in tree:
-					0 means leaf level */
 
 /*************************************************************//**
 Splits an R-tree index page to halves and inserts the tuple. It is assumed
@@ -107,7 +89,7 @@ rtr_page_split_and_insert(
 	btr_cur_t*	cursor,	/*!< in/out: cursor at which to insert; when the
 				function returns, the cursor is positioned
 				on the predecessor of the inserted record */
-	ulint**		offsets,/*!< out: offsets on inserted record */
+	offset_t**	offsets,/*!< out: offsets on inserted record */
 	mem_heap_t**	heap,	/*!< in/out: pointer to memory heap, or NULL */
 	const dtuple_t*	tuple,	/*!< in: tuple to insert */
 	ulint		n_ext,	/*!< in: number of externally stored columns */
@@ -169,7 +151,7 @@ rtr_rec_cal_increase(
 				dtuple in some of the common fields, or which
 				has an equal number or more fields than
 				dtuple */
-	const ulint*	offsets,/*!< in: array returned by rec_get_offsets() */
+	const offset_t*	offsets,/*!< in: array returned by rec_get_offsets() */
 	double*		area);	/*!< out: increased area */
 
 /****************************************************************//**
@@ -179,7 +161,6 @@ dberr_t
 rtr_ins_enlarge_mbr(
 /*=================*/
 	btr_cur_t*		cursor,	/*!< in: btr cursor */
-	que_thr_t*		thr,	/*!< in: query thread */
 	mtr_t*			mtr);	/*!< in: mtr */
 
 /********************************************************************//**
@@ -293,7 +274,7 @@ void
 rtr_get_mbr_from_rec(
 /*=================*/
 	const rec_t*	rec,	/*!< in: data tuple */
-	const ulint*	offsets,/*!< in: offsets array */
+	const offset_t*	offsets,/*!< in: offsets array */
 	rtr_mbr_t*	mbr);	/*!< out MBR */
 
 /****************************************************************//**
@@ -325,10 +306,10 @@ rtr_page_get_father(
 Returns the father block to a page. It is assumed that mtr holds
 an X or SX latch on the tree.
 @return rec_get_offsets() of the node pointer record */
-ulint*
+offset_t*
 rtr_page_get_father_block(
 /*======================*/
-	ulint*		offsets,/*!< in: work area for the return value */
+	offset_t*	offsets,/*!< in: work area for the return value */
 	mem_heap_t*	heap,	/*!< in: memory heap to use */
 	dict_index_t*	index,	/*!< in: b-tree index */
 	buf_block_t*	block,	/*!< in: child page in the index */
@@ -435,12 +416,9 @@ rtr_merge_and_update_mbr(
 /*=====================*/
 	btr_cur_t*		cursor,		/*!< in/out: cursor */
 	btr_cur_t*		cursor2,	/*!< in: the other cursor */
-	ulint*			offsets,	/*!< in: rec offsets */
-	ulint*			offsets2,	/*!< in: rec offsets */
+	offset_t*		offsets,	/*!< in: rec offsets */
+	offset_t*		offsets2,	/*!< in: rec offsets */
 	page_t*			child_page,	/*!< in: the child page. */
-	buf_block_t*		merge_block,	/*!< in: page to merge */
-	buf_block_t*		block,		/*!< in: page be merged */
-	dict_index_t*		index,		/*!< in: index */
 	mtr_t*			mtr);		/*!< in: mtr */
 
 /*************************************************************//**
@@ -448,10 +426,8 @@ Deletes on the upper level the node pointer to a page. */
 void
 rtr_node_ptr_delete(
 /*================*/
-	dict_index_t*	index,	/*!< in: index tree */
-	btr_cur_t*	sea_cur,/*!< in: search cursor, contains information
+	btr_cur_t*	cursor,	/*!< in: search cursor, contains information
 				about parent nodes in search */
-	buf_block_t*	block,	/*!< in: page whose node pointer is deleted */
 	mtr_t*		mtr);	/*!< in: mtr */
 
 /****************************************************************//**
@@ -461,12 +437,9 @@ rtr_merge_mbr_changed(
 /*==================*/
 	btr_cur_t*	cursor,		/*!< in: cursor */
 	btr_cur_t*	cursor2,	/*!< in: the other cursor */
-	ulint*		offsets,	/*!< in: rec offsets */
-	ulint*		offsets2,	/*!< in: rec offsets */
-	rtr_mbr_t*	new_mbr,	/*!< out: MBR to update */
-	buf_block_t*	merge_block,	/*!< in: page to merge */
-	buf_block_t*	block,		/*!< in: page be merged */
-	dict_index_t*	index);		/*!< in: index */
+	offset_t*	offsets,	/*!< in: rec offsets */
+	offset_t*	offsets2,	/*!< in: rec offsets */
+	rtr_mbr_t*	new_mbr);	/*!< out: MBR to update */
 
 
 /**************************************************************//**
@@ -476,7 +449,7 @@ bool
 rtr_update_mbr_field(
 /*=================*/
 	btr_cur_t*	cursor,		/*!< in: cursor pointed to rec.*/
-	ulint*		offsets,	/*!< in: offsets on rec. */
+	offset_t*	offsets,	/*!< in: offsets on rec. */
 	btr_cur_t*	cursor2,	/*!< in/out: cursor pointed to rec
 					that should be deleted.
 					this cursor is for btr_compress to
@@ -543,7 +516,7 @@ rtr_info_reinit_in_cursor(
 @param[in]	tuple	range tuple containing mbr, may also be empty tuple
 @param[in]	mode	search mode
 @return estimated number of rows */
-int64_t
+ha_rows
 rtr_estimate_n_rows_in_range(
 	dict_index_t*	index,
 	const dtuple_t*	tuple,

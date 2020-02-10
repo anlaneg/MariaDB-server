@@ -12,7 +12,7 @@
 
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
-   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA */
+   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1335  USA */
 
 #ifndef _sql_plugin_h
 #define _sql_plugin_h
@@ -38,6 +38,7 @@ enum enum_plugin_load_option { PLUGIN_OFF, PLUGIN_ON, PLUGIN_FORCE,
   PLUGIN_FORCE_PLUS_PERMANENT };
 extern const char *global_plugin_typelib_names[];
 
+extern volatile int global_plugin_version;
 extern ulong dlopen_count;
 
 #include <my_sys.h>
@@ -156,7 +157,7 @@ typedef int (*plugin_type_init)(struct st_plugin_int *);
 extern I_List<i_string> *opt_plugin_load_list_ptr;
 extern char *opt_plugin_dir_ptr;
 extern MYSQL_PLUGIN_IMPORT char opt_plugin_dir[FN_REFLEN];
-extern const LEX_STRING plugin_type_names[];
+extern const LEX_CSTRING plugin_type_names[];
 extern ulong plugin_maturity;
 extern TYPELIB plugin_maturity_values;
 extern const char *plugin_maturity_names[];
@@ -195,9 +196,6 @@ extern void sync_dynamic_session_variables(THD* thd, bool global_lock);
 
 extern bool plugin_dl_foreach(THD *thd, const LEX_CSTRING *dl,
                               plugin_foreach_func *func, void *arg);
-
-sys_var *find_sys_var_ex(THD *thd, const char *str, size_t length,
-                         bool throw_error, bool locked);
 
 extern void sync_dynamic_session_variables(THD* thd, bool global_lock);
 #endif

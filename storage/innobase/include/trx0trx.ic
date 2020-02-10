@@ -1,7 +1,7 @@
 /*****************************************************************************
 
 Copyright (c) 1996, 2015, Oracle and/or its affiliates. All Rights Reserved.
-Copyright (c) 2016, MariaDB Corporation. All Rights Reserved.
+Copyright (c) 2016, 2019, MariaDB Corporation.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License as published by the Free Software
@@ -13,7 +13,7 @@ FOR A PARTICULAR PURPOSE. See the GNU General Public License for more details.
 
 You should have received a copy of the GNU General Public License along with
 this program; if not, write to the Free Software Foundation, Inc.,
-51 Franklin Street, Suite 500, Boston, MA 02110-1335 USA
+51 Franklin Street, Fifth Floor, Boston, MA 02110-1335 USA
 
 *****************************************************************************/
 
@@ -24,13 +24,11 @@ The transaction
 Created 3/26/1996 Heikki Tuuri
 *******************************************************/
 
-#include "read0read.h"
-
 /**********************************************************************//**
 Determines if a transaction is in the given state.
-The caller must hold trx_sys->mutex, or it must be the thread
+The caller must hold trx_sys.mutex, or it must be the thread
 that is serving a running transaction.
-A running RW transaction must be in trx_sys->rw_trx_list.
+A running RW transaction must be in trx_sys.rw_trx_hash.
 @return TRUE if trx->state == state */
 UNIV_INLINE
 bool
@@ -49,30 +47,20 @@ trx_state_eq(
 #ifdef UNIV_DEBUG
 	switch (trx->state) {
 	case TRX_STATE_PREPARED:
-
+	case TRX_STATE_PREPARED_RECOVERED:
+	case TRX_STATE_COMMITTED_IN_MEMORY:
 		ut_ad(!trx_is_autocommit_non_locking(trx));
 		return(trx->state == state);
 
 	case TRX_STATE_ACTIVE:
-
 		assert_trx_nonlocking_or_in_list(trx);
 		return(state == trx->state);
 
-	case TRX_STATE_COMMITTED_IN_MEMORY:
-
-		check_trx_state(trx);
-		return(state == trx->state);
-
 	case TRX_STATE_NOT_STARTED:
-	case TRX_STATE_FORCED_ROLLBACK:
-
 		/* These states are not allowed for running transactions. */
 		ut_a(state == TRX_STATE_NOT_STARTED
-		     || state == TRX_STATE_FORCED_ROLLBACK
 		     || (relaxed
 			 && thd_get_error_number(trx->mysql_thd)));
-
-		ut_ad(!trx->in_rw_trx_list);
 
 		return(true);
 	}
@@ -211,90 +199,4 @@ ok:
 
 	trx->ddl = true;
 	trx->dict_operation = op;
-}
-
-/**
-@param trx		Get the active view for this transaction, if one exists
-@return the transaction's read view or NULL if one not assigned. */
-UNIV_INLINE
-ReadView*
-trx_get_read_view(
-	trx_t*		trx)
-{
-	return(!MVCC::is_view_active(trx->read_view) ? NULL : trx->read_view);
-}
-
-/**
-@param trx		Get the active view for this transaction, if one exists
-@return the transaction's read view or NULL if one not assigned. */
-UNIV_INLINE
-const ReadView*
-trx_get_read_view(
-	const trx_t*	trx)
-{
-	return(!MVCC::is_view_active(trx->read_view) ? NULL : trx->read_view);
-}
-
-/**
-@param[in] trx		Transaction to check
-@return true if the transaction is a high priority transaction.*/
-UNIV_INLINE
-bool
-trx_is_high_priority(const trx_t* trx)
-{
-	if (trx->mysql_thd == NULL) {
-		return(false);
-	}
-
-	return(thd_trx_priority(trx->mysql_thd) > 0);
-}
-
-/**
-@param[in] requestor	Transaction requesting the lock
-@param[in] holder	Transaction holding the lock
-@return the transaction that will be rolled back, null don't care */
-UNIV_INLINE
-const trx_t*
-trx_arbitrate(const trx_t* requestor, const trx_t* holder)
-{
-	ut_ad(!trx_is_autocommit_non_locking(holder));
-	ut_ad(!trx_is_autocommit_non_locking(requestor));
-
-	/* Note: Background stats collection transactions also acquire
-	locks on user tables. They don't have an associated MySQL session
-	instance. */
-
-	if (requestor->mysql_thd == NULL) {
-
-		ut_ad(!trx_is_high_priority(requestor));
-
-		if (trx_is_high_priority(holder)) {
-			return(requestor);
-		} else {
-			return(NULL);
-		}
-
-	} else if (holder->mysql_thd == NULL) {
-
-		ut_ad(!trx_is_high_priority(holder));
-
-		if (trx_is_high_priority(requestor)) {
-			return(holder);
-		}
-
-		return(NULL);
-	}
-
-	const THD*	victim = thd_trx_arbitrate(
-		requestor->mysql_thd, holder->mysql_thd);
-
-	ut_ad(victim == NULL
-	      || victim == requestor->mysql_thd
-	      || victim == holder->mysql_thd);
-
-	if (victim != NULL) {
-		return(victim == requestor->mysql_thd ? requestor : holder);
-	}
-
-	return(NULL);
 }

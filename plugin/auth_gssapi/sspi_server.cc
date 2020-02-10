@@ -40,7 +40,7 @@ static void log_error(SECURITY_STATUS err, const char *msg)
   {
     char buf[1024];
     sspi_errmsg(err, buf, sizeof(buf));
-    my_printf_error(ER_UNKNOWN_ERROR, "SSPI server error 0x%x - %s - %s", 0, msg, buf);
+    my_printf_error(ER_UNKNOWN_ERROR, "SSPI server error 0x%x - %s - %s", 0, err, msg, buf);
   }
   else
   {
@@ -101,14 +101,19 @@ static int get_client_name_from_context(CtxtHandle *ctxt,
         *p = 0;
     }
     strncpy(name, native_names.sClientName, name_len);
-    FreeContextBuffer(&native_names);
+
+    if (native_names.sClientName)
+      FreeContextBuffer(native_names.sClientName);
+    if (native_names.sServerName)
+      FreeContextBuffer(native_names.sServerName);
+
     return CR_OK;
   }
 
   sspi_ret= ImpersonateSecurityContext(ctxt);
   if (sspi_ret == SEC_E_OK)
   {
-    ULONG len= name_len;
+    ULONG len= (ULONG)name_len;
     if (!GetUserNameEx(NameSamCompatible, name, &len))
     {
       log_error(GetLastError(), "GetUserNameEx");
@@ -163,7 +168,7 @@ int auth_server(MYSQL_PLUGIN_VIO *vio, const char *user, size_t user_len, int co
   }
   sspi_ret= AcquireCredentialsHandle(
     srv_principal_name,
-    srv_mech_name,
+    (LPSTR)srv_mech_name,
     SECPKG_CRED_INBOUND,
     NULL,
     NULL,
@@ -282,12 +287,12 @@ int plugin_init()
   {
     srv_principal_name= get_default_principal_name();
   }
-  my_printf_error(0, "SSPI: using principal name '%s', mech '%s'",
+  my_printf_error(ER_UNKNOWN_ERROR, "SSPI: using principal name '%s', mech '%s'",
                   ME_ERROR_LOG | ME_NOTE, srv_principal_name, srv_mech_name);
 
   ret = AcquireCredentialsHandle(
     srv_principal_name,
-    srv_mech_name,
+    (LPSTR)srv_mech_name,
     SECPKG_CRED_INBOUND,
     NULL,
     NULL,

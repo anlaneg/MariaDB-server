@@ -11,7 +11,7 @@
 
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
-   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA */
+   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1335  USA */
 
 /*****************************************************************************
 ** Simulation of posix threads calls for Windows
@@ -79,10 +79,10 @@ int pthread_create(pthread_t *thread_id, const pthread_attr_t *attr,
   par->arg= param;
   stack_size= attr?attr->dwStackSize:0;
 
-  handle= _beginthreadex(NULL, stack_size , pthread_start, par, 0, thread_id);
+  handle= _beginthreadex(NULL, stack_size , pthread_start, par, 0, (uint *)thread_id);
   if (!handle)
     goto error_return;
-  DBUG_PRINT("info", ("thread id=%u",*thread_id));
+  DBUG_PRINT("info", ("thread id=%lu",*thread_id));
 
   /* Do not need thread handle, close it */
   CloseHandle((HANDLE)handle);

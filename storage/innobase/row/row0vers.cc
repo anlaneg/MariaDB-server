@@ -1,7 +1,7 @@
 /*****************************************************************************
 
-Copyright (c) 1997, 2016, Oracle and/or its affiliates. All Rights Reserved.
-Copyright (c) 2017, MariaDB Corporation.
+Copyright (c) 1997, 2017, Oracle and/or its affiliates. All Rights Reserved.
+Copyright (c) 2017, 2020, MariaDB Corporation.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License as published by the Free Software
@@ -13,7 +13,7 @@ FOR A PARTICULAR PURPOSE. See the GNU General Public License for more details.
 
 You should have received a copy of the GNU General Public License along with
 this program; if not, write to the Free Software Foundation, Inc.,
-51 Franklin Street, Suite 500, Boston, MA 02110-1335 USA
+51 Franklin Street, Fifth Floor, Boston, MA 02110-1335 USA
 
 *****************************************************************************/
 
@@ -23,8 +23,6 @@ Row versions
 
 Created 2/6/1997 Heikki Tuuri
 *******************************************************/
-
-#include "ha_prototypes.h"
 
 #include "row0vers.h"
 #include "dict0dict.h"
@@ -41,29 +39,34 @@ Created 2/6/1997 Heikki Tuuri
 #include "row0row.h"
 #include "row0upd.h"
 #include "rem0cmp.h"
-#include "read0read.h"
 #include "lock0lock.h"
 #include "row0mysql.h"
 
-/** Check whether all non-virtual columns in a virtual index match that of in
-the cluster index
-@param[in,out]	caller_trx	trx of current thread
-@param[in]	index		the secondary index
-@param[in]	row		the cluster index row in dtuple form
-@param[in]	ext		externally stored column prefix or NULL
-@param[in]	ientry		the secondary index entry
-@param[in,out]	heap		heap used to build virtual dtuple
-@param[in,out]	n_non_v_col	number of non-virtual columns in the index
-@return true if all matches, false otherwise */
+/** Check whether all non-virtual index fields are equal.
+@param[in]	index	the secondary index
+@param[in]	a	first index entry to compare
+@param[in]	b	second index entry to compare
+@return	whether all non-virtual fields are equal */
 static
 bool
-row_vers_non_vc_match(
-	dict_index_t*		index,
-	const dtuple_t*		row,
-	const row_ext_t*	ext,
-	const dtuple_t*		ientry,
-	mem_heap_t*		heap,
-	ulint*			n_non_v_col);
+row_vers_non_virtual_fields_equal(
+	const dict_index_t*	index,
+	const dfield_t*		a,
+	const dfield_t*		b)
+{
+	const dict_field_t* end = &index->fields[index->n_fields];
+
+	for (const dict_field_t* ifield = index->fields; ifield != end;
+	     ifield++) {
+		if (!ifield->col->is_virtual()
+		    && cmp_dfield_dfield(a++, b++)) {
+			return false;
+		}
+	}
+
+	return true;
+}
+
 /** Determine if an active transaction has inserted or modified a secondary
 index record.
 @param[in,out]	caller_trx	trx of current thread
@@ -73,7 +76,8 @@ index record.
 @param[in]	index		secondary index
 @param[in]	offsets		rec_get_offsets(rec, index)
 @param[in,out]	mtr		mini-transaction
-@return	the active transaction; trx->release_reference() must be invoked
+@return	the active transaction; state must be rechecked after
+trx_mutex_enter(), and trx->release_reference() must be invoked
 @retval	NULL if the record was committed */
 UNIV_INLINE
 trx_t*
@@ -83,19 +87,19 @@ row_vers_impl_x_locked_low(
 	dict_index_t*	clust_index,
 	const rec_t*	rec,
 	dict_index_t*	index,
-	const ulint*	offsets,
+	const offset_t*	offsets,
 	mtr_t*		mtr)
 {
 	trx_id_t	trx_id;
-	ulint		comp;
-	ulint		rec_del;
-	const rec_t*	version;
 	rec_t*		prev_version = NULL;
-	ulint*		clust_offsets;
+	offset_t	clust_offsets_[REC_OFFS_NORMAL_SIZE];
+	offset_t*	clust_offsets = clust_offsets_;
 	mem_heap_t*	heap;
 	dtuple_t*	ientry = NULL;
 	mem_heap_t*	v_heap = NULL;
-	const dtuple_t*	cur_vrow = NULL;
+	dtuple_t*	cur_vrow = NULL;
+
+	rec_offs_init(clust_offsets_);
 
 	DBUG_ENTER("row_vers_impl_x_locked_low");
 
@@ -111,8 +115,8 @@ row_vers_impl_x_locked_low(
 
 	heap = mem_heap_create(1024);
 
-	clust_offsets = rec_get_offsets(
-		clust_rec, clust_index, NULL, true, ULINT_UNDEFINED, &heap);
+	clust_offsets = rec_get_offsets(clust_rec, clust_index, clust_offsets,
+					true, ULINT_UNDEFINED, &heap);
 
 	trx_id = row_get_rec_trx_id(clust_rec, clust_index, clust_offsets);
 	if (trx_id == 0) {
@@ -121,40 +125,41 @@ row_vers_impl_x_locked_low(
 		DBUG_RETURN(0);
 	}
 
-	trx_t*	trx = trx_sys->rw_trx_hash.find(caller_trx, trx_id, true);
+	ut_ad(!clust_index->table->is_temporary());
 
-	if (trx == 0) {
-		/* The transaction that modified or inserted clust_rec is no
-		longer active, or it is corrupt: no implicit lock on rec */
-		trx_sys_mutex_enter();
-		bool corrupt = trx_id >= trx_sys->max_trx_id;
-		trx_sys_mutex_exit();
-		if (corrupt) {
-			lock_report_trx_id_insanity(
-				trx_id, clust_rec, clust_index, clust_offsets,
-				trx_sys_get_max_trx_id());
+	trx_t*	trx;
+
+	if (trx_id == caller_trx->id) {
+		trx = caller_trx;
+		trx->reference();
+	} else {
+		trx = trx_sys.find(caller_trx, trx_id);
+		if (trx == 0) {
+			/* The transaction that modified or inserted
+			clust_rec is no longer active, or it is
+			corrupt: no implicit lock on rec */
+			lock_check_trx_id_sanity(trx_id, clust_rec,
+						 clust_index, clust_offsets);
+			mem_heap_free(heap);
+			DBUG_RETURN(0);
 		}
-		mem_heap_free(heap);
-		DBUG_RETURN(0);
 	}
 
-	comp = page_rec_is_comp(rec);
+	const ulint comp = page_rec_is_comp(rec);
 	ut_ad(index->table == clust_index->table);
 	ut_ad(!!comp == dict_table_is_comp(index->table));
 	ut_ad(!comp == !page_rec_is_comp(clust_rec));
 
-	rec_del = rec_get_deleted_flag(rec, comp);
+	const ulint rec_del = rec_get_deleted_flag(rec, comp);
 
 	if (dict_index_has_virtual(index)) {
-		ulint	n_ext;
 		ulint	est_size = DTUPLE_EST_ALLOC(index->n_fields);
 
 		/* Allocate the dtuple for virtual columns extracted from undo
 		log with its own heap, so to avoid it being freed as we
 		iterating in the version loop below. */
 		v_heap = mem_heap_create(est_size);
-		ientry = row_rec_to_index_entry(
-			rec, index, offsets, &n_ext, v_heap);
+		ientry = row_rec_to_index_entry(rec, index, offsets, v_heap);
 	}
 
 	/* We look up if some earlier version, which was modified by
@@ -168,14 +173,14 @@ row_vers_impl_x_locked_low(
 	modify rec, and does not necessarily have an implicit x-lock
 	on rec. */
 
-	for (version = clust_rec;; version = prev_version) {
+	for (const rec_t* version = clust_rec;; version = prev_version) {
 		row_ext_t*	ext;
 		dtuple_t*	row;
 		dtuple_t*	entry;
 		ulint		vers_del;
 		trx_id_t	prev_trx_id;
 		mem_heap_t*	old_heap = heap;
-		const dtuple_t*	vrow = NULL;
+		dtuple_t*	vrow = NULL;
 
 		/* We keep the semaphore in mtr on the clust_rec page, so
 		that no other transaction can update it and get an
@@ -188,15 +193,23 @@ row_vers_impl_x_locked_low(
 			heap, &prev_version, NULL,
 			dict_index_has_virtual(index) ? &vrow : NULL, 0);
 
+		trx_mutex_enter(trx);
+		const bool committed = trx_state_eq(
+			trx, TRX_STATE_COMMITTED_IN_MEMORY);
+		trx_mutex_exit(trx);
+
 		/* The oldest visible clustered index version must not be
 		delete-marked, because we never start a transaction by
 		inserting a delete-marked record. */
-		ut_ad(prev_version
-		      || !rec_get_deleted_flag(version, comp)
-		      || !trx_sys->rw_trx_hash.find(caller_trx, trx_id));
+		ut_ad(committed || prev_version
+		      || !rec_get_deleted_flag(version, comp));
 
-		/* Free version and clust_offsets. */
+		/* Free version. */
 		mem_heap_free(old_heap);
+
+		if (committed) {
+			goto not_locked;
+		}
 
 		if (prev_version == NULL) {
 
@@ -217,6 +230,7 @@ row_vers_impl_x_locked_low(
 				or updated, the leaf page record always is
 				created with a clear delete-mark flag.
 				(We never insert a delete-marked record.) */
+not_locked:
 				trx->release_reference();
 				trx = 0;
 			}
@@ -225,7 +239,7 @@ row_vers_impl_x_locked_low(
 		}
 
 		clust_offsets = rec_get_offsets(
-			prev_version, clust_index, NULL, true,
+			prev_version, clust_index, clust_offsets, true,
 			ULINT_UNDEFINED, &heap);
 
 		vers_del = rec_get_deleted_flag(prev_version, comp);
@@ -250,15 +264,29 @@ row_vers_impl_x_locked_low(
 			}
 
 			if (!cur_vrow) {
-				ulint	n_non_v_col = 0;
+				/* Build index entry out of row */
+				entry = row_build_index_entry(row, ext, index,
+							      heap);
+
+				/* entry could only be NULL (the
+				clustered index record could contain
+				BLOB pointers that are NULL) if we
+				were accessing a freshly inserted
+				record before it was fully inserted.
+				prev_version cannot possibly be such
+				an incomplete record, because its
+				transaction would have to be committed
+				in order for later versions of the
+				record to be able to exist. */
+				ut_ad(entry);
 
 				/* If the indexed virtual columns has changed,
 				there must be log record to generate vrow.
 				Otherwise, it is not changed, so no need
 				to compare */
-				if (row_vers_non_vc_match(
-					index, row, ext, ientry, heap,
-					&n_non_v_col) == 0) {
+				if (!row_vers_non_virtual_fields_equal(
+					    index,
+					    ientry->fields, entry->fields)) {
 					if (rec_del != vers_del) {
 						break;
 					}
@@ -275,12 +303,14 @@ row_vers_impl_x_locked_low(
 
 		entry = row_build_index_entry(row, ext, index, heap);
 
-		/* entry may be NULL if a record was inserted in place
-		of a deleted record, and the BLOB pointers of the new
-		record were not initialized yet.  But in that case,
-		prev_version should be NULL. */
-
-		ut_a(entry != NULL);
+		/* entry could only be NULL (the clustered index
+		record could contain BLOB pointers that are NULL) if
+		we were accessing a freshly inserted record before it
+		was fully inserted.  prev_version cannot possibly be
+		such an incomplete record, because its transaction
+		would have to be committed in order for later versions
+		of the record to be able to exist. */
+		ut_ad(entry);
 
 		/* If we get here, we know that the trx_id transaction
 		modified prev_version. Let us check if prev_version
@@ -327,14 +357,14 @@ result_check:
 		if (trx->id != prev_trx_id) {
 			/* prev_version was the first version modified by
 			the trx_id transaction: no implicit x-lock */
-
-			trx->release_reference();
-			trx = 0;
-			break;
+			goto not_locked;
 		}
 	}
 
-	DBUG_PRINT("info", ("Implicit lock is held by trx:" TRX_ID_FMT, trx_id));
+	if (trx) {
+		DBUG_PRINT("info", ("Implicit lock is held by trx:" TRX_ID_FMT,
+				    trx_id));
+	}
 
 	if (v_heap != NULL) {
 		mem_heap_free(v_heap);
@@ -350,14 +380,15 @@ index record.
 @param[in]	rec	secondary index record
 @param[in]	index	secondary index
 @param[in]	offsets	rec_get_offsets(rec, index)
-@return	the active transaction; trx->release_reference() must be invoked
+@return	the active transaction; state must be rechecked after
+trx_mutex_enter(), and trx->release_reference() must be invoked
 @retval	NULL if the record was committed */
 trx_t*
 row_vers_impl_x_locked(
 	trx_t*		caller_trx,
 	const rec_t*	rec,
 	dict_index_t*	index,
-	const ulint*	offsets)
+	const offset_t*	offsets)
 {
 	mtr_t		mtr;
 	trx_t*		trx;
@@ -365,7 +396,7 @@ row_vers_impl_x_locked(
 	dict_index_t*	clust_index;
 
 	ut_ad(!lock_mutex_own());
-	ut_ad(!trx_sys_mutex_own());
+	ut_ad(!mutex_own(&trx_sys.mutex));
 
 	mtr_start(&mtr);
 
@@ -406,103 +437,52 @@ row_vers_impl_x_locked(
 	return(trx);
 }
 
-/*****************************************************************//**
-Finds out if we must preserve a delete marked earlier version of a clustered
-index record, because it is >= the purge view.
-@param[in]	trx_id		transaction id in the version
-@param[in]	name		table name
-@param[in,out]	mtr		mini transaction holding the latch on the
-				clustered index record; it will also hold
-				the latch on purge_view
-@return TRUE if earlier version should be preserved */
-ibool
-row_vers_must_preserve_del_marked(
-/*==============================*/
-	trx_id_t		trx_id,
-	const table_name_t&	name,
-	mtr_t*			mtr)
-{
-	ut_ad(!rw_lock_own(&(purge_sys->latch), RW_LOCK_S));
-
-	mtr_s_lock(&purge_sys->latch, mtr);
-
-	return(!purge_sys->view.changes_visible(trx_id,	name));
-}
-
-/** Check whether all non-virtual columns in a virtual index match that of in
-the cluster index
-@param[in]	index		the secondary index
-@param[in]	row		the cluster index row in dtuple form
-@param[in]	ext		externally stored column prefix or NULL
-@param[in]	ientry		the secondary index entry
-@param[in,out]	heap		heap used to build virtual dtuple
-@param[in,out]	n_non_v_col	number of non-virtual columns in the index
-@return true if all matches, false otherwise */
-static
-bool
-row_vers_non_vc_match(
-	dict_index_t*		index,
-	const dtuple_t*		row,
-	const row_ext_t*	ext,
-	const dtuple_t*		ientry,
-	mem_heap_t*		heap,
-	ulint*			n_non_v_col)
-{
-	const dfield_t* field1;
-	dfield_t*	field2;
-	ulint		n_fields = dtuple_get_n_fields(ientry);
-	ulint		ret = true;
-
-	*n_non_v_col = 0;
-
-	/* Build index entry out of row */
-	dtuple_t* nentry = row_build_index_entry(row, ext, index, heap);
-
-	for (ulint i = 0; i < n_fields; i++) {
-		const dict_field_t*	ind_field = dict_index_get_nth_field(
-							index, i);
-
-		const dict_col_t*	col = ind_field->col;
-
-		/* Only check non-virtual columns */
-		if (dict_col_is_virtual(col)) {
-			continue;
-		}
-
-		if (ret) {
-			field1  = dtuple_get_nth_field(ientry, i);
-			field2  = dtuple_get_nth_field(nentry, i);
-
-			if (cmp_dfield_dfield(field1, field2) != 0) {
-				ret = false;
-			}
-		}
-
-		(*n_non_v_col)++;
-	}
-
-	return(ret);
-}
-
 /** build virtual column value from current cluster index record data
 @param[in,out]	row		the cluster index row in dtuple form
 @param[in]	clust_index	clustered index
 @param[in]	index		the secondary index
-@param[in]	heap		heap used to build virtual dtuple */
+@param[in]	heap		heap used to build virtual dtuple
+@param[in,out]	vcol_info	virtual column information. */
 static
 void
 row_vers_build_clust_v_col(
-	dtuple_t*	row,
-	dict_index_t*	clust_index,
-	dict_index_t*	index,
-	mem_heap_t*	heap)
+	dtuple_t*		row,
+	dict_index_t*		clust_index,
+	dict_index_t*		index,
+	mem_heap_t*		heap,
+	purge_vcol_info_t*	vcol_info)
 {
 	mem_heap_t*	local_heap = NULL;
+	VCOL_STORAGE	*vcol_storage= NULL;
+	THD*		thd= current_thd;
+	TABLE*		maria_table= 0;
+	byte*		record= 0;
+
+	ut_ad(dict_index_has_virtual(index));
+	ut_ad(index->table == clust_index->table);
+
+	if (vcol_info != NULL) {
+		vcol_info->set_used();
+		maria_table = vcol_info->table();
+	}
+	DEBUG_SYNC(current_thd, "ib_clust_v_col_before_row_allocated");
+
+	innobase_allocate_row_for_vcol(thd, index,
+				       &local_heap,
+				       &maria_table,
+				       &record,
+				       &vcol_storage);
+
+	if (vcol_info && !vcol_info->table()) {
+		vcol_info->set_table(maria_table);
+		goto func_exit;
+	}
+
 	for (ulint i = 0; i < dict_index_get_n_fields(index); i++) {
 		const dict_field_t* ind_field = dict_index_get_nth_field(
 				index, i);
 
-		if (dict_col_is_virtual(ind_field->col)) {
+		if (ind_field->col->is_virtual()) {
 			const dict_v_col_t*       col;
 
 			col = reinterpret_cast<const dict_v_col_t*>(
@@ -510,15 +490,19 @@ row_vers_build_clust_v_col(
 
 			innobase_get_computed_value(
 				row, col, clust_index, &local_heap,
-				heap, NULL, current_thd, NULL, NULL,
+				heap, NULL, thd, maria_table, record, NULL,
 				NULL, NULL);
 		}
 	}
 
+func_exit:
 	if (local_heap) {
+		if (vcol_storage)
+			innobase_free_row_for_vcol(vcol_storage);
 		mem_heap_free(local_heap);
 	}
 }
+
 /** Build latest virtual column data from undo log
 @param[in]	in_purge	whether this is the purge thread
 @param[in]	rec		clustered index record
@@ -533,16 +517,16 @@ row_vers_build_clust_v_col(
 static
 void
 row_vers_build_cur_vrow_low(
-	bool		in_purge,
-	const rec_t*	rec,
-	dict_index_t*	clust_index,
-	ulint*		clust_offsets,
-	dict_index_t*	index,
-	roll_ptr_t	roll_ptr,
-	trx_id_t	trx_id,
-	mem_heap_t*	v_heap,
-	const dtuple_t**vrow,
-	mtr_t*		mtr)
+	bool			in_purge,
+	const rec_t*		rec,
+	dict_index_t*		clust_index,
+	offset_t*		clust_offsets,
+	dict_index_t*		index,
+	roll_ptr_t		roll_ptr,
+	trx_id_t		trx_id,
+	mem_heap_t*		v_heap,
+	dtuple_t**		vrow,
+	mtr_t*			mtr)
 {
 	const rec_t*	version;
 	rec_t*		prev_version;
@@ -601,7 +585,7 @@ row_vers_build_cur_vrow_low(
 				 = dict_index_get_nth_field(index, i);
 			const dict_col_t*	col = ind_field->col;
 
-			if (!dict_col_is_virtual(col)) {
+			if (!col->is_virtual()) {
 				continue;
 			}
 
@@ -634,8 +618,7 @@ that of current cluster index record, which is recreated from information
 stored in undo log
 @param[in]	in_purge	called by purge thread
 @param[in]	rec		record in the clustered index
-@param[in]	row		the cluster index row in dtuple form
-@param[in]	ext		externally stored column prefix or NULL
+@param[in]	icentry		the index entry built from a cluster row
 @param[in]	clust_index	cluster index
 @param[in]	clust_offsets	offsets on the cluster record
 @param[in]	index		the secondary index
@@ -651,16 +634,15 @@ bool
 row_vers_vc_matches_cluster(
 	bool		in_purge,
 	const rec_t*	rec,
-	const dtuple_t*	row,
-	row_ext_t*	ext,
+	const dtuple_t* icentry,
 	dict_index_t*	clust_index,
-	ulint*		clust_offsets,
+	offset_t*	clust_offsets,
 	dict_index_t*	index,
 	const dtuple_t* ientry,
 	roll_ptr_t	roll_ptr,
 	trx_id_t	trx_id,
 	mem_heap_t*	v_heap,
-	const dtuple_t**vrow,
+	dtuple_t**	vrow,
 	mtr_t*		mtr)
 {
 	const rec_t*	version;
@@ -677,14 +659,26 @@ row_vers_vc_matches_cluster(
 	dfield_t*	field2;
 	ulint		i;
 
-	tuple_heap = mem_heap_create(1024);
-
 	/* First compare non-virtual columns (primary keys) */
-	if (!row_vers_non_vc_match(index, row, ext, ientry, tuple_heap,
-				   &n_non_v_col)) {
-		mem_heap_free(tuple_heap);
-		return(false);
+	ut_ad(index->n_fields == n_fields);
+	ut_ad(n_fields == dtuple_get_n_fields(icentry));
+	{
+		const dfield_t* a = ientry->fields;
+		const dfield_t* b = icentry->fields;
+
+		for (const dict_field_t *ifield = index->fields,
+			     *const end = &index->fields[index->n_fields];
+		     ifield != end; ifield++, a++, b++) {
+			if (!ifield->col->is_virtual()) {
+				if (cmp_dfield_dfield(a, b)) {
+					return false;
+				}
+				n_non_v_col++;
+			}
+		}
 	}
+
+	tuple_heap = mem_heap_create(1024);
 
 	ut_ad(n_fields > n_non_v_col);
 
@@ -739,7 +733,7 @@ row_vers_vc_matches_cluster(
 			const dict_col_t*	col = ind_field->col;
 			field1 = dtuple_get_nth_field(ientry, i);
 
-			if (!dict_col_is_virtual(col)) {
+			if (!col->is_virtual()) {
 				continue;
 			}
 
@@ -804,29 +798,29 @@ func_exit:
 @param[in]	clust_index	cluster index
 @param[in]	clust_offsets	cluster rec offset
 @param[in]	index		secondary index
-@param[in]	ientry		secondary index rec
 @param[in]	roll_ptr	roll_ptr for the purge record
 @param[in]	trx_id		transaction ID on the purging record
 @param[in,out]	heap		heap memory
 @param[in,out]	v_heap		heap memory to keep virtual colum dtuple
 @param[in]	mtr		mtr holding the latch on rec
+@param[in,out]	vcol_info	virtual column information for purge thread
 @return dtuple contains virtual column data */
 static
-const dtuple_t*
+dtuple_t*
 row_vers_build_cur_vrow(
-	bool		in_purge,
-	const rec_t*	rec,
-	dict_index_t*	clust_index,
-	ulint**		clust_offsets,
-	dict_index_t*	index,
-	const dtuple_t*	ientry,
-	roll_ptr_t	roll_ptr,
-	trx_id_t	trx_id,
-	mem_heap_t*	heap,
-	mem_heap_t*	v_heap,
-	mtr_t*		mtr)
+	bool			in_purge,
+	const rec_t*		rec,
+	dict_index_t*		clust_index,
+	offset_t**		clust_offsets,
+	dict_index_t*		index,
+	roll_ptr_t		roll_ptr,
+	trx_id_t		trx_id,
+	mem_heap_t*		heap,
+	mem_heap_t*		v_heap,
+	mtr_t*			mtr,
+	purge_vcol_info_t*	vcol_info)
 {
-	const dtuple_t*	cur_vrow = NULL;
+	dtuple_t* cur_vrow = NULL;
 
 	roll_ptr_t t_roll_ptr = row_get_rec_roll_ptr(
 		rec, clust_index, *clust_offsets);
@@ -844,8 +838,17 @@ row_vers_build_cur_vrow(
 					  rec, *clust_offsets,
 					  NULL, NULL, NULL, NULL, heap);
 
+		if (vcol_info && !vcol_info->is_used()) {
+			mtr->commit();
+		}
+
 		row_vers_build_clust_v_col(
-			row, clust_index, index, heap);
+			row, clust_index, index, heap, vcol_info);
+
+		if (vcol_info != NULL && vcol_info->is_first_fetch()) {
+			return NULL;
+		}
+
 		cur_vrow = dtuple_copy(row, v_heap);
 		dtuple_dup_v_fld(cur_vrow, v_heap);
 	} else {
@@ -860,44 +863,52 @@ row_vers_build_cur_vrow(
 	return(cur_vrow);
 }
 
-/*****************************************************************//**
-Finds out if a version of the record, where the version >= the current
+/** Finds out if a version of the record, where the version >= the current
 purge view, should have ientry as its secondary index entry. We check
 if there is any not delete marked version of the record where the trx
-id >= purge view, and the secondary index entry and ientry are identified in
-the alphabetical ordering; exactly in this case we return TRUE.
+id >= purge view, and the secondary index entry == ientry; exactly in
+this case we return TRUE.
+@param[in]	also_curr	TRUE if also rec is included in the versions
+				to search; otherwise only versions prior
+				to it are searched
+@param[in]	rec		record in the clustered index; the caller
+				must have a latch on the page
+@param[in]	mtr		mtr holding the latch on rec; it will
+				also hold the latch on purge_view
+@param[in]	index		secondary index
+@param[in]	ientry		secondary index entry
+@param[in]	roll_ptr	roll_ptr for the purge record
+@param[in]	trx_id		transaction ID on the purging record
+@param[in,out]	vcol_info	virtual column information for purge thread.
 @return TRUE if earlier version should have */
-ibool
+bool
 row_vers_old_has_index_entry(
-/*=========================*/
-	ibool		also_curr,/*!< in: TRUE if also rec is included in the
-				versions to search; otherwise only versions
-				prior to it are searched */
-	const rec_t*	rec,	/*!< in: record in the clustered index; the
-				caller must have a latch on the page */
-	mtr_t*		mtr,	/*!< in: mtr holding the latch on rec; it will
-				also hold the latch on purge_view */
-	dict_index_t*	index,	/*!< in: the secondary index */
-	const dtuple_t*	ientry,	/*!< in: the secondary index entry */
-	roll_ptr_t	roll_ptr,/*!< in: roll_ptr for the purge record */
-	trx_id_t	trx_id)	/*!< in: transaction ID on the purging record */
+	bool			also_curr,
+	const rec_t*		rec,
+	mtr_t*			mtr,
+	dict_index_t*		index,
+	const dtuple_t*		ientry,
+	roll_ptr_t		roll_ptr,
+	trx_id_t		trx_id,
+	purge_vcol_info_t*	vcol_info)
 {
 	const rec_t*	version;
 	rec_t*		prev_version;
 	dict_index_t*	clust_index;
-	ulint*		clust_offsets;
+	offset_t*	clust_offsets;
 	mem_heap_t*	heap;
 	mem_heap_t*	heap2;
 	dtuple_t*	row;
 	const dtuple_t*	entry;
 	ulint		comp;
-	const dtuple_t*	vrow = NULL;
+	dtuple_t*	vrow = NULL;
 	mem_heap_t*	v_heap = NULL;
-	const dtuple_t*	cur_vrow = NULL;
+	dtuple_t*	cur_vrow = NULL;
 
 	ut_ad(mtr_memo_contains_page_flagged(mtr, rec, MTR_MEMO_PAGE_X_FIX
 					     | MTR_MEMO_PAGE_S_FIX));
-	ut_ad(!rw_lock_own(&(purge_sys->latch), RW_LOCK_S));
+	ut_ad(!rw_lock_own(&purge_sys.latch, RW_LOCK_S));
+	ut_ad(also_curr || !vcol_info);
 
 	clust_index = dict_table_get_first_index(index->table);
 
@@ -920,7 +931,7 @@ row_vers_old_has_index_entry(
 		/* The top of the stack of versions is locked by the
 		mtr holding a latch on the page containing the
 		clustered index record. The bottom of the stack is
-		locked by the fact that the purge_sys->view must
+		locked by the fact that the purge_sys.view must
 		'overtake' any read view of an active transaction.
 		Thus, it is safe to fetch the prefixes for
 		externally stored columns. */
@@ -948,33 +959,44 @@ row_vers_old_has_index_entry(
 			columns need to be computed */
 			if (trx_undo_roll_ptr_is_insert(t_roll_ptr)
 			    || dbug_v_purge) {
+
+				if (vcol_info && !vcol_info->is_used()) {
+					mtr->commit();
+				}
+
 				row_vers_build_clust_v_col(
-					row, clust_index, index, heap);
+					row, clust_index, index, heap,
+					vcol_info);
+
+				if (vcol_info && vcol_info->is_first_fetch()) {
+					goto unsafe_to_purge;
+				}
 
 				entry = row_build_index_entry(
 					row, ext, index, heap);
 				if (entry && !dtuple_coll_cmp(ientry, entry)) {
-
-					mem_heap_free(heap);
-
-					if (v_heap) {
-						mem_heap_free(v_heap);
-					}
-
-					return(TRUE);
+					goto unsafe_to_purge;
 				}
 			} else {
-				if (row_vers_vc_matches_cluster(
-					also_curr, rec, row, ext, clust_index,
-					clust_offsets, index, ientry, roll_ptr,
-					trx_id, NULL, &vrow, mtr)) {
-					mem_heap_free(heap);
+				/* Build index entry out of row */
+				entry = row_build_index_entry(row, ext, index, heap);
+				/* entry could only be NULL if
+				the clustered index record is an uncommitted
+				inserted record whose BLOBs have not been
+				written yet. The secondary index record
+				can be safely removed, because it cannot
+				possibly refer to this incomplete
+				clustered index record. (Insert would
+				always first be completed for the
+				clustered index record, then proceed to
+				secondary indexes.) */
 
-					if (v_heap) {
-						mem_heap_free(v_heap);
-					}
-
-					return(TRUE);
+				if (entry && row_vers_vc_matches_cluster(
+					    also_curr, rec, entry,
+					    clust_index, clust_offsets,
+					    index, ientry, roll_ptr,
+					    trx_id, NULL, &vrow, mtr)) {
+					goto unsafe_to_purge;
 				}
 			}
 			clust_offsets = rec_get_offsets(rec, clust_index, NULL,
@@ -1007,13 +1029,13 @@ row_vers_old_has_index_entry(
 			a different binary value in a char field, but the
 			collation identifies the old and new value anyway! */
 			if (entry && !dtuple_coll_cmp(ientry, entry)) {
-
+unsafe_to_purge:
 				mem_heap_free(heap);
 
 				if (v_heap) {
 					mem_heap_free(v_heap);
 				}
-				return(TRUE);
+				return true;
 			}
 		}
 	} else if (dict_index_has_virtual(index)) {
@@ -1021,9 +1043,14 @@ row_vers_old_has_index_entry(
 		deleted, but the previous version of it might not. We will
 		need to get the virtual column data from undo record
 		associated with current cluster index */
+
 		cur_vrow = row_vers_build_cur_vrow(
 			also_curr, rec, clust_index, &clust_offsets,
-			index, ientry, roll_ptr, trx_id, heap, v_heap, mtr);
+			index, roll_ptr, trx_id, heap, v_heap, mtr, vcol_info);
+
+		if (vcol_info && vcol_info->is_first_fetch()) {
+			goto unsafe_to_purge;
+		}
 	}
 
 	version = rec;
@@ -1042,14 +1069,13 @@ row_vers_old_has_index_entry(
 
 		if (!prev_version) {
 			/* Versions end here */
-
 			mem_heap_free(heap);
 
 			if (v_heap) {
 				mem_heap_free(v_heap);
 			}
 
-			return(FALSE);
+			return false;
 		}
 
 		clust_offsets = rec_get_offsets(prev_version, clust_index,
@@ -1104,13 +1130,7 @@ row_vers_old_has_index_entry(
 			and new value anyway! */
 
 			if (entry && !dtuple_coll_cmp(ientry, entry)) {
-
-				mem_heap_free(heap);
-				if (v_heap) {
-					mem_heap_free(v_heap);
-				}
-
-				return(TRUE);
+				goto unsafe_to_purge;
 			}
 		}
 
@@ -1132,7 +1152,7 @@ row_vers_build_for_consistent_read(
 				of this records */
 	mtr_t*		mtr,	/*!< in: mtr holding the latch on rec */
 	dict_index_t*	index,	/*!< in: the clustered index */
-	ulint**		offsets,/*!< in/out: offsets returned by
+	offset_t**	offsets,/*!< in/out: offsets returned by
 				rec_get_offsets(rec, index) */
 	ReadView*	view,	/*!< in: the consistent read view */
 	mem_heap_t**	offset_heap,/*!< in/out: memory heap from which
@@ -1145,7 +1165,7 @@ row_vers_build_for_consistent_read(
 				if the history is missing or the record
 				does not exist in the view, that is,
 				it was freshly inserted afterwards */
-	const dtuple_t**vrow)	/*!< out: virtual row */
+	dtuple_t**	vrow)	/*!< out: virtual row */
 {
 	const rec_t*	version;
 	rec_t*		prev_version;
@@ -1157,7 +1177,7 @@ row_vers_build_for_consistent_read(
 	ut_ad(dict_index_is_clust(index));
 	ut_ad(mtr_memo_contains_page_flagged(mtr, rec, MTR_MEMO_PAGE_X_FIX
 					     | MTR_MEMO_PAGE_S_FIX));
-	ut_ad(!rw_lock_own(&(purge_sys->latch), RW_LOCK_S));
+	ut_ad(!rw_lock_own(&(purge_sys.latch), RW_LOCK_S));
 
 	ut_ad(rec_offs_validate(rec, index, *offsets));
 
@@ -1248,7 +1268,7 @@ row_vers_build_for_semi_consistent_read(
 				of this records */
 	mtr_t*		mtr,	/*!< in: mtr holding the latch on rec */
 	dict_index_t*	index,	/*!< in: the clustered index */
-	ulint**		offsets,/*!< in/out: offsets returned by
+	offset_t**	offsets,/*!< in/out: offsets returned by
 				rec_get_offsets(rec, index) */
 	mem_heap_t**	offset_heap,/*!< in/out: memory heap from which
 				the offsets are allocated */
@@ -1259,7 +1279,7 @@ row_vers_build_for_semi_consistent_read(
 	const rec_t**	old_vers,/*!< out: rec, old version, or NULL if the
 				record does not exist in the view, that is,
 				it was freshly inserted afterwards */
-	const dtuple_t** vrow)	/*!< out: virtual row, old version, or NULL
+	dtuple_t**	vrow)	/*!< out: virtual row, old version, or NULL
 				if it is not updated in the view */
 {
 	const rec_t*	version;
@@ -1270,7 +1290,7 @@ row_vers_build_for_semi_consistent_read(
 	ut_ad(dict_index_is_clust(index));
 	ut_ad(mtr_memo_contains_page_flagged(mtr, rec, MTR_MEMO_PAGE_X_FIX
 					     | MTR_MEMO_PAGE_S_FIX));
-	ut_ad(!rw_lock_own(&(purge_sys->latch), RW_LOCK_S));
+	ut_ad(!rw_lock_own(&(purge_sys.latch), RW_LOCK_S));
 
 	ut_ad(rec_offs_validate(rec, index, *offsets));
 
@@ -1287,7 +1307,7 @@ row_vers_build_for_semi_consistent_read(
 			rec_trx_id = version_trx_id;
 		}
 
-		if (!trx_sys->rw_trx_hash.find(caller_trx, version_trx_id)) {
+		if (!trx_sys.is_registered(caller_trx, version_trx_id)) {
 committed_version_trx:
 			/* We found a version that belongs to a
 			committed transaction: return it. */

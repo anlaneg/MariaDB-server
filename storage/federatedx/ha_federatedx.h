@@ -120,7 +120,7 @@ typedef struct st_federatedx_share {
   int share_key_length;
   ushort port;
 
-  uint table_name_length, server_name_length, connect_string_length;
+  size_t table_name_length, server_name_length, connect_string_length;
   uint use_count;
   THR_LOCK lock;
   FEDERATEDX_SERVER *s;
@@ -169,9 +169,11 @@ public:
   static void *operator new(size_t size, MEM_ROOT *mem_root) throw ()
   { return alloc_root(mem_root, size); }
   static void operator delete(void *ptr, size_t size)
-  { TRASH(ptr, size); }
+  { TRASH_FREE(ptr, size); }
+  static void operator delete(void *, MEM_ROOT *)
+  { }
 
-  virtual int query(const char *buffer, uint length)=0;
+  virtual int query(const char *buffer, size_t length)=0;
   virtual FEDERATEDX_IO_RESULT *store_result()=0;
 
   virtual size_t max_query_size() const=0;
@@ -270,7 +272,6 @@ class ha_federatedx: public handler
   */
   DYNAMIC_ARRAY results;
   bool position_called;
-  uint fetch_num; // stores the fetch num
   int remote_error_number;
   char remote_error_buf[FEDERATEDX_QUERY_BUFFER_SIZE];
   bool ignore_duplicates, replace_duplicates;
@@ -450,7 +451,7 @@ extern const char ident_quote_char;              // Character for quoting
 extern const char value_quote_char;              // Character for quoting
                                                  // literals
 
-extern bool append_ident(String *string, const char *name, uint length,
+extern bool append_ident(String *string, const char *name, size_t length,
                          const char quote_char);
 
 

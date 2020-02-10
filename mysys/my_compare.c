@@ -12,7 +12,7 @@
 
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
-   Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA */
+   Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1335  USA */
    
 #include <my_global.h>
 #include <m_ctype.h>
@@ -20,8 +20,8 @@
 #include <my_compare.h>
 #include <my_sys.h>
 
-int ha_compare_text(CHARSET_INFO *charset_info, const uchar *a, uint a_length,
-		    const uchar *b, uint b_length, my_bool part_key)
+int ha_compare_text(CHARSET_INFO *charset_info, const uchar *a, size_t a_length,
+		    const uchar *b, size_t b_length, my_bool part_key)
 {
   if (!part_key)
     return charset_info->coll->strnncollsp(charset_info, a, a_length,

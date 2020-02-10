@@ -11,7 +11,7 @@
 
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
-   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA */
+   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1335  USA */
 
 /* Quick & light hash implementation for tab completion purposes
  *
@@ -49,7 +49,7 @@ int completion_hash_init(HashTable *ht, uint nSize)
     ht->initialized = 0;
     return FAILURE;
   }
-  init_alloc_root(&ht->mem_root, 8192, 0, MYF(0));
+  init_alloc_root(&ht->mem_root, "completion_hash", 8192, 0, MYF(0));
   ht->pHashFunction = hashpjw;
   ht->nTableSize = nSize;
   ht->initialized = 1;

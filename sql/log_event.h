@@ -12,7 +12,7 @@
 
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
-   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA */
+   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1335  USA */
 
 /**
   @addtogroup Replication
@@ -866,6 +866,7 @@ typedef struct st_print_event_info
   bool allow_parallel_printed;
   bool found_row_event;
   bool print_row_count;
+  static const uint max_delimiter_size= 16;
   /* Settings on how to print the events */
   bool short_form;
   /*
@@ -1203,7 +1204,7 @@ public:
   /* The number of seconds the query took to run on the master. */
   ulong exec_time;
   /* Number of bytes written by write() function */
-  ulong data_written;
+  size_t data_written;
 
   /*
     The master's server id (is preserved in the relay log; used to
@@ -1253,7 +1254,7 @@ public:
 #endif /* HAVE_REPLICATION */
   virtual const char* get_db()
   {
-    return thd ? thd->db : 0;
+    return thd ? thd->db.str : 0;
   }
 #else
   Log_event() : temp_buf(0), when(0), flags(0) {}
@@ -1264,7 +1265,7 @@ public:
   bool print_header(IO_CACHE* file, PRINT_EVENT_INFO* print_event_info,
                     bool is_more);
   bool print_base64(IO_CACHE* file, PRINT_EVENT_INFO* print_event_info,
-                    bool is_more);
+                    bool do_print_encoded);
 #endif /* MYSQL_SERVER */
 
   /* The following code used for Flashback */
@@ -1364,10 +1365,10 @@ public:
   static void operator delete(void*, void*) { }
 
 #ifdef MYSQL_SERVER
-  bool write_header(ulong data_length);
-  bool write_data(const uchar *buf, ulong data_length)
+  bool write_header(size_t event_data_length);
+  bool write_data(const uchar *buf, size_t data_length)
   { return writer->write_data(buf, data_length); }
-  bool write_data(const char *buf, ulong data_length)
+  bool write_data(const char *buf, size_t data_length)
   { return write_data((uchar*)buf, data_length); }
   bool write_footer()
   { return writer->write_footer(); }
@@ -2114,7 +2115,7 @@ public:
 
 #ifdef MYSQL_SERVER
 
-  Query_log_event(THD* thd_arg, const char* query_arg, ulong query_length,
+  Query_log_event(THD* thd_arg, const char* query_arg, size_t query_length,
                   bool using_trans, bool direct, bool suppress_use, int error);
   const char* get_db() { return db; }
 #ifdef HAVE_REPLICATION
@@ -2222,7 +2223,15 @@ public:
  ****************************************************************************/
 struct sql_ex_info
 {
-  sql_ex_info() {}                            /* Remove gcc warning */
+  sql_ex_info():
+    cached_new_format(-1),
+    field_term_len(0),
+    enclosed_len(0),
+    line_term_len(0),
+    line_start_len(0),
+    escaped_len(0),
+    empty_flags(0)
+  {}                            /* Remove gcc warning */
   const char* field_term;
   const char* enclosed;
   const char* line_term;
@@ -2498,10 +2507,10 @@ public:
   bool is_concurrent;
 
   /* fname doesn't point to memory inside Log_event::temp_buf  */
-  void set_fname_outside_temp_buf(const char *afname, uint alen)
+  void set_fname_outside_temp_buf(const char *afname, size_t alen)
   {
     fname= afname;
-    fname_len= alen;
+    fname_len= (uint)alen;
     local_fname= TRUE;
   }
   /* fname doesn't point to memory inside Log_event::temp_buf  */
@@ -2514,7 +2523,7 @@ public:
   String field_lens_buf;
   String fields_buf;
 
-  Load_log_event(THD* thd, sql_exchange* ex, const char* db_arg,
+  Load_log_event(THD* thd, const sql_exchange* ex, const char* db_arg,
 		 const char* table_name_arg,
 		 List<Item>& fields_arg,
                  bool is_concurrent_arg,
@@ -3050,9 +3059,9 @@ public:
     UNSIGNED_F= 1
   };
   const char *name;
-  uint name_len;
+  size_t name_len;
   const char *val;
-  ulong val_len;
+  size_t val_len;
   Item_result type;
   uint charset_number;
   bool is_null;
@@ -3060,8 +3069,8 @@ public:
 #ifdef MYSQL_SERVER
   bool deferred;
   query_id_t query_id;
-  User_var_log_event(THD* thd_arg, const char *name_arg, uint name_len_arg,
-                     const char *val_arg, ulong val_len_arg, Item_result type_arg,
+  User_var_log_event(THD* thd_arg, const char *name_arg, size_t name_len_arg,
+                     const char *val_arg, size_t val_len_arg, Item_result type_arg,
 		     uint charset_number_arg, uchar flags_arg,
                      bool using_trans, bool direct)
     :Log_event(thd_arg, 0, using_trans),
@@ -3519,7 +3528,7 @@ public:
   virtual int do_apply_event(rpl_group_info *rgi);
   enum_skip_reason do_shall_skip(rpl_group_info *rgi);
 #endif
-  static bool peek(const char *event_start, uint32 event_len,
+  static bool peek(const char *event_start, size_t event_len,
                    enum enum_binlog_checksum_alg checksum_alg,
                    rpl_gtid **out_gtid_list, uint32 *out_list_len,
                    const Format_description_log_event *fdev);
@@ -3589,7 +3598,7 @@ public:
   bool write_data_header();
   bool write_data_body();
   /*
-    Cut out Create_file extentions and
+    Cut out Create_file extensions and
     write it as Load event - used on the slave
   */
   bool write_base();
@@ -3864,7 +3873,7 @@ public:
   bool is_valid() const { return 1; }
 };
 #endif
-char *str_to_hex(char *to, const char *from, uint len);
+char *str_to_hex(char *to, const char *from, size_t len);
 
 /**
   @class Annotate_rows_log_event
@@ -4302,7 +4311,7 @@ public:
   int rewrite_db(const char* new_name, size_t new_name_len,
                  const Format_description_log_event*);
 #endif
-  ulong get_table_id() const        { return m_table_id; }
+  ulonglong get_table_id() const        { return m_table_id; }
   const char *get_table_name() const { return m_tblnam; }
   const char *get_db_name() const    { return m_dbnam; }
 
@@ -4346,7 +4355,7 @@ private:
   uchar         *m_coltype;
 
   uchar         *m_memory;
-  ulong          m_table_id;
+  ulonglong      m_table_id;
   flag_set       m_flags;
 
   size_t         m_data_size;
@@ -4475,7 +4484,7 @@ public:
   MY_BITMAP const *get_cols() const { return &m_cols; }
   MY_BITMAP const *get_cols_ai() const { return &m_cols_ai; }
   size_t get_width() const          { return m_width; }
-  ulong get_table_id() const        { return m_table_id; }
+  ulonglong get_table_id() const        { return m_table_id; }
 
 #if defined(MYSQL_SERVER)
   /*
@@ -4576,7 +4585,7 @@ protected:
 #ifdef MYSQL_SERVER
   TABLE *m_table;		/* The table the rows belong to */
 #endif
-  ulong       m_table_id;	/* Table ID */
+  ulonglong       m_table_id;	/* Table ID */
   MY_BITMAP   m_cols;		/* Bitmap denoting columns available */
   ulong       m_width;          /* The width of the columns bitmap */
   /*
@@ -5028,21 +5037,21 @@ public:
     DBUG_VOID_RETURN;
   }
 
-  Incident_log_event(THD *thd_arg, Incident incident, LEX_STRING const msg)
+  Incident_log_event(THD *thd_arg, Incident incident, const LEX_CSTRING *msg)
     : Log_event(thd_arg, 0, FALSE), m_incident(incident)
   {
     DBUG_ENTER("Incident_log_event::Incident_log_event");
     DBUG_PRINT("enter", ("m_incident: %d", m_incident));
-    m_message.str= NULL;
     m_message.length= 0;
-    if (!(m_message.str= (char*) my_malloc(msg.length+1, MYF(MY_WME))))
+    if (unlikely(!(m_message.str= (char*) my_malloc(msg->length+1,
+                                                    MYF(MY_WME)))))
     {
       /* Mark this event invalid */
       m_incident= INCIDENT_NONE;
       DBUG_VOID_RETURN;
     }
-    strmake(m_message.str, msg.str, msg.length);
-    m_message.length= msg.length;
+    strmake(m_message.str, msg->str, msg->length);
+    m_message.length= msg->length;
     set_direct_logging();
     /* Replicate the incident irregardless of @@skip_replication. */
     flags&= ~LOG_EVENT_SKIP_REPLICATION_F;
@@ -5140,6 +5149,19 @@ public:
   virtual int get_data_size() { return IGNORABLE_HEADER_LEN; }
 };
 
+#ifdef MYSQL_CLIENT
+bool copy_cache_to_string_wrapped(IO_CACHE *body,
+                                  LEX_STRING *to,
+                                  bool do_wrap,
+                                  const char *delimiter,
+                                  bool is_verbose);
+bool copy_cache_to_file_wrapped(IO_CACHE *body,
+                                FILE *file,
+                                bool do_wrap,
+                                const char *delimiter,
+                                bool is_verbose);
+#endif
+
 #ifdef MYSQL_SERVER
 /*****************************************************************************
 
@@ -5197,6 +5219,9 @@ bool event_that_should_be_ignored(const char *buf);
 bool event_checksum_test(uchar *buf, ulong event_len, enum_binlog_checksum_alg alg);
 enum enum_binlog_checksum_alg get_checksum_alg(const char* buf, ulong len);
 extern TYPELIB binlog_checksum_typelib;
+#ifdef WITH_WSREP
+enum Log_event_type wsrep_peak_event(rpl_group_info *rgi, ulonglong* event_size);
+#endif /* WITH_WSREP */
 
 /**
   @} (end of group Replication)

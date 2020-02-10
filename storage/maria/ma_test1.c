@@ -11,7 +11,7 @@
 
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
-   Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02111-1301 USA */
+   Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1335 USA */
 
 /* Testing of the basic functions of a MARIA table */
 
@@ -291,6 +291,11 @@ static int run_test(const char *filename)
     }
     if (!silent)
       printf("- Updating rows\n");
+
+    create_key(key, j);
+    if ((maria_rkey(file, read_record, 0, key,
+                           HA_WHOLE_KEY, HA_READ_KEY_EXACT)))
+      printf("Can't find last written row with maria_rkey\n");
 
     /* Update first last row to force extend of file */
     if (maria_rsame(file,read_record,-1))
@@ -577,7 +582,7 @@ static void create_key(uchar *key,uint rownr)
   }
   if (keyinfo[0].seg[0].flag & (HA_BLOB_PART | HA_VAR_LENGTH_PART))
   {
-    uint tmp;
+    size_t tmp;
     create_key_part(key+2,rownr);
     tmp=strlen((char*) key+2);
     int2store(key,tmp);
@@ -602,7 +607,7 @@ static void create_record(uchar *record,uint rownr)
   pos=record+1;
   if (recinfo[0].type == FIELD_BLOB)
   {
-    uint tmp;
+    size_t tmp;
     uchar *ptr;
     create_key_part(blob_key,rownr);
     tmp=strlen((char*) blob_key);
@@ -613,7 +618,7 @@ static void create_record(uchar *record,uint rownr)
   }
   else if (recinfo[0].type == FIELD_VARCHAR)
   {
-    uint tmp, pack_length= HA_VARCHAR_PACKLENGTH(recinfo[0].length-1);
+    size_t tmp, pack_length= HA_VARCHAR_PACKLENGTH(recinfo[0].length-1);
     create_key_part(pos+pack_length,rownr);
     tmp= strlen((char*) pos+pack_length);
     if (pack_length == 1)
@@ -629,7 +634,7 @@ static void create_record(uchar *record,uint rownr)
   }
   if (recinfo[1].type == FIELD_BLOB)
   {
-    uint tmp;
+    size_t tmp;
     uchar *ptr;;
     sprintf((char*) blob_record,"... row: %d", rownr);
     strappend((char*) blob_record,MY_MAX(MAX_REC_LENGTH-rownr,10),' ');
@@ -640,7 +645,7 @@ static void create_record(uchar *record,uint rownr)
   }
   else if (recinfo[1].type == FIELD_VARCHAR)
   {
-    uint tmp, pack_length= HA_VARCHAR_PACKLENGTH(recinfo[1].length-1);
+    size_t tmp, pack_length= HA_VARCHAR_PACKLENGTH(recinfo[1].length-1);
     sprintf((char*) pos+pack_length, "... row: %d", rownr);
     tmp= strlen((char*) pos+pack_length);
     if (pack_length == 1)

@@ -11,7 +11,7 @@
 
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
-   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA */
+   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1335  USA */
 
 /* Written by Sergei A. Golubchik, who has a shared copyright to this code */
 
@@ -290,7 +290,7 @@ static int ftb_parse_query_internal(MYSQL_FTPARSER_PARAM *param,
   info.prev= ' ';
   info.quot= 0;
   while (ft_get_word(cs, start, end, &w, &info))
-    param->mysql_add_word(param, (char*) w.pos, w.len, &info);
+    param->mysql_add_word(param, (char*) w.pos, (int)w.len, &info);
   return(0);
 }
 
@@ -335,7 +335,7 @@ static int _ftb_no_dupes_cmp(void* not_used __attribute__((unused)),
   When performing prefix search (a word with truncation operator), we
   must preserve original prefix to ensure that characters which may be
   expanded/contracted do not break the prefix. This is done by storing
-  newly found key immediatly after the original word in ftbw->word
+  newly found key immediately after the original word in ftbw->word
   buffer.
 
   ftbw->word= LENGTH WORD [ LENGTH1 WORD1 ] WEIGHT REFERENCE
@@ -579,7 +579,7 @@ FT_INFO * ft_init_boolean_search(MI_INFO *info, uint keynr, uchar *query,
   bzero(& ftb->no_dupes, sizeof(TREE));
   ftb->last_word= 0;
 
-  init_alloc_root(&ftb->mem_root, 1024, 1024, MYF(0));
+  init_alloc_root(&ftb->mem_root, "fulltext", 1024, 1024, MYF(0));
   ftb->queue.max_elements= 0;
   if (!(ftbe=(FTB_EXPR *)alloc_root(&ftb->mem_root, sizeof(FTB_EXPR))))
     goto err;
@@ -675,7 +675,7 @@ static int ftb_check_phrase_internal(MYSQL_FTPARSER_PARAM *param,
   while (ft_simple_get_word(phrase_param->cs, (uchar**) &document, docend,
                             &word, FALSE))
   {
-    param->mysql_add_word(param, (char*) word.pos, word.len, 0);
+    param->mysql_add_word(param, (char*) word.pos, (int)word.len, 0);
     if (phrase_param->match)
       break;
   }
@@ -961,7 +961,7 @@ static int ftb_find_relevance_parse(MYSQL_FTPARSER_PARAM *param,
   uchar *end= (uchar*) doc + len;
   FT_WORD w;
   while (ft_simple_get_word(ftb->charset, (uchar**) &doc, end, &w, TRUE))
-    param->mysql_add_word(param, (char*) w.pos, w.len, 0);
+    param->mysql_add_word(param, (char*) w.pos, (int)w.len, 0);
   return(0);
 }
 

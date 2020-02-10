@@ -15,7 +15,7 @@
 
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
-   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA */
+   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1335  USA */
 
 #include <my_sys.h>
 
@@ -123,8 +123,7 @@ public:
 
   void init(uint prealloc=16, uint increment=16)
   {
-    my_init_dynamic_array(&array, sizeof(Elem), prealloc, increment,
-                          MYF(0));
+    init_dynamic_array2(&array, sizeof(Elem), 0, prealloc, increment, MYF(0));
   }
 
   /**
@@ -191,9 +190,10 @@ public:
     return *((Elem*)pop_dynamic(&array));
   }
 
-  void del(uint idx)
+  void del(size_t idx)
   {
-    delete_dynamic_element(&array, idx);
+    DBUG_ASSERT(idx <= array.max_element);
+    delete_dynamic_element(&array, (uint)idx);
   }
 
   size_t elements() const
@@ -204,7 +204,7 @@ public:
   void elements(size_t num_elements)
   {
     DBUG_ASSERT(num_elements <= array.max_element);
-    array.elements= num_elements;
+    array.elements= (uint)num_elements;
   }
 
   void clear()
@@ -217,15 +217,20 @@ public:
     set_dynamic(&array, &el, idx);
   }
 
+  void freeze()
+  {
+    freeze_size(&array);
+  }
+
   bool resize(size_t new_size, Elem default_val)
   {
     size_t old_size= elements();
-    if (allocate_dynamic(&array, new_size))
+    if (unlikely(allocate_dynamic(&array, (uint)new_size)))
       return true;
     
     if (new_size > old_size)
     {
-      set_dynamic(&array, (uchar*)&default_val, new_size - 1);
+      set_dynamic(&array, (uchar*)&default_val, (uint)(new_size - 1));
       /*for (size_t i= old_size; i != new_size; i++)
       {
         at(i)= default_val;
@@ -251,7 +256,7 @@ public:
     my_qsort(array.buffer, array.elements, sizeof(Elem), (qsort_cmp)cmp_func);
   }
 
-  typedef int (*CMP_FUNC2)(const Elem *el1, const Elem *el2, void *);
+  typedef int (*CMP_FUNC2)(void *, const Elem *el1, const Elem *el2);
   void sort(CMP_FUNC2 cmp_func, void *data)
   {
     my_qsort2(array.buffer, array.elements, sizeof(Elem), (qsort2_cmp)cmp_func, data);

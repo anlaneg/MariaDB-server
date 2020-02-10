@@ -1,6 +1,7 @@
 /*****************************************************************************
 
 Copyright (c) 2014, 2016, Oracle and/or its affiliates. All Rights Reserved.
+Copyright (c) 2019, MariaDB Corporation.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License as published by the Free Software
@@ -12,7 +13,7 @@ FOR A PARTICULAR PURPOSE. See the GNU General Public License for more details.
 
 You should have received a copy of the GNU General Public License along with
 this program; if not, write to the Free Software Foundation, Inc.,
-51 Franklin Street, Suite 500, Boston, MA 02110-1335 USA
+51 Franklin Street, Fifth Floor, Boston, MA 02110-1335 USA
 
 *****************************************************************************/
 
@@ -24,8 +25,6 @@ Created May 26, 2014 Vasil Dimov
 *******************************************************/
 
 #include "univ.i"
-
-#include "ut0new.h"
 
 /** Maximum number of retries to allocate memory. */
 const size_t	alloc_max_retries = 60;
@@ -43,8 +42,6 @@ PSI_memory_key	mem_key_other;
 PSI_memory_key	mem_key_row_log_buf;
 PSI_memory_key	mem_key_row_merge_sort;
 PSI_memory_key	mem_key_std;
-PSI_memory_key	mem_key_trx_sys_t_rw_trx_ids;
-PSI_memory_key	mem_key_partitioning;
 
 #ifdef UNIV_PFS_MEMORY
 
@@ -72,8 +69,6 @@ static PSI_memory_info	pfs_info[] = {
 	{&mem_key_row_log_buf, "row_log_buf", 0},
 	{&mem_key_row_merge_sort, "row_merge_sort", 0},
 	{&mem_key_std, "std", 0},
-	{&mem_key_trx_sys_t_rw_trx_ids, "trx_sys_t::rw_trx_ids", 0},
-	{&mem_key_partitioning, "partitioning", 0},
 };
 
 /** Map used for default performance schema keys, based on file name of the
@@ -167,7 +162,6 @@ ut_new_boot()
 		"trx0sys",
 		"trx0trx",
 		"trx0undo",
-		"usr0sess",
 		"ut0list",
 		"ut0mem",
 		"ut0mutex",

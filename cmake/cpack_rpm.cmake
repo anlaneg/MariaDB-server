@@ -37,7 +37,9 @@ IF(CMAKE_VERSION VERSION_LESS "3.6.0")
   SET(CPACK_PACKAGE_FILE_NAME "${CPACK_RPM_PACKAGE_NAME}-${VERSION}-${RPM}-${CMAKE_SYSTEM_PROCESSOR}")
 ELSE()
   SET(CPACK_RPM_FILE_NAME "RPM-DEFAULT")
-  SET(CPACK_RPM_DEBUGINFO_PACKAGE ON)
+  OPTION(CPACK_RPM_DEBUGINFO_PACKAGE "" ON)
+  MARK_AS_ADVANCED(CPACK_RPM_DEBUGINFO_PACKAGE)
+  SET(CPACK_RPM_BUILD_SOURCE_DIRS_PREFIX "/usr/src/debug/${CPACK_RPM_PACKAGE_NAME}-${VERSION}")
 ENDIF()
 
 SET(CPACK_RPM_PACKAGE_RELEASE "1%{?dist}")
@@ -45,17 +47,8 @@ SET(CPACK_RPM_PACKAGE_LICENSE "GPLv2")
 SET(CPACK_RPM_PACKAGE_RELOCATABLE FALSE)
 SET(CPACK_PACKAGE_RELOCATABLE FALSE)
 SET(CPACK_RPM_PACKAGE_GROUP "Applications/Databases")
-SET(CPACK_RPM_PACKAGE_SUMMARY ${CPACK_PACKAGE_SUMMARY})
 SET(CPACK_RPM_PACKAGE_URL ${CPACK_PACKAGE_URL})
-SET(CPACK_RPM_PACKAGE_DESCRIPTION "${CPACK_RPM_PACKAGE_SUMMARY}
-
-It is GPL v2 licensed, which means you can use the it free of charge under the
-conditions of the GNU General Public License Version 2 (http://www.gnu.org/licenses/).
-
-MariaDB documentation can be found at https://mariadb.com/kb
-MariaDB bug reports should be submitted through https://jira.mariadb.org 
-
-")
+SET(CPACK_RPM_PACKAGE_DESCRIPTION "${CPACK_PACKAGE_DESCRIPTION}")
 
 SET(CPACK_RPM_shared_PACKAGE_VENDOR "MariaDB Corporation Ab")
 SET(CPACK_RPM_shared_PACKAGE_LICENSE "LGPLv2.1")
@@ -81,6 +74,16 @@ SET(CPACK_RPM_SPEC_MORE_DEFINE "
 %define _bindir     ${INSTALL_BINDIRABS}
 %define _sbindir    ${INSTALL_SBINDIRABS}
 %define _sysconfdir ${INSTALL_SYSCONFDIR}
+%define restart_flag_dir %{_localstatedir}/lib/rpm-state/mariadb
+%define restart_flag %{restart_flag_dir}/need-restart
+
+%{?filter_setup:
+%filter_provides_in \\\\.\\\\(test\\\\|result\\\\|h\\\\|cc\\\\|c\\\\|inc\\\\|opt\\\\|ic\\\\|cnf\\\\|rdiff\\\\|cpp\\\\)$
+%filter_requires_in \\\\.\\\\(test\\\\|result\\\\|h\\\\|cc\\\\|c\\\\|inc\\\\|opt\\\\|ic\\\\|cnf\\\\|rdiff\\\\|cpp\\\\)$
+%filter_from_provides /perl(\\\\(mtr\\\\|My::\\\\)/d
+%filter_from_requires /\\\\(lib\\\\(ft\\\\|lzma\\\\|tokuportability\\\\)\\\\)\\\\|\\\\(perl(\\\\(.*mtr\\\\|My::\\\\|.*HandlerSocket\\\\|Mysql\\\\)\\\\)/d
+%filter_setup
+}
 ")
 
 # this creative hack is described here: http://www.cmake.org/pipermail/cmake/2012-January/048416.html
@@ -97,12 +100,18 @@ SET(ignored
   "%ignore /etc"
   "%ignore /etc/init.d"
   "%ignore /etc/logrotate.d"
+  "%ignore /etc/security"
+  "%ignore /etc/systemd"
+  "%ignore /etc/systemd/system"
+  "%ignore /lib"
+  "%ignore /lib/security"
   "%ignore ${CMAKE_INSTALL_PREFIX}"
   "%ignore ${CMAKE_INSTALL_PREFIX}/bin"
   "%ignore ${CMAKE_INSTALL_PREFIX}/include"
   "%ignore ${CMAKE_INSTALL_PREFIX}/lib"
   "%ignore ${CMAKE_INSTALL_PREFIX}/lib/systemd"
   "%ignore ${CMAKE_INSTALL_PREFIX}/lib/systemd/system"
+  "%ignore ${CMAKE_INSTALL_PREFIX}/lib/tmpfiles.d"
   "%ignore ${CMAKE_INSTALL_PREFIX}/lib64"
   "%ignore ${CMAKE_INSTALL_PREFIX}/sbin"
   "%ignore ${CMAKE_INSTALL_PREFIX}/share"
@@ -168,17 +177,13 @@ IF(WITH_WSREP)
   SETA(CPACK_RPM_server_PACKAGE_REQUIRES
     "galera" "rsync" "lsof" "grep" "gawk" "iproute"
     "coreutils" "findutils" "tar")
-  IF (RPM MATCHES "sles11")
-    SETA(CPACK_RPM_server_PACKAGE_REQUIRES "util-linux")
-  ELSE()
-    SETA(CPACK_RPM_server_PACKAGE_REQUIRES "which")
-  ENDIF()
 ENDIF()
 
 SET(CPACK_RPM_server_PRE_INSTALL_SCRIPT_FILE ${CMAKE_SOURCE_DIR}/support-files/rpm/server-prein.sh)
 SET(CPACK_RPM_server_PRE_UNINSTALL_SCRIPT_FILE ${CMAKE_SOURCE_DIR}/support-files/rpm/server-preun.sh)
 SET(CPACK_RPM_server_POST_INSTALL_SCRIPT_FILE ${CMAKE_SOURCE_DIR}/support-files/rpm/server-postin.sh)
 SET(CPACK_RPM_server_POST_UNINSTALL_SCRIPT_FILE ${CMAKE_SOURCE_DIR}/support-files/rpm/server-postun.sh)
+SET(CPACK_RPM_server_POST_TRANS_SCRIPT_FILE ${CMAKE_SOURCE_DIR}/support-files/rpm/server-posttrans.sh)
 SET(CPACK_RPM_shared_POST_INSTALL_SCRIPT_FILE ${CMAKE_SOURCE_DIR}/support-files/rpm/shared-post.sh)
 SET(CPACK_RPM_shared_POST_UNINSTALL_SCRIPT_FILE ${CMAKE_SOURCE_DIR}/support-files/rpm/shared-post.sh)
 SET(CPACK_RPM_compat_POST_INSTALL_SCRIPT_FILE ${CMAKE_SOURCE_DIR}/support-files/rpm/shared-post.sh)
@@ -193,7 +198,7 @@ MACRO(ALTERNATIVE_NAME real alt)
   SET(p "CPACK_RPM_${real}_PACKAGE_PROVIDES")
   SET(${p} "${${p}} ${alt} = ${ver} ${alt}%{?_isa} = ${ver} config(${alt}) = ${ver}")
   SET(o "CPACK_RPM_${real}_PACKAGE_OBSOLETES")
-  SET(${o} "${${o}} ${alt} ${alt}%{?_isa}")
+  SET(${o} "${${o}} ${alt}")
 ENDMACRO(ALTERNATIVE_NAME)
 
 ALTERNATIVE_NAME("devel"  "mysql-devel")
@@ -201,7 +206,7 @@ ALTERNATIVE_NAME("server" "mysql-server")
 ALTERNATIVE_NAME("test"   "mysql-test")
 
 # Argh! Different distributions call packages differently, to be a drop-in
-# replacement we have to fake distribution-specificic dependencies
+# replacement we have to fake distribution-specific dependencies
 
 IF(RPM MATCHES "(rhel|centos)6")
   ALTERNATIVE_NAME("client" "mysql")
@@ -214,36 +219,9 @@ ELSEIF(RPM MATCHES "fedora" OR RPM MATCHES "(rhel|centos)7")
   ALTERNATIVE_NAME("server" "mysql-compat-server")
   ALTERNATIVE_NAME("test"   "mariadb-test")
 ENDIF()
-
-# workaround for lots of perl dependencies added by rpmbuild
-SETA(CPACK_RPM_test_PACKAGE_PROVIDES
-  "perl(lib::mtr_gcov.pl)"
-  "perl(lib::mtr_gprof.pl)"
-  "perl(lib::mtr_io.pl)"
-  "perl(lib::mtr_misc.pl)"
-  "perl(lib::mtr_process.pl)"
-  "perl(lib::v1/mtr_cases.pl)"
-  "perl(lib::v1/mtr_gcov.pl)"
-  "perl(lib::v1/mtr_gprof.pl)"
-  "perl(lib::v1/mtr_im.pl)"
-  "perl(lib::v1/mtr_io.pl)"
-  "perl(lib::v1/mtr_match.pl)"
-  "perl(lib::v1/mtr_misc.pl)"
-  "perl(lib::v1/mtr_process.pl)"
-  "perl(lib::v1/mtr_report.pl)"
-  "perl(lib::v1/mtr_stress.pl)"
-  "perl(lib::v1/mtr_timer.pl)"
-  "perl(lib::v1/mtr_unique.pl)"
-  "perl(mtr_cases)"
-  "perl(mtr_io.pl)"
-  "perl(mtr_match)"
-  "perl(mtr_misc.pl)"
-  "perl(mtr_gcov.pl)"
-  "perl(mtr_gprof.pl)"
-  "perl(mtr_process.pl)"
-  "perl(mtr_report)"
-  "perl(mtr_results)"
-  "perl(mtr_unique)")
+IF(RPM MATCHES "fedora31" OR RPM MATCHES "(rhel|centos)8")
+  SET(PYTHON_SHEBANG "/usr/bin/python3" CACHE STRING "python shebang")
+ENDIF()
 
 # If we want to build build MariaDB-shared-compat,
 # extract compat libraries from MariaDB-shared-5.3 rpm
@@ -275,6 +253,7 @@ IF(compat53 AND compat101)
 
   STRING(REPLACE "\n" " " compat_provides "${compat_provides}")
   STRING(REPLACE "\n" " " compat_obsoletes "${compat_obsoletes}")
+  STRING(REGEX REPLACE "[^ ]+\\([^ ]+ *" "" compat_obsoletes "${compat_obsoletes}")
   SETA(CPACK_RPM_compat_PACKAGE_PROVIDES "${compat_provides}")
   SETA(CPACK_RPM_compat_PACKAGE_OBSOLETES "${compat_obsoletes}")
 
@@ -291,5 +270,23 @@ IF(compat53 AND compat101)
   ENDIF()
 ENDIF()
 
-ENDIF(RPM)
+################
+IF(CMAKE_VERSION VERSION_GREATER "3.9.99")
 
+SET(CPACK_SOURCE_GENERATOR "RPM")
+SETA(CPACK_RPM_SOURCE_PKG_BUILD_PARAMS
+  "-DRPM=${RPM}"
+  )
+
+MACRO(ADDIF var)
+  IF(DEFINED ${var})
+    SETA(CPACK_RPM_SOURCE_PKG_BUILD_PARAMS "-D${var}=${${var}}")
+  ENDIF()
+ENDMACRO()
+
+ADDIF(CMAKE_BUILD_TYPE)
+ADDIF(BUILD_CONFIG)
+ADDIF(WITH_SSL)
+
+ENDIF()
+ENDIF(RPM)

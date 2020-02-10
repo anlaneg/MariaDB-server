@@ -11,7 +11,7 @@
 
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software Foundation,
-   51 Franklin Street, Suite 500, Boston, MA 02110-1335 USA */
+   51 Franklin Street, Fifth Floor, Boston, MA 02110-1335 USA */
 
 
 #include "mariadb.h"
@@ -85,6 +85,7 @@ PSI_stage_info MDL_key::m_namespace_to_wait_state_name[NAMESPACE_END]=
   {0, "Waiting for table metadata lock", 0},
   {0, "Waiting for stored function metadata lock", 0},
   {0, "Waiting for stored procedure metadata lock", 0},
+  {0, "Waiting for stored package body metadata lock", 0},
   {0, "Waiting for trigger metadata lock", 0},
   {0, "Waiting for event metadata lock", 0},
   {0, "Waiting for commit lock", 0},
@@ -3043,6 +3044,7 @@ const char *wsrep_get_mdl_namespace_name(MDL_key::enum_mdl_namespace ns)
   case MDL_key::TABLE     : return "TABLE";
   case MDL_key::FUNCTION  : return "FUNCTION";
   case MDL_key::PROCEDURE : return "PROCEDURE";
+  case MDL_key::PACKAGE_BODY: return "PACKAGE BODY";
   case MDL_key::TRIGGER   : return "TRIGGER";
   case MDL_key::EVENT     : return "EVENT";
   case MDL_key::COMMIT    : return "COMMIT";

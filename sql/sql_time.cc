@@ -12,7 +12,7 @@
 
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
-   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA */
+   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1335  USA */
 
 
 /* Functions to handle date and time */
@@ -37,7 +37,7 @@
   Order of elements in 'interval_type_to_name' should correspond to 
   the order of elements in 'interval_type' enum
   
-  See also interval_type, interval_names
+  See also interval_type, interval_names, append_interval
 */
 
 LEX_CSTRING interval_type_to_name[INTERVAL_LAST] = {
@@ -61,10 +61,84 @@ LEX_CSTRING interval_type_to_name[INTERVAL_LAST] = {
   { STRING_WITH_LEN("HOUR_MICROSECOND")},
   { STRING_WITH_LEN("MINUTE_MICROSECOND")},
   { STRING_WITH_LEN("SECOND_MICROSECOND")}
-}; 
+};
 
-	/* Calc weekday from daynr */
-	/* Returns 0 for monday, 1 for tuesday .... */
+int append_interval(String *str, interval_type int_type, const INTERVAL &interval)
+{
+  char buf[64];
+  size_t len;
+  switch (int_type) {
+  case INTERVAL_YEAR:
+    len= my_snprintf(buf,sizeof(buf),"%u", interval.year);
+    break;
+  case INTERVAL_QUARTER:
+  case INTERVAL_MONTH:
+    len= my_snprintf(buf,sizeof(buf),"%u", interval.month);
+    int_type=INTERVAL_MONTH;
+    break;
+  case INTERVAL_WEEK:
+  case INTERVAL_DAY:
+    len= my_snprintf(buf,sizeof(buf),"%u", interval.day);
+    int_type=INTERVAL_DAY;
+    break;
+  case INTERVAL_HOUR:
+    len= my_snprintf(buf,sizeof(buf),"%u", interval.hour);
+    break;
+  case INTERVAL_MINUTE:
+    len= my_snprintf(buf,sizeof(buf),"%u", interval.minute);
+    break;
+  case INTERVAL_SECOND:
+    len= my_snprintf(buf,sizeof(buf),"%u", interval.second);
+    break;
+  case INTERVAL_MICROSECOND:
+    len= my_snprintf(buf,sizeof(buf),"%u", interval.second_part);
+    break;
+  case INTERVAL_YEAR_MONTH:
+    len= my_snprintf(buf,sizeof(buf),"%u-%02u", interval.day, interval.month);
+    break;
+  case INTERVAL_DAY_HOUR:
+    len= my_snprintf(buf,sizeof(buf),"%u %u", interval.day, interval.hour);
+    break;
+  case INTERVAL_DAY_MINUTE:
+    len= my_snprintf(buf,sizeof(buf),"%u %u:%02u", interval.day, interval.hour, interval.minute);
+    break;
+  case INTERVAL_DAY_SECOND:
+    len= my_snprintf(buf,sizeof(buf),"%u %u:%02u:%02u", interval.day, interval.hour, interval.minute, interval.second);
+    break;
+  case INTERVAL_HOUR_MINUTE:
+    len= my_snprintf(buf,sizeof(buf),"%u:%02u", interval.hour, interval.minute);
+    break;
+  case INTERVAL_HOUR_SECOND:
+    len= my_snprintf(buf,sizeof(buf),"%u:%02u:%02u", interval.hour, interval.minute, interval.second);
+    break;
+  case INTERVAL_MINUTE_SECOND:
+    len= my_snprintf(buf,sizeof(buf),"%u:%02u", interval.minute, interval.second);
+    break;
+  case INTERVAL_DAY_MICROSECOND:
+    len= my_snprintf(buf,sizeof(buf),"%u %u:%02u:%02u.%06u", interval.day, interval.hour, interval.minute, interval.second, interval.second_part);
+    break;
+  case INTERVAL_HOUR_MICROSECOND:
+    len= my_snprintf(buf,sizeof(buf),"%u:%02u:%02u.%06u", interval.hour, interval.minute, interval.second, interval.second_part);
+    break;
+  case INTERVAL_MINUTE_MICROSECOND:
+    len= my_snprintf(buf,sizeof(buf),"%u:%02u.%06u", interval.minute, interval.second, interval.second_part);
+    break;
+  case INTERVAL_SECOND_MICROSECOND:
+    len= my_snprintf(buf,sizeof(buf),"%u.%06u", interval.second, interval.second_part);
+    break;
+  default:
+    DBUG_ASSERT(0);
+    len= 0;
+  }
+  return str->append(buf, len) || str->append(' ') ||
+         str->append(interval_type_to_name + int_type);
+}
+
+
+/*
+  Calc weekday from daynr
+  Returns 0 for monday, 1 for tuesday ...
+*/
 
 int calc_weekday(long daynr,bool sunday_first_day_of_week)
 {
@@ -190,7 +264,7 @@ bool get_date_from_daynr(long daynr,uint *ret_year,uint *ret_month,
 ulong convert_period_to_month(ulong period)
 {
   ulong a,b;
-  if (period == 0)
+  if (period == 0 || period > 999912)
     return 0L;
   if ((a=period/100) < YY_PART_YEAR)
     a+=2000;
@@ -223,7 +297,7 @@ check_date_with_warn(const MYSQL_TIME *ltime, ulonglong fuzzy_date,
   {
     ErrConvTime str(ltime);
     make_truncated_value_warning(current_thd, Sql_condition::WARN_LEVEL_WARN,
-                                 &str, ts_type, 0);
+                                 &str, ts_type, 0, 0);
     return true;
   }
   return false;
@@ -240,7 +314,7 @@ adjust_time_range_with_warn(MYSQL_TIME *ltime, uint dec)
     return true;
   if (warnings)
     make_truncated_value_warning(current_thd, Sql_condition::WARN_LEVEL_WARN,
-                                 &str, MYSQL_TIMESTAMP_TIME, NullS);
+                                 &str, MYSQL_TIMESTAMP_TIME, 0, NullS);
   return false;
 }
 
@@ -256,8 +330,8 @@ adjust_time_range_with_warn(MYSQL_TIME *ltime, uint dec)
 */
 static uint
 to_ascii(CHARSET_INFO *cs,
-         const char *src, uint src_length,
-         char *dst, uint dst_length)
+         const char *src, size_t src_length,
+         char *dst, size_t dst_length)
                      
 {
   int cnvres;
@@ -280,7 +354,7 @@ to_ascii(CHARSET_INFO *cs,
 
 /* Character set-aware version of str_to_time() */
 bool
-str_to_time(CHARSET_INFO *cs, const char *str,uint length,
+str_to_time(CHARSET_INFO *cs, const char *str, size_t length,
             MYSQL_TIME *l_time, ulonglong fuzzydate, MYSQL_TIME_STATUS *status)
 {
   char cnv[32];
@@ -294,7 +368,7 @@ str_to_time(CHARSET_INFO *cs, const char *str,uint length,
 
 
 /* Character set-aware version of str_to_datetime() */
-bool str_to_datetime(CHARSET_INFO *cs, const char *str, uint length,
+bool str_to_datetime(CHARSET_INFO *cs, const char *str, size_t length,
                      MYSQL_TIME *l_time, ulonglong flags,
                      MYSQL_TIME_STATUS *status)
 {
@@ -318,7 +392,7 @@ bool str_to_datetime(CHARSET_INFO *cs, const char *str, uint length,
 
 bool
 str_to_datetime_with_warn(CHARSET_INFO *cs,
-                          const char *str, uint length, MYSQL_TIME *l_time,
+                          const char *str, size_t length, MYSQL_TIME *l_time,
                           ulonglong flags)
 {
   MYSQL_TIME_STATUS status;
@@ -329,7 +403,7 @@ str_to_datetime_with_warn(CHARSET_INFO *cs,
                                  ret_val ? Sql_condition::WARN_LEVEL_WARN :
                                  Sql_condition::time_warn_level(status.warnings),
                                  str, length, flags & TIME_TIME_ONLY ?
-                                 MYSQL_TIMESTAMP_TIME : l_time->time_type, NullS);
+                                 MYSQL_TIMESTAMP_TIME : l_time->time_type, 0, NullS);
   DBUG_EXECUTE_IF("str_to_datetime_warn",
                   push_warning(thd, Sql_condition::WARN_LEVEL_NOTE,
                                ER_YES, str););
@@ -353,23 +427,23 @@ str_to_datetime_with_warn(CHARSET_INFO *cs,
 static bool number_to_time_with_warn(bool neg, ulonglong nr, ulong sec_part,
                                      MYSQL_TIME *ltime, ulonglong fuzzydate,
                                      const ErrConv *str,
-                                     const char *field_name)
+                                     const TABLE_SHARE *s, const char *field_name)
 {
   int was_cut;
   longlong res;
-  enum_field_types f_type;
+  enum_mysql_timestamp_type ts_type;
   bool have_warnings;
 
   if (fuzzydate & TIME_TIME_ONLY)
   {
     fuzzydate= TIME_TIME_ONLY; // clear other flags
-    f_type= MYSQL_TYPE_TIME;
+    ts_type= MYSQL_TIMESTAMP_TIME;
     res= number_to_time(neg, nr, sec_part, ltime, &was_cut);
     have_warnings= MYSQL_TIME_WARN_HAVE_WARNINGS(was_cut);
   }
   else
   {
-    f_type= MYSQL_TYPE_DATETIME;
+    ts_type= MYSQL_TIMESTAMP_DATETIME;
     if (neg)
     {
       res= -1;
@@ -385,16 +459,16 @@ static bool number_to_time_with_warn(bool neg, ulonglong nr, ulong sec_part,
   {
     make_truncated_value_warning(current_thd,
                                  Sql_condition::WARN_LEVEL_WARN, str,
-                                 res < 0 ? MYSQL_TIMESTAMP_ERROR
-                                         : mysql_type_to_time_type(f_type),
-                                 field_name);
+                                 res < 0 ? MYSQL_TIMESTAMP_ERROR : ts_type,
+                                 s, field_name);
   }
   return res < 0;
 }
 
 
 bool double_to_datetime_with_warn(double value, MYSQL_TIME *ltime,
-                                  ulonglong fuzzydate, const char *field_name)
+                                  ulonglong fuzzydate,
+                                  const TABLE_SHARE *s, const char *field_name)
 {
   const ErrConvDouble str(value);
   bool neg= value < 0;
@@ -408,28 +482,30 @@ bool double_to_datetime_with_warn(double value, MYSQL_TIME *ltime,
   longlong nr= static_cast<ulonglong>(floor(value));
   uint sec_part= static_cast<ulong>((value - floor(value))*TIME_SECOND_PART_FACTOR);
   return number_to_time_with_warn(neg, nr, sec_part, ltime, fuzzydate, &str,
-                                  field_name);
+                                  s, field_name);
 }
 
 
 bool decimal_to_datetime_with_warn(const my_decimal *value, MYSQL_TIME *ltime,
-                                   ulonglong fuzzydate, const char *field_name)
+                                   ulonglong fuzzydate,
+                                   const TABLE_SHARE *s, const char *field_name)
 {
   const ErrConvDecimal str(value);
   ulonglong nr;
   ulong sec_part;
   bool neg= my_decimal2seconds(value, &nr, &sec_part);
   return number_to_time_with_warn(neg, nr, sec_part, ltime, fuzzydate, &str,
-                                  field_name);
+                                  s, field_name);
 }
 
 
 bool int_to_datetime_with_warn(bool neg, ulonglong value, MYSQL_TIME *ltime,
-                               ulonglong fuzzydate, const char *field_name)
+                               ulonglong fuzzydate,
+                               const TABLE_SHARE *s, const char *field_name)
 {
   const ErrConvInteger str(neg ? - (longlong) value : (longlong) value, !neg);
   return number_to_time_with_warn(neg, value, 0, ltime,
-                                  fuzzydate, &str, field_name);
+                                  fuzzydate, &str, s, field_name);
 }
 
 
@@ -759,7 +835,7 @@ DATE_TIME_FORMAT
       !parse_date_time_format(format_type, format_str,
 			      format_length, &tmp))
   {
-    tmp.format.str=    (char*) format_str;
+    tmp.format.str=    format_str;
     tmp.format.length= format_length;
     return date_time_format_copy((THD *)0, &tmp);
   }
@@ -786,7 +862,8 @@ DATE_TIME_FORMAT
 DATE_TIME_FORMAT *date_time_format_copy(THD *thd, DATE_TIME_FORMAT *format)
 {
   DATE_TIME_FORMAT *new_format;
-  ulong length= sizeof(*format) + format->format.length + 1;
+  size_t length= sizeof(*format) + format->format.length + 1;
+  char *format_pos;
 
   if (thd)
     new_format= (DATE_TIME_FORMAT *) thd->alloc(length);
@@ -795,14 +872,13 @@ DATE_TIME_FORMAT *date_time_format_copy(THD *thd, DATE_TIME_FORMAT *format)
   if (new_format)
   {
     /* Put format string after current pos */
-    new_format->format.str= (char*) (new_format+1);
+    new_format->format.str= format_pos= (char*) (new_format+1);
     memcpy((char*) new_format->positions, (char*) format->positions,
 	   sizeof(format->positions));
     new_format->time_separator= format->time_separator;
     /* We make the string null terminated for easy printf in SHOW VARIABLES */
-    memcpy((char*) new_format->format.str, format->format.str,
-	   format->format.length);
-    new_format->format.str[format->format.length]= 0;
+    memcpy(format_pos, format->format.str, format->format.length);
+    format_pos[format->format.length]= 0;
     new_format->format.length= format->format.length;
   }
   return new_format;
@@ -857,7 +933,7 @@ void make_truncated_value_warning(THD *thd,
                                   Sql_condition::enum_warning_level level,
                                   const ErrConv *sval,
 				  timestamp_type time_type,
-                                  const char *field_name)
+                                  const TABLE_SHARE *s, const char *field_name)
 {
   char warn_buff[MYSQL_ERRMSG_SIZE];
   const char *type_str;
@@ -876,10 +952,21 @@ void make_truncated_value_warning(THD *thd,
       break;
   }
   if (field_name)
+  {
+    const char *db_name= s->db.str;
+    const char *table_name= s->table_name.str;
+
+    if (!db_name)
+      db_name= "";
+    if (!table_name)
+      table_name= "";
+
     cs->cset->snprintf(cs, warn_buff, sizeof(warn_buff),
                        ER_THD(thd, ER_TRUNCATED_WRONG_VALUE_FOR_FIELD),
-                       type_str, sval->ptr(), field_name,
+                       type_str, sval->ptr(),
+                       db_name, table_name, field_name,
                        (ulong) thd->get_stmt_da()->current_row_for_warning());
+  }
   else
   {
     if (time_type > MYSQL_TIMESTAMP_ERROR)
@@ -903,11 +990,11 @@ void make_truncated_value_warning(THD *thd,
 #define GET_PART(X, N) X % N ## LL; X/= N ## LL
 
 bool date_add_interval(MYSQL_TIME *ltime, interval_type int_type,
-                       INTERVAL interval)
+                       const INTERVAL &interval)
 {
   long period, sign;
 
-  sign= (interval.neg == ltime->neg ? 1 : -1);
+  sign= (interval.neg == (bool)ltime->neg ? 1 : -1);
 
   switch (int_type) {
   case INTERVAL_SECOND:
@@ -960,6 +1047,8 @@ bool date_add_interval(MYSQL_TIME *ltime, interval_type int_type,
       ltime->day= 0;
       return 0;
     }
+    else if (ltime->neg)
+      goto invalid_date;
 
     if (int_type != INTERVAL_DAY)
       ltime->time_type= MYSQL_TIMESTAMP_DATETIME; // Return full date
@@ -1204,7 +1293,7 @@ make_date_with_warn(MYSQL_TIME *ltime, ulonglong fuzzy_date,
     /* e.g. negative time */
     ErrConvTime str(ltime);
     make_truncated_value_warning(current_thd, Sql_condition::WARN_LEVEL_WARN,
-                                 &str, ts_type, 0);
+                                 &str, ts_type, 0, 0);
     return true;
   }
   if ((ltime->time_type= ts_type) == MYSQL_TIMESTAMP_DATE)
@@ -1368,7 +1457,7 @@ time_to_datetime_with_warn(THD *thd,
   {
     ErrConvTime str(from);
     make_truncated_value_warning(thd, Sql_condition::WARN_LEVEL_WARN,
-                                 &str, MYSQL_TIMESTAMP_DATETIME, 0); 
+                                 &str, MYSQL_TIMESTAMP_DATETIME, 0, 0); 
     return true;
   }
   return false;
@@ -1392,4 +1481,47 @@ bool datetime_to_time_with_warn(THD *thd, const MYSQL_TIME *dt,
   }
   int warnings= 0;
   return check_time_range(tm, dec, &warnings);
+}
+
+
+longlong pack_time(const MYSQL_TIME *my_time)
+{
+  return  ((((((my_time->year     * 13ULL +
+               my_time->month)    * 32ULL +
+               my_time->day)      * 24ULL +
+               my_time->hour)     * 60ULL +
+               my_time->minute)   * 60ULL +
+               my_time->second)   * 1000000ULL +
+               my_time->second_part) * (my_time->neg ? -1 : 1);
+}
+
+#define get_one(WHERE, FACTOR) WHERE= (ulong)(packed % FACTOR); packed/= FACTOR
+
+void unpack_time(longlong packed, MYSQL_TIME *my_time,
+                     enum_mysql_timestamp_type ts_type)
+{
+  if ((my_time->neg= packed < 0))
+    packed= -packed;
+  get_one(my_time->second_part, 1000000ULL);
+  get_one(my_time->second,           60U);
+  get_one(my_time->minute,           60U);
+  get_one(my_time->hour,             24U);
+  get_one(my_time->day,              32U);
+  get_one(my_time->month,            13U);
+  my_time->year= (uint)packed;
+  my_time->time_type= ts_type;
+  switch (ts_type) {
+  case MYSQL_TIMESTAMP_TIME:
+    my_time->hour+= (my_time->month * 32 + my_time->day) * 24;
+    my_time->month= my_time->day= 0;
+    break;
+  case MYSQL_TIMESTAMP_DATE:
+    my_time->hour= my_time->minute= my_time->second= my_time->second_part= 0;
+    break;
+  case MYSQL_TIMESTAMP_NONE:
+  case MYSQL_TIMESTAMP_ERROR:
+    DBUG_ASSERT(0);
+  case MYSQL_TIMESTAMP_DATETIME:
+    break;
+  }
 }

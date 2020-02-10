@@ -12,7 +12,7 @@ GNU General Public License for more details.
 
 You should have received a copy of the GNU General Public License
 along with this program; if not, write to the Free Software
-Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA */
+Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1335  USA */
 
 /*
   Convert Windows API error (GetLastError() to Posix equivalent (errno)
@@ -96,7 +96,7 @@ access violations */
 
 static int get_errno_from_oserr(unsigned long oserrno)
 {
-  int i;
+  size_t i;
 
   /* check the table for the OS error code */
   for (i= 0; i < ERRTABLESIZE; ++i) 

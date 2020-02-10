@@ -1,5 +1,5 @@
 /* Copyright (c) 2000, 2016, Oracle and/or its affiliates.
-   Copyright (c) 2009, 2016, MariaDB
+   Copyright (c) 2009, 2019, MariaDB Corporation.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -11,8 +11,8 @@
    GNU General Public License for more details.
 
    You should have received a copy of the GNU General Public License
-   along with this program; if not, write to the Free Software
-   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA */
+   along with this program; if not, write to the Free Software Foundation,
+   Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1335 USA */
 
 /** @file handler.cc
 
@@ -21,6 +21,7 @@
 */
 
 #include "mariadb.h"
+#include <inttypes.h>
 #include "sql_priv.h"
 #include "unireg.h"
 #include "rpl_rli.h"
@@ -68,13 +69,13 @@ static handlerton *installed_htons[128];
 #define BITMAP_STACKBUF_SIZE (128/8)
 
 KEY_CREATE_INFO default_key_create_info=
-{ HA_KEY_ALG_UNDEF, 0, {NullS, 0}, {NullS, 0}, true };
+{ HA_KEY_ALG_UNDEF, 0, 0, {NullS, 0}, {NullS, 0}, true };
 
 /* number of entries in handlertons[] */
 ulong total_ha= 0;
 /* number of storage engines (from handlertons[]) that support 2pc */
 ulong total_ha_2pc= 0;
-#ifndef DBUG_OFF
+#ifdef DBUG_ASSERT_EXISTS
 /*
   Number of non-mandatory 2pc handlertons whose initialization failed
   to estimate total_ha_2pc value under supposition of the failures
@@ -209,6 +210,32 @@ redo:
   }
 
   return NULL;
+}
+
+
+bool
+Storage_engine_name::resolve_storage_engine_with_error(THD *thd,
+                                                       handlerton **ha,
+                                                       bool tmp_table)
+{
+  if (plugin_ref plugin= ha_resolve_by_name(thd, &m_storage_engine_name,
+                                            tmp_table))
+  {
+    *ha= plugin_hton(plugin);
+    return false;
+  }
+
+  *ha= NULL;
+  if (thd->variables.sql_mode & MODE_NO_ENGINE_SUBSTITUTION)
+  {
+    my_error(ER_UNKNOWN_STORAGE_ENGINE, MYF(0), m_storage_engine_name.str);
+    return true;
+  }
+  push_warning_printf(thd, Sql_condition::WARN_LEVEL_WARN,
+                      ER_UNKNOWN_STORAGE_ENGINE,
+                      ER_THD(thd, ER_UNKNOWN_STORAGE_ENGINE),
+                      m_storage_engine_name.str);
+  return false;
 }
 
 
@@ -661,7 +688,7 @@ err_deinit:
     (void) plugin->plugin->deinit(NULL);
           
 err:
-#ifndef DBUG_OFF
+#ifdef DBUG_ASSERT_EXISTS
   if (hton->prepare && hton->state == SHOW_OPTION_YES)
     failed_ha_2pc++;
 #endif
@@ -698,7 +725,7 @@ int ha_end()
     So if flag is equal to HA_PANIC_CLOSE, the deallocate
     the errors.
   */
-  if (ha_finish_errors())
+  if (unlikely(ha_finish_errors()))
     error= 1;
 
   DBUG_RETURN(error);
@@ -798,7 +825,9 @@ static my_bool closecon_handlerton(THD *thd, plugin_ref plugin,
 */
 void ha_close_connection(THD* thd)
 {
-  plugin_foreach(thd, closecon_handlerton, MYSQL_STORAGE_ENGINE_PLUGIN, 0);
+  plugin_foreach_with_mask(thd, closecon_handlerton,
+                           MYSQL_STORAGE_ENGINE_PLUGIN,
+                           PLUGIN_IS_DELETED|PLUGIN_IS_READY, 0);
 }
 
 static my_bool kill_handlerton(THD *thd, plugin_ref plugin,
@@ -1195,7 +1224,7 @@ int ha_prepare(THD *thd)
       handlerton *ht= ha_info->ht();
       if (ht->prepare)
       {
-        if (prepare_or_error(ht, thd, all))
+        if (unlikely(prepare_or_error(ht, thd, all)))
         {
           ha_rollback_trans(thd, all);
           error=1;
@@ -1417,7 +1446,8 @@ int ha_commit_trans(THD *thd, bool all)
 
 #if 1 // FIXME: This should be done in ha_prepare().
   if (rw_trans || (thd->lex->sql_command == SQLCOM_ALTER_TABLE &&
-                   thd->lex->alter_info.flags & Alter_info::ALTER_ADD_SYSTEM_VERSIONING))
+                   thd->lex->alter_info.flags & ALTER_ADD_SYSTEM_VERSIONING &&
+                   is_real_trans))
   {
     ulonglong trx_start_id= 0, trx_end_id= 0;
     for (Ha_trx_info *ha_info= trans->ha_list; ha_info; ha_info= ha_info->next())
@@ -1473,7 +1503,7 @@ int ha_commit_trans(THD *thd, bool all)
       Sic: we know that prepare() is not NULL since otherwise
       trans->no_2pc would have been set.
     */
-    if (prepare_or_error(ht, thd, all))
+    if (unlikely(prepare_or_error(ht, thd, all)))
       goto err;
 
     need_prepare_ordered|= (ht->prepare_ordered != NULL);
@@ -1482,11 +1512,13 @@ int ha_commit_trans(THD *thd, bool all)
   DEBUG_SYNC(thd, "ha_commit_trans_after_prepare");
   DBUG_EXECUTE_IF("crash_commit_after_prepare", DBUG_SUICIDE(););
 
+#ifdef WITH_WSREP
   if (!error && WSREP_ON && wsrep_is_wsrep_xid(&thd->transaction.xid_state.xid))
   {
     // xid was rewritten by wsrep
     xid= wsrep_xid_seqno(thd->transaction.xid_state.xid);
   }
+#endif /* WITH_WSREP */
 
   if (!is_real_trans)
   {
@@ -1873,6 +1905,35 @@ static char* xid_to_str(char *buf, XID *xid)
 }
 #endif
 
+#ifdef WITH_WSREP
+static my_xid wsrep_order_and_check_continuity(XID *list, int len)
+{
+  wsrep_sort_xid_array(list, len);
+  wsrep_uuid_t uuid;
+  wsrep_seqno_t seqno;
+  if (wsrep_get_SE_checkpoint(uuid, seqno))
+  {
+    WSREP_ERROR("Could not read wsrep SE checkpoint for recovery");
+    return 0;
+  }
+  long long cur_seqno= seqno;
+  for (int i= 0; i < len; ++i)
+  {
+    if (!wsrep_is_wsrep_xid(list + i) ||
+        wsrep_xid_seqno(*(list + i)) != cur_seqno + 1)
+    {
+      WSREP_WARN("Discovered discontinuity in recovered wsrep "
+                 "transaction XIDs. Truncating the recovery list to "
+                 "%d entries", i);
+      break;
+    }
+    ++cur_seqno;
+  }
+  WSREP_INFO("Last wsrep seqno to be recovered %lld", cur_seqno);
+  return (cur_seqno < 0 ? 0 : cur_seqno);
+}
+#endif /* WITH_WSREP */
+
 /**
   recover() step of xa.
 
@@ -1910,11 +1971,25 @@ static my_bool xarecover_handlerton(THD *unused, plugin_ref plugin,
     {
       sql_print_information("Found %d prepared transaction(s) in %s",
                             got, hton_name(hton)->str);
+#ifdef WITH_WSREP
+      /* If wsrep_on=ON, XIDs are first ordered and then the range of
+         recovered XIDs is checked for continuity. All the XIDs which
+         are in continuous range can be safely committed if binlog
+         is off since they have already ordered and certified in the
+         cluster. */
+      my_xid wsrep_limit= 0;
+      if (WSREP_ON)
+      {
+        wsrep_limit= wsrep_order_and_check_continuity(info->list, got);
+      }
+#endif /* WITH_WSREP */
+
       for (int i=0; i < got; i ++)
       {
-        my_xid x= WSREP_ON && wsrep_is_wsrep_xid(&info->list[i]) ?
-                  wsrep_xid_seqno(info->list[i]) :
-                  info->list[i].get_my_xid();
+        my_xid x= IF_WSREP(WSREP_ON && wsrep_is_wsrep_xid(&info->list[i]) ?
+                           wsrep_xid_seqno(info->list[i]) :
+                           info->list[i].get_my_xid(),
+                           info->list[i].get_my_xid());
         if (!x) // not "mine" - that is generated by external TM
         {
 #ifndef DBUG_OFF
@@ -1925,15 +2000,21 @@ static my_bool xarecover_handlerton(THD *unused, plugin_ref plugin,
           info->found_foreign_xids++;
           continue;
         }
-        if (info->dry_run)
+        if (IF_WSREP(!(wsrep_emulate_bin_log &&
+                       wsrep_is_wsrep_xid(info->list + i) &&
+                       x <= wsrep_limit) && info->dry_run,
+                     info->dry_run))
         {
           info->found_my_xids++;
           continue;
         }
         // recovery mode
-        if (info->commit_list ?
-            my_hash_search(info->commit_list, (uchar *)&x, sizeof(x)) != 0 :
-            tc_heuristic_recover == TC_HEURISTIC_RECOVER_COMMIT)
+        if (IF_WSREP((wsrep_emulate_bin_log &&
+                      wsrep_is_wsrep_xid(info->list + i) &&
+                      x <= wsrep_limit), false) ||
+            (info->commit_list ?
+             my_hash_search(info->commit_list, (uchar *)&x, sizeof(x)) != 0 :
+             tc_heuristic_recover == TC_HEURISTIC_RECOVER_COMMIT))
         {
 #ifndef DBUG_OFF
           int rc=
@@ -1994,6 +2075,7 @@ int ha_recover(HASH *commit_list)
   for (info.len= MAX_XID_LIST_SIZE ; 
        info.list==0 && info.len > MIN_XID_LIST_SIZE; info.len/=2)
   {
+    DBUG_EXECUTE_IF("min_xa_len", info.len = 16;);
     info.list=(XID *)my_malloc(info.len*sizeof(XID), MYF(0));
   }
   if (!info.list)
@@ -2501,7 +2583,7 @@ const char *get_canonical_filename(handler *file, const char *path,
   The .frm file will be deleted only if we return 0.
 */
 int ha_delete_table(THD *thd, handlerton *table_type, const char *path,
-                    const char *db, const char *alias, bool generate_warning)
+                    const LEX_CSTRING *db, const LEX_CSTRING *alias, bool generate_warning)
 {
   handler *file;
   char tmp_path[FN_REFLEN];
@@ -2520,7 +2602,7 @@ int ha_delete_table(THD *thd, handlerton *table_type, const char *path,
   dummy_table.s= &dummy_share;
 
   path= get_canonical_filename(file, path, tmp_path);
-  if ((error= file->ha_delete_table(path)))
+  if (unlikely((error= file->ha_delete_table(path))))
   {
     /*
       it's not an error if the table doesn't exist in the engine.
@@ -2534,12 +2616,9 @@ int ha_delete_table(THD *thd, handlerton *table_type, const char *path,
       dummy_share.path.str= (char*) path;
       dummy_share.path.length= strlen(path);
       dummy_share.normalized_path= dummy_share.path;
-      dummy_share.db.str= (char*) db;
-      dummy_share.db.length= strlen(db);
-      dummy_share.table_name.str= (char*) alias;
-      dummy_share.table_name.length= strlen(alias);
-      dummy_table.alias.set(alias, dummy_share.table_name.length,
-                            table_alias_charset);
+      dummy_share.db= *db;
+      dummy_share.table_name= *alias;
+      dummy_table.alias.set(alias->str, alias->length, table_alias_charset);
       file->change_table_ptr(&dummy_table, &dummy_share);
       file->print_error(error, MYF(intercept ? ME_JUST_WARNING : 0));
     }
@@ -2610,7 +2689,7 @@ double handler::keyread_time(uint index, uint ranges, ha_rows rows)
     engines that support that (e.g. InnoDB) may want to overwrite this method.
     The model counts in the time to read index entries from cache.
   */
-  ulong len= table->key_info[index].key_length + ref_length;
+  size_t len= table->key_info[index].key_length + ref_length;
   if (index == table->s->primary_key && table->file->primary_key_is_clustered())
     len= table->s->stored_rec_length;
   double keys_per_block= (stats.block_size/2.0/len+1);
@@ -2661,7 +2740,8 @@ PSI_table_share *handler::ha_table_share_psi() const
     Don't wait for locks if not HA_OPEN_WAIT_IF_LOCKED is set
 */
 int handler::ha_open(TABLE *table_arg, const char *name, int mode,
-                     uint test_if_locked, MEM_ROOT *mem_root)
+                     uint test_if_locked, MEM_ROOT *mem_root,
+                     List<String> *partitions_to_open)
 {
   int error;
   DBUG_ENTER("handler::ha_open");
@@ -2676,7 +2756,9 @@ int handler::ha_open(TABLE *table_arg, const char *name, int mode,
   DBUG_PRINT("info", ("old m_lock_type: %d F_UNLCK %d", m_lock_type, F_UNLCK));
   DBUG_ASSERT(alloc_root_inited(&table->mem_root));
 
-  if ((error=open(name,mode,test_if_locked)))
+  set_partitions_to_open(partitions_to_open);
+
+  if (unlikely((error=open(name,mode,test_if_locked))))
   {
     if ((error == EACCES || error == EROFS) && mode == O_RDWR &&
 	(table->db_stat & HA_TRY_READ_ONLY))
@@ -2685,7 +2767,7 @@ int handler::ha_open(TABLE *table_arg, const char *name, int mode,
       error=open(name,O_RDONLY,test_if_locked);
     }
   }
-  if (error)
+  if (unlikely(error))
   {
     my_errno= error;                            /* Safeguard */
     DBUG_PRINT("error",("error: %d  errno: %d",error,errno));
@@ -2754,19 +2836,27 @@ int handler::ha_rnd_next(uchar *buf)
               m_lock_type != F_UNLCK);
   DBUG_ASSERT(inited == RND);
 
-  TABLE_IO_WAIT(tracker, m_psi, PSI_TABLE_FETCH_ROW, MAX_KEY, 0,
-    { result= rnd_next(buf); })
-  if (!result)
+  do
   {
-    update_rows_read();
-    if (table->vfield && buf == table->record[0])
-      table->update_virtual_fields(this, VCOL_UPDATE_FOR_READ);
+    TABLE_IO_WAIT(tracker, m_psi, PSI_TABLE_FETCH_ROW, MAX_KEY, 0,
+      { result= rnd_next(buf); })
+    if (result != HA_ERR_RECORD_DELETED)
+      break;
+    status_var_increment(table->in_use->status_var.ha_read_rnd_deleted_count);
+  } while (!table->in_use->check_killed(1));
+
+  if (result == HA_ERR_RECORD_DELETED)
+    result= HA_ERR_ABORTED_BY_USER;
+  else
+  {
+    if (!result)
+    {
+      update_rows_read();
+      if (table->vfield && buf == table->record[0])
+        table->update_virtual_fields(this, VCOL_UPDATE_FOR_READ);
+    }
     increment_statistics(&SSV::ha_read_rnd_next_count);
   }
-  else if (result == HA_ERR_RECORD_DELETED)
-    increment_statistics(&SSV::ha_read_rnd_deleted_count);
-  else
-    increment_statistics(&SSV::ha_read_rnd_next_count);
 
   table->status=result ? STATUS_NOT_FOUND: 0;
   DBUG_RETURN(result);
@@ -2778,13 +2868,14 @@ int handler::ha_rnd_pos(uchar *buf, uchar *pos)
   DBUG_ENTER("handler::ha_rnd_pos");
   DBUG_ASSERT(table_share->tmp_table != NO_TMP_TABLE ||
               m_lock_type != F_UNLCK);
-  /* TODO: Find out how to solve ha_rnd_pos when finding duplicate update. */
-  /* DBUG_ASSERT(inited == RND); */
+  DBUG_ASSERT(inited == RND);
 
   TABLE_IO_WAIT(tracker, m_psi, PSI_TABLE_FETCH_ROW, MAX_KEY, 0,
     { result= rnd_pos(buf, pos); })
   increment_statistics(&SSV::ha_read_rnd_count);
-  if (!result)
+  if (result == HA_ERR_RECORD_DELETED)
+    result= HA_ERR_KEY_NOT_FOUND;
+  else if (!result)
   {
     update_rows_read();
     if (table->vfield && buf == table->record[0])
@@ -2962,7 +3053,7 @@ bool handler::ha_was_semi_consistent_read()
 int handler::ha_rnd_init_with_error(bool scan)
 {
   int error;
-  if (!(error= ha_rnd_init(scan)))
+  if (likely(!(error= ha_rnd_init(scan))))
     return 0;
   table->file->print_error(error, MYF(0));
   return error;
@@ -2978,7 +3069,7 @@ int handler::ha_rnd_init_with_error(bool scan)
 */
 int handler::read_first_row(uchar * buf, uint primary_key)
 {
-  register int error;
+  int error;
   DBUG_ENTER("handler::read_first_row");
 
   /*
@@ -2989,23 +3080,22 @@ int handler::read_first_row(uchar * buf, uint primary_key)
   if (stats.deleted < 10 || primary_key >= MAX_KEY ||
       !(index_flags(primary_key, 0, 0) & HA_READ_ORDER))
   {
-    if (!(error= ha_rnd_init(1)))
+    if (likely(!(error= ha_rnd_init(1))))
     {
-      while ((error= ha_rnd_next(buf)) == HA_ERR_RECORD_DELETED)
-        /* skip deleted row */;
+      error= ha_rnd_next(buf);
       const int end_error= ha_rnd_end();
-      if (!error)
+      if (likely(!error))
         error= end_error;
     }
   }
   else
   {
     /* Find the first row through the primary key */
-    if (!(error= ha_index_init(primary_key, 0)))
+    if (likely(!(error= ha_index_init(primary_key, 0))))
     {
       error= ha_index_first(buf);
       const int end_error= ha_index_end();
-      if (!error)
+      if (likely(!error))
         error= end_error;
     }
   }
@@ -3033,11 +3123,17 @@ compute_next_insert_id(ulonglong nr,struct system_variables *variables)
     nr= nr + 1; // optimization of the formula below
   else
   {
-    nr= (((nr+ variables->auto_increment_increment -
-           variables->auto_increment_offset)) /
-         (ulonglong) variables->auto_increment_increment);
-    nr= (nr* (ulonglong) variables->auto_increment_increment +
-         variables->auto_increment_offset);
+    /*
+       Calculating the number of complete auto_increment_increment extents:
+    */
+    nr= (nr + variables->auto_increment_increment -
+         variables->auto_increment_offset) /
+        (ulonglong) variables->auto_increment_increment;
+    /*
+       Adding an offset to the auto_increment_increment extent boundary:
+    */
+    nr= nr * (ulonglong) variables->auto_increment_increment +
+        variables->auto_increment_offset;
   }
 
   if (unlikely(nr <= save_nr))
@@ -3056,6 +3152,51 @@ void handler::adjust_next_insert_id_after_explicit_value(ulonglong nr)
   */
   if ((next_insert_id > 0) && (nr >= next_insert_id))
     set_next_insert_id(compute_next_insert_id(nr, &table->in_use->variables));
+}
+
+
+/** @brief
+  Computes the largest number X:
+  - smaller than or equal to "nr"
+  - of the form: auto_increment_offset + N * auto_increment_increment
+  where N>=0.
+
+  SYNOPSIS
+    prev_insert_id
+      nr            Number to "round down"
+      variables     variables struct containing auto_increment_increment and
+                    auto_increment_offset
+
+  RETURN
+    The number X if it exists, "nr" otherwise.
+*/
+inline ulonglong
+prev_insert_id(ulonglong nr, struct system_variables *variables)
+{
+  if (unlikely(nr < variables->auto_increment_offset))
+  {
+    /*
+      There's nothing good we can do here. That is a pathological case, where
+      the offset is larger than the column's max possible value, i.e. not even
+      the first sequence value may be inserted. User will receive warning.
+    */
+    DBUG_PRINT("info",("auto_increment: nr: %lu cannot honour "
+                       "auto_increment_offset: %lu",
+                       (ulong) nr, variables->auto_increment_offset));
+    return nr;
+  }
+  if (variables->auto_increment_increment == 1)
+    return nr; // optimization of the formula below
+  /*
+     Calculating the number of complete auto_increment_increment extents:
+  */
+  nr= (nr - variables->auto_increment_offset) /
+      (ulonglong) variables->auto_increment_increment;
+  /*
+     Adding an offset to the auto_increment_increment extent boundary:
+  */
+  return (nr * (ulonglong) variables->auto_increment_increment +
+          variables->auto_increment_offset);
 }
 
 
@@ -3295,10 +3436,32 @@ int handler::update_auto_increment()
   if (unlikely(tmp))                            // Out of range value in store
   {
     /*
-      It's better to return an error here than getting a confusing
-      'duplicate key error' later.
+      First, test if the query was aborted due to strict mode constraints
+      or new field value greater than maximum integer value:
     */
-    result= HA_ERR_AUTOINC_ERANGE;
+    if (thd->killed == KILL_BAD_DATA ||
+        nr > table->next_number_field->get_max_int_value())
+    {
+      /*
+        It's better to return an error here than getting a confusing
+        'duplicate key error' later.
+      */
+      result= HA_ERR_AUTOINC_ERANGE;
+    }
+    else
+    {
+      /*
+        Field refused this value (overflow) and truncated it, use the result
+        of the truncation (which is going to be inserted); however we try to
+        decrease it to honour auto_increment_* variables.
+        That will shift the left bound of the reserved interval, we don't
+        bother shifting the right bound (anyway any other value from this
+        interval will cause a duplicate key).
+      */
+      nr= prev_insert_id(table->next_number_field->val_int(), variables);
+      if (unlikely(table->next_number_field->store((longlong)nr, TRUE)))
+        nr= table->next_number_field->val_int();
+    }
   }
   if (append)
   {
@@ -3384,6 +3547,10 @@ void handler::get_auto_increment(ulonglong offset, ulonglong increment,
   ulonglong nr;
   int error;
   MY_BITMAP *old_read_set;
+  bool rnd_inited= (inited ==  RND);
+
+  if (rnd_inited && ha_rnd_end())
+    return;
 
   old_read_set= table->prepare_for_keyread(table->s->next_number_index);
 
@@ -3393,6 +3560,10 @@ void handler::get_auto_increment(ulonglong offset, ulonglong increment,
     DBUG_ASSERT(0);
     (void) extra(HA_EXTRA_NO_KEYREAD);
     *first_value= ULONGLONG_MAX;
+    if (rnd_inited && ha_rnd_init_with_error(0))
+    {
+      //TODO: it would be nice to return here an error
+    }
     return;
   }
 
@@ -3425,7 +3596,7 @@ void handler::get_auto_increment(ulonglong offset, ulonglong increment,
     *nb_reserved_values= 1;
   }
 
-  if (error)
+  if (unlikely(error))
   {
     if (error == HA_ERR_END_OF_FILE || error == HA_ERR_KEY_NOT_FOUND)
       /* No entry found, that's fine */;
@@ -3439,6 +3610,10 @@ void handler::get_auto_increment(ulonglong offset, ulonglong increment,
   ha_index_end();
   table->restore_column_maps_after_keyread(old_read_set);
   *first_value= nr;
+  if (rnd_inited && ha_rnd_init_with_error(0))
+  {
+    //TODO: it would be nice to return here an error
+  }
   return;
 }
 
@@ -3490,9 +3665,11 @@ void print_keydup_error(TABLE *table, KEY *key, const char *msg, myf errflag)
 
   if (key == NULL)
   {
-    /* Key is unknown */
-    str.copy("", 0, system_charset_info);
-    my_printf_error(ER_DUP_ENTRY, msg, errflag, str.c_ptr(), "*UNKNOWN*");
+    /*
+      Key is unknown. Should only happen if storage engine reports wrong
+      duplicate key number.
+    */
+    my_printf_error(ER_DUP_ENTRY, msg, errflag, "", "*UNKNOWN*");
   }
   else
   {
@@ -3581,8 +3758,8 @@ void handler::print_error(int error, myf errflag)
     break;
   case HA_ERR_ABORTED_BY_USER:
   {
-    DBUG_ASSERT(table->in_use->killed);
-    table->in_use->send_kill_message();
+    DBUG_ASSERT(ha_thd()->killed);
+    ha_thd()->send_kill_message();
     DBUG_VOID_RETURN;
   }
   case HA_ERR_WRONG_MRG_TABLE_DEF:
@@ -3593,11 +3770,9 @@ void handler::print_error(int error, myf errflag)
     if (table)
     {
       uint key_nr=get_dup_key(error);
-      if ((int) key_nr >= 0)
+      if ((int) key_nr >= 0 && key_nr < table->s->keys)
       {
-        print_keydup_error(table,
-                           key_nr == MAX_KEY ? NULL : &table->key_info[key_nr],
-                           errflag);
+        print_keydup_error(table, &table->key_info[key_nr], errflag);
         DBUG_VOID_RETURN;
       }
     }
@@ -3679,9 +3854,15 @@ void handler::print_error(int error, myf errflag)
     textno=ER_UNSUPPORTED_EXTENSION;
     break;
   case HA_ERR_RECORD_FILE_FULL:
-  case HA_ERR_INDEX_FILE_FULL:
   {
     textno=ER_RECORD_FILE_FULL;
+    /* Write the error message to error log */
+    errflag|= ME_NOREFRESH;
+    break;
+  }
+  case HA_ERR_INDEX_FILE_FULL:
+  {
+    textno=ER_INDEX_FILE_FULL;
     /* Write the error message to error log */
     errflag|= ME_NOREFRESH;
     break;
@@ -3807,7 +3988,7 @@ void handler::print_error(int error, myf errflag)
     }
   }
   DBUG_ASSERT(textno > 0);
-  if (fatal_error)
+  if (unlikely(fatal_error))
   {
     /* Ensure this becomes a true error */
     errflag&= ~(ME_JUST_WARNING | ME_JUST_INFO);
@@ -3819,7 +4000,7 @@ void handler::print_error(int error, myf errflag)
       */
       errflag|= ME_NOREFRESH;
     }
-  }    
+  }
 
   /* if we got an OS error from a file-based engine, specify a path of error */
   if (error < HA_ERR_FIRST && bas_ext()[0])
@@ -3934,7 +4115,7 @@ int handler::ha_check_for_upgrade(HA_CHECK_OPT *check_opt)
   if (table->s->frm_version < FRM_VER_TRUE_VARCHAR)
     return HA_ADMIN_NEEDS_ALTER;
 
-  if ((error= check_collation_compatibility()))
+  if (unlikely((error= check_collation_compatibility())))
     return error;
     
   return check_for_upgrade(check_opt);
@@ -3989,7 +4170,7 @@ static bool update_frm_version(TABLE *table)
 
     int4store(version, MYSQL_VERSION_ID);
 
-    if ((result= mysql_file_pwrite(file, (uchar*) version, 4, 51L, MYF_RW)))
+    if ((result= (int)mysql_file_pwrite(file, (uchar*) version, 4, 51L, MYF_RW)))
       goto err;
 
     table->s->mysql_version= MYSQL_VERSION_ID;
@@ -4012,7 +4193,8 @@ uint handler::get_dup_key(int error)
               m_lock_type != F_UNLCK);
   DBUG_ENTER("handler::get_dup_key");
   table->file->errkey  = (uint) -1;
-  if (error == HA_ERR_FOUND_DUPP_KEY || error == HA_ERR_FOREIGN_DUPLICATE_KEY ||
+  if (error == HA_ERR_FOUND_DUPP_KEY ||
+      error == HA_ERR_FOREIGN_DUPLICATE_KEY ||
       error == HA_ERR_FOUND_DUPP_UNIQUE || error == HA_ERR_NULL_IN_SPATIAL ||
       error == HA_ERR_DROP_INDEX_FK)
     table->file->info(HA_STATUS_ERRKEY | HA_STATUS_NO_LOCK);
@@ -4076,14 +4258,14 @@ int handler::rename_table(const char * from, const char * to)
   start_ext= bas_ext();
   for (ext= start_ext; *ext ; ext++)
   {
-    if (rename_file_ext(from, to, *ext))
+    if (unlikely(rename_file_ext(from, to, *ext)))
     {
       if ((error=my_errno) != ENOENT)
 	break;
       error= 0;
     }
   }
-  if (error)
+  if (unlikely(error))
   {
     /* Try to revert the rename. Ignore errors. */
     for (; ext >= start_ext; ext--)
@@ -4127,15 +4309,15 @@ int handler::ha_check(THD *thd, HA_CHECK_OPT *check_opt)
 
   if (table->s->mysql_version < MYSQL_VERSION_ID)
   {
-    if ((error= check_old_types()))
+    if (unlikely((error= check_old_types())))
       return error;
     error= ha_check_for_upgrade(check_opt);
-    if (error && (error != HA_ADMIN_NEEDS_CHECK))
+    if (unlikely(error && (error != HA_ADMIN_NEEDS_CHECK)))
       return error;
-    if (!error && (check_opt->sql_flags & TT_FOR_UPGRADE))
+    if (unlikely(!error && (check_opt->sql_flags & TT_FOR_UPGRADE)))
       return 0;
   }
-  if ((error= check(thd, check_opt)))
+  if (unlikely((error= check(thd, check_opt))))
     return error;
   /* Skip updating frm version if not main handler. */
   if (table->file != this)
@@ -4412,21 +4594,26 @@ handler::check_if_supported_inplace_alter(TABLE *altered_table,
   if (altered_table->versioned(VERS_TIMESTAMP))
     DBUG_RETURN(HA_ALTER_INPLACE_NOT_SUPPORTED);
 
-  Alter_inplace_info::HA_ALTER_FLAGS inplace_offline_operations=
-    Alter_inplace_info::ALTER_COLUMN_EQUAL_PACK_LENGTH |
-    Alter_inplace_info::ALTER_COLUMN_NAME |
-    Alter_inplace_info::ALTER_COLUMN_DEFAULT |
-    Alter_inplace_info::ALTER_COLUMN_OPTION |
-    Alter_inplace_info::CHANGE_CREATE_OPTION |
-    Alter_inplace_info::ALTER_PARTITIONED |
-    Alter_inplace_info::ALTER_VIRTUAL_GCOL_EXPR |
-    Alter_inplace_info::ALTER_RENAME;
+  alter_table_operations inplace_offline_operations=
+    ALTER_COLUMN_EQUAL_PACK_LENGTH |
+    ALTER_COLUMN_NAME |
+    ALTER_RENAME_COLUMN |
+    ALTER_CHANGE_COLUMN_DEFAULT |
+    ALTER_COLUMN_DEFAULT |
+    ALTER_COLUMN_OPTION |
+    ALTER_CHANGE_CREATE_OPTION |
+    ALTER_DROP_CHECK_CONSTRAINT |
+    ALTER_PARTITIONED |
+    ALTER_VIRTUAL_GCOL_EXPR |
+    ALTER_RENAME;
 
   /* Is there at least one operation that requires copy algorithm? */
   if (ha_alter_info->handler_flags & ~inplace_offline_operations)
     DBUG_RETURN(HA_ALTER_INPLACE_NOT_SUPPORTED);
 
   /*
+    The following checks for changes related to ALTER_OPTIONS
+
     ALTER TABLE tbl_name CONVERT TO CHARACTER SET .. and
     ALTER TABLE table_name DEFAULT CHARSET = .. most likely
     change column charsets and so not supported in-place through
@@ -4438,12 +4625,13 @@ handler::check_if_supported_inplace_alter(TABLE *altered_table,
   if (create_info->used_fields & (HA_CREATE_USED_CHARSET |
                                   HA_CREATE_USED_DEFAULT_CHARSET |
                                   HA_CREATE_USED_PACK_KEYS |
+                                  HA_CREATE_USED_CHECKSUM |
                                   HA_CREATE_USED_MAX_ROWS) ||
       (table->s->row_type != create_info->row_type))
     DBUG_RETURN(HA_ALTER_INPLACE_NOT_SUPPORTED);
 
   uint table_changes= (ha_alter_info->handler_flags &
-                       Alter_inplace_info::ALTER_COLUMN_EQUAL_PACK_LENGTH) ?
+                       ALTER_COLUMN_EQUAL_PACK_LENGTH) ?
     IS_EQUAL_PACK_LENGTH : IS_EQUAL_YES;
   if (table->file->check_if_incompatible_data(create_info, table_changes)
       == COMPATIBLE_DATA_YES)
@@ -4452,20 +4640,8 @@ handler::check_if_supported_inplace_alter(TABLE *altered_table,
   DBUG_RETURN(HA_ALTER_INPLACE_NOT_SUPPORTED);
 }
 
-
-/*
-   Default implementation to support in-place alter table
-   and old online add/drop index API
-*/
-
-void handler::notify_table_changed()
-{
-  ha_create_partitioning_metadata(table->s->path.str, NULL, CHF_INDEX_FLAG);
-}
-
-
 void Alter_inplace_info::report_unsupported_error(const char *not_supported,
-                                                  const char *try_instead)
+                                                  const char *try_instead) const
 {
   if (unsupported_reason == NULL)
     my_error(ER_ALTER_OPERATION_NOT_SUPPORTED, MYF(0),
@@ -4562,8 +4738,9 @@ handler::ha_create_partitioning_metadata(const char *name,
   */
   DBUG_ASSERT(m_lock_type == F_UNLCK ||
               (!old_name && strcmp(name, table_share->path.str)));
-  mark_trx_read_write();
 
+
+  mark_trx_read_write();
   return create_partitioning_metadata(name, old_name, action_flag);
 }
 
@@ -4652,7 +4829,7 @@ int ha_enable_transaction(THD *thd, bool on)
       is an optimization hint that storage engine is free to ignore.
       So, let's commit an open transaction (if any) now.
     */
-    if (!(error= ha_commit_trans(thd, 0)))
+    if (likely(!(error= ha_commit_trans(thd, 0))))
       error= trans_commit_implicit(thd);
   }
   DBUG_RETURN(error);
@@ -4721,14 +4898,12 @@ void handler::get_dynamic_partition_info(PARTITION_STATS *stat_info,
   stat_info->data_file_length=     stats.data_file_length;
   stat_info->max_data_file_length= stats.max_data_file_length;
   stat_info->index_file_length=    stats.index_file_length;
+  stat_info->max_index_file_length=stats.max_index_file_length;
   stat_info->delete_length=        stats.delete_length;
   stat_info->create_time=          stats.create_time;
   stat_info->update_time=          stats.update_time;
   stat_info->check_time=           stats.check_time;
-  stat_info->check_sum=            0;
-  if (table_flags() & (HA_HAS_OLD_CHECKSUM | HA_HAS_NEW_CHECKSUM))
-    stat_info->check_sum= checksum();
-  return;
+  stat_info->check_sum=            stats.checksum;
 }
 
 
@@ -4752,7 +4927,8 @@ void handler::update_global_table_stats()
   if (rows_read + rows_changed == 0)
     return;                                     // Nothing to update.
 
-  DBUG_ASSERT(table->s && table->s->table_cache_key.str);
+  DBUG_ASSERT(table->s);
+  DBUG_ASSERT(table->s->table_cache_key.str);
 
   mysql_mutex_lock(&LOCK_global_table_stats);
   /* Gets the global table stats, creating one if necessary. */
@@ -4770,7 +4946,7 @@ void handler::update_global_table_stats()
     }
     memcpy(table_stats->table, table->s->table_cache_key.str,
            table->s->table_cache_key.length);
-    table_stats->table_name_length= table->s->table_cache_key.length;
+    table_stats->table_name_length= (uint)table->s->table_cache_key.length;
     table_stats->engine_type= ht->db_type;
     /* No need to set variables to 0, as we use MY_ZEROFILL above */
 
@@ -4813,7 +4989,7 @@ void handler::update_global_index_stats()
     if (index_rows_read[index])
     {
       INDEX_STATS* index_stats;
-      uint key_length;
+      size_t key_length;
       KEY *key_info = &table->key_info[index];  // Rows were read using this
 
       DBUG_ASSERT(key_info->cache_name);
@@ -4849,6 +5025,98 @@ end:
 }
 
 
+static void flush_checksum(ha_checksum *row_crc, uchar **checksum_start,
+                           size_t *checksum_length)
+{
+  if (*checksum_start)
+  {
+    *row_crc= my_checksum(*row_crc, *checksum_start, *checksum_length);
+    *checksum_start= NULL;
+    *checksum_length= 0;
+  }
+}
+
+
+/* calculating table's checksum */
+int handler::calculate_checksum()
+{
+  int error;
+  THD *thd=ha_thd();
+  DBUG_ASSERT(table->s->last_null_bit_pos < 8);
+  uchar null_mask= table->s->last_null_bit_pos
+                   ? 256 -  (1 << table->s->last_null_bit_pos) : 0;
+
+  table->use_all_columns();
+  stats.checksum= 0;
+
+  if ((error= ha_rnd_init(1)))
+    return error;
+
+  for (;;)
+  {
+    if (thd->killed)
+      return HA_ERR_ABORTED_BY_USER;
+
+    ha_checksum row_crc= 0;
+    error= table->file->ha_rnd_next(table->record[0]);
+    if (error)
+      break;
+
+    if (table->s->null_bytes)
+    {
+      /* fix undefined null bits */
+      table->record[0][table->s->null_bytes-1] |= null_mask;
+      if (!(table->s->db_create_options & HA_OPTION_PACK_RECORD))
+        table->record[0][0] |= 1;
+
+      row_crc= my_checksum(row_crc, table->record[0], table->s->null_bytes);
+    }
+
+    uchar *checksum_start= NULL;
+    size_t checksum_length= 0;
+    for (uint i= 0; i < table->s->fields; i++ )
+    {
+      Field *f= table->field[i];
+
+      if (! thd->variables.old_mode && f->is_real_null(0))
+      {
+        flush_checksum(&row_crc, &checksum_start, &checksum_length);
+        continue;
+      }
+     /*
+       BLOB and VARCHAR have pointers in their field, we must convert
+       to string; GEOMETRY is implemented on top of BLOB.
+       BIT may store its data among NULL bits, convert as well.
+     */
+      switch (f->type()) {
+        case MYSQL_TYPE_BLOB:
+        case MYSQL_TYPE_VARCHAR:
+        case MYSQL_TYPE_GEOMETRY:
+        case MYSQL_TYPE_BIT:
+        {
+          flush_checksum(&row_crc, &checksum_start, &checksum_length);
+          String tmp;
+          f->val_str(&tmp);
+          row_crc= my_checksum(row_crc, (uchar*) tmp.ptr(), tmp.length());
+          break;
+        }
+        default:
+          if (!checksum_start)
+            checksum_start= f->ptr;
+          DBUG_ASSERT(checksum_start + checksum_length == f->ptr);
+          checksum_length+= f->pack_length();
+          break;
+      }
+    }
+    flush_checksum(&row_crc, &checksum_start, &checksum_length);
+
+    stats.checksum+= row_crc;
+  }
+  table->file->ha_rnd_end();
+  return error == HA_ERR_END_OF_FILE ? 0 : error;
+}
+
+
 /****************************************************************************
 ** Some general functions that isn't in the handler class
 ****************************************************************************/
@@ -4872,7 +5140,6 @@ int ha_create_table(THD *thd, const char *path,
   TABLE_SHARE share;
   bool temp_table __attribute__((unused)) =
     create_info->options & (HA_LEX_CREATE_TMP_TABLE | HA_CREATE_TMP_ALTER);
-                                 
   DBUG_ENTER("ha_create_table");
 
   init_tmp_table_share(thd, &share, db, 0, table_name, path);
@@ -4900,7 +5167,8 @@ int ha_create_table(THD *thd, const char *path,
 
   share.m_psi= PSI_CALL_get_table_share(temp_table, &share);
 
-  if (open_table_from_share(thd, &share, "", 0, READ_ALL, 0, &table, true))
+  if (open_table_from_share(thd, &share, &empty_clex_str, 0, READ_ALL, 0,
+                            &table, true))
     goto err;
 
   update_create_info_from_table(create_info, &table);
@@ -4909,13 +5177,13 @@ int ha_create_table(THD *thd, const char *path,
 
   error= table.file->ha_create(name, &table, create_info);
 
-  if (error)
+  if (unlikely(error))
   {
     if (!thd->is_error())
       my_error(ER_CANT_CREATE_TABLE, MYF(0), db, table_name, error);
     table.file->print_error(error, MYF(ME_JUST_WARNING));
-    PSI_CALL_drop_table_share(temp_table, share.db.str, share.db.length,
-                              share.table_name.str, share.table_name.length);
+    PSI_CALL_drop_table_share(temp_table, share.db.str, (uint)share.db.length,
+                              share.table_name.str, (uint)share.table_name.length);
   }
 
   (void) closefrm(&table);
@@ -5064,7 +5332,7 @@ static my_bool discover_handlerton(THD *thd, plugin_ref plugin,
     int error= hton->discover_table(hton, thd, share);
     if (error != HA_ERR_NO_SUCH_TABLE)
     {
-      if (error)
+      if (unlikely(error))
       {
         if (!share->error)
         {
@@ -5211,7 +5479,7 @@ private:
         *hton will be NULL.
 */
 
-bool ha_table_exists(THD *thd, const char *db, const char *table_name,
+bool ha_table_exists(THD *thd, const LEX_CSTRING *db, const LEX_CSTRING *table_name,
                      handlerton **hton, bool *is_sequence)
 {
   handlerton *dummy;
@@ -5226,7 +5494,7 @@ bool ha_table_exists(THD *thd, const char *db, const char *table_name,
     is_sequence= &dummy2;
   *is_sequence= 0;
 
-  TDC_element *element= tdc_lock_share(thd, db, table_name);
+  TDC_element *element= tdc_lock_share(thd, db->str, table_name->str);
   if (element && element != MY_ERRPTR)
   {
     if (hton)
@@ -5238,8 +5506,8 @@ bool ha_table_exists(THD *thd, const char *db, const char *table_name,
 
   char path[FN_REFLEN + 1];
   size_t path_len = build_table_filename(path, sizeof(path) - 1,
-                                         db, table_name, "", 0);
-  st_discover_existence_args args= {path, path_len, db, table_name, 0, true};
+                                         db->str, table_name->str, "", 0);
+  st_discover_existence_args args= {path, path_len, db->str, table_name->str, 0, true};
 
   if (file_ext_exists(path, path_len, reg_ext))
   {
@@ -5282,14 +5550,12 @@ bool ha_table_exists(THD *thd, const char *db, const char *table_name,
   {
     TABLE_LIST table;
     uint flags = GTS_TABLE | GTS_VIEW;
-
     if (!hton)
       flags|= GTS_NOLOCK;
 
     Table_exists_error_handler no_such_table_handler;
     thd->push_internal_handler(&no_such_table_handler);
-    table.init_one_table(db, strlen(db), table_name, strlen(table_name),
-                         table_name, TL_READ);
+    table.init_one_table(db, table_name, 0, TL_READ);
     TABLE_SHARE *share= tdc_acquire_share(thd, &table, flags);
     thd->pop_internal_handler();
 
@@ -5428,7 +5694,7 @@ static my_bool discover_names(THD *thd, plugin_ref plugin,
 
   if (ht->state == SHOW_OPTION_YES && ht->discover_table_names)
   {
-    uint old_elements= args->result->tables->elements();
+    size_t old_elements= args->result->tables->elements();
     if (ht->discover_table_names(ht, args->db, args->dirp, args->result))
       return 1;
 
@@ -5437,7 +5703,7 @@ static my_bool discover_names(THD *thd, plugin_ref plugin,
       a corresponding .frm file; but custom engine discover methods might
     */
     if (ht->discover_table_names != hton_ext_based_table_discovery)
-      args->possible_duplicates+= args->result->tables->elements() - old_elements;
+      args->possible_duplicates+= (uint)(args->result->tables->elements() - old_elements);
   }
 
   return 0;
@@ -5703,12 +5969,12 @@ int handler::index_read_idx_map(uchar * buf, uint index, const uchar * key,
   int error, UNINIT_VAR(error1);
 
   error= ha_index_init(index, 0);
-  if (!error)
+  if (likely(!error))
   {
     error= index_read_map(buf, key, keypart_map, find_flag);
     error1= ha_index_end();
   }
-  return error ?  error : error1;
+  return error ? error : error1;
 }
 
 
@@ -5845,7 +6111,7 @@ bool ha_show_status(THD *thd, handlerton *db_type, enum ha_stat_type stat)
     We also check thd->is_error() as Innodb may return 0 even if
     there was an error.
   */
-  if (!result && !thd->is_error())
+  if (likely(!result && !thd->is_error()))
     my_eof(thd);
   else if (!thd->is_error())
     my_error(ER_GET_ERRNO, MYF(0), errno, hton_name(db_type)->str);
@@ -5888,29 +6154,6 @@ bool handler::check_table_binlog_row_based(bool binlog_row)
 bool handler::check_table_binlog_row_based_internal(bool binlog_row)
 {
   THD *thd= table->in_use;
-
-#ifdef WITH_WSREP
-  /* only InnoDB tables will be replicated through binlog emulation */
-  if (binlog_row &&
-      ((WSREP_EMULATE_BINLOG(thd) &&
-       table->file->partition_ht()->db_type != DB_TYPE_INNODB) ||
-       (thd->wsrep_ignore_table == true)))
-    return 0;
-
-  /* enforce wsrep_max_ws_rows */
-  if (WSREP(thd) && table->s->tmp_table == NO_TMP_TABLE)
-  {
-    thd->wsrep_affected_rows++;
-    if (wsrep_max_ws_rows &&
-        thd->wsrep_exec_mode != REPL_RECV &&
-        thd->wsrep_affected_rows > wsrep_max_ws_rows)
-    {
-      trans_rollback_stmt(thd) || trans_rollback(thd);
-      my_message(ER_ERROR_DURING_COMMIT, "wsrep_max_ws_rows exceeded", MYF(0));
-      return ER_ERROR_DURING_COMMIT;
-    }
-  }
-#endif
 
   return (table->s->can_do_row_logging &&
           thd->is_current_stmt_binlog_format_row() &&
@@ -6020,12 +6263,10 @@ static int write_locked_table_maps(THD *thd)
 }
 
 
-static int check_wsrep_max_ws_rows();
-
-int binlog_log_row(TABLE* table,
-                          const uchar *before_record,
-                          const uchar *after_record,
-                          Log_func *log_func)
+static int binlog_log_row_internal(TABLE* table,
+                                   const uchar *before_record,
+                                   const uchar *after_record,
+                                   Log_func *log_func)
 {
   bool error= 0;
   THD *const thd= table->in_use;
@@ -6049,15 +6290,40 @@ int binlog_log_row(TABLE* table,
     bool const has_trans= thd->lex->sql_command == SQLCOM_CREATE_TABLE ||
       table->file->has_transactions();
     error= (*log_func)(thd, table, has_trans, before_record, after_record);
-
-    /*
-      Now that the record has been logged, increment wsrep_affected_rows and
-      also check whether its within the allowable limits (wsrep_max_ws_rows).
-    */
-    if (error == 0)
-      error= check_wsrep_max_ws_rows();
   }
   return error ? HA_ERR_RBR_LOGGING_FAILED : 0;
+}
+
+int binlog_log_row(TABLE* table, const uchar *before_record,
+                   const uchar *after_record, Log_func *log_func)
+{
+#ifdef WITH_WSREP
+  THD *const thd= table->in_use;
+
+  /* only InnoDB tables will be replicated through binlog emulation */
+  if ((WSREP_EMULATE_BINLOG(thd) &&
+       table->file->partition_ht()->db_type != DB_TYPE_INNODB) ||
+       (thd->wsrep_ignore_table == true))
+    return 0;
+
+  /* enforce wsrep_max_ws_rows */
+  if (WSREP(thd) && table->s->tmp_table == NO_TMP_TABLE)
+  {
+    thd->wsrep_affected_rows++;
+    if (wsrep_max_ws_rows &&
+        thd->wsrep_exec_mode != REPL_RECV &&
+        thd->wsrep_affected_rows > wsrep_max_ws_rows)
+    {
+      trans_rollback_stmt(thd) || trans_rollback(thd);
+      my_message(ER_ERROR_DURING_COMMIT, "wsrep_max_ws_rows exceeded", MYF(0));
+      return ER_ERROR_DURING_COMMIT;
+    }
+  }
+#endif
+
+  if (!table->file->check_table_binlog_row_based(1))
+    return 0;
+  return binlog_log_row_internal(table, before_record, after_record, log_func);
 }
 
 
@@ -6108,7 +6374,7 @@ int handler::ha_external_lock(THD *thd, int lock_type)
 
   DBUG_EXECUTE_IF("external_lock_failure", error= HA_ERR_GENERIC;);
 
-  if (error == 0 || lock_type == F_UNLCK)
+  if (likely(error == 0 || lock_type == F_UNLCK))
   {
     m_lock_type= lock_type;
     cached_table_flags= table_flags();
@@ -6155,37 +6421,13 @@ int handler::ha_reset()
   table->default_column_bitmaps();
   pushed_cond= NULL;
   tracker= NULL;
-  mark_trx_read_write_done= check_table_binlog_row_based_done=
-    check_table_binlog_row_based_result= 0;
+  mark_trx_read_write_done= 0;
+  clear_cached_table_binlog_row_based_flag();
   /* Reset information about pushed engine conditions */
   cancel_pushed_idx_cond();
   /* Reset information about pushed index conditions */
   clear_top_table_fields();
   DBUG_RETURN(reset());
-}
-
-
-static int check_wsrep_max_ws_rows()
-{
-#ifdef WITH_WSREP
-  if (wsrep_max_ws_rows)
-  {
-    THD *thd= current_thd;
-
-    if (!WSREP(thd))
-      return 0;
-
-    thd->wsrep_affected_rows++;
-    if (thd->wsrep_exec_mode != REPL_RECV &&
-        thd->wsrep_affected_rows > wsrep_max_ws_rows)
-    {
-      trans_rollback_stmt(thd) || trans_rollback(thd);
-      my_message(ER_ERROR_DURING_COMMIT, "wsrep_max_ws_rows exceeded", MYF(0));
-      return ER_ERROR_DURING_COMMIT;
-    }
-  }
-#endif /* WITH_WSREP */
-  return 0;
 }
 
 
@@ -6209,8 +6451,7 @@ int handler::ha_write_row(uchar *buf)
   if (likely(!error) && !row_already_logged)
   {
     rows_changed++;
-    if (table->file->check_table_binlog_row_based(1))
-      error= binlog_log_row(table, 0, buf, log_func);
+    error= binlog_log_row(table, 0, buf, log_func);
   }
   DEBUG_SYNC_C("ha_write_row_end");
   DBUG_RETURN(error);
@@ -6242,8 +6483,7 @@ int handler::ha_update_row(const uchar *old_data, const uchar *new_data)
   if (likely(!error) && !row_already_logged)
   {
     rows_changed++;
-    if (table->file->check_table_binlog_row_based(1))
-      error= binlog_log_row(table, old_data, new_data, log_func);
+    error= binlog_log_row(table, old_data, new_data, log_func);
   }
   return error;
 }
@@ -6255,10 +6495,10 @@ int handler::ha_update_row(const uchar *old_data, const uchar *new_data)
 int handler::update_first_row(uchar *new_data)
 {
   int error;
-  if (!(error= ha_rnd_init(1)))
+  if (likely(!(error= ha_rnd_init(1))))
   {
     int end_error;
-    if (!(error= ha_rnd_next(table->record[1])))
+    if (likely(!(error= ha_rnd_next(table->record[1]))))
     {
       /*
         We have to do the memcmp as otherwise we may get error 169 from InnoDB
@@ -6267,7 +6507,7 @@ int handler::update_first_row(uchar *new_data)
         error= update_row(table->record[1], new_data);
     }
     end_error= ha_rnd_end();
-    if (!error)
+    if (likely(!error))
       error= end_error;
     /* Logging would be wrong if update_row works but ha_rnd_end fails */
     DBUG_ASSERT(!end_error || error != 0);
@@ -6298,8 +6538,7 @@ int handler::ha_delete_row(const uchar *buf)
   if (likely(!error))
   {
     rows_changed++;
-    if (table->file->check_table_binlog_row_based(1))
-      error= binlog_log_row(table, buf, 0, log_func);
+    error= binlog_log_row(table, buf, 0, log_func);
   }
   return error;
 }
@@ -6385,7 +6624,8 @@ void handler::use_hidden_primary_key()
 Handler_share *handler::get_ha_share_ptr()
 {
   DBUG_ENTER("handler::get_ha_share_ptr");
-  DBUG_ASSERT(ha_share && table_share);
+  DBUG_ASSERT(ha_share);
+  DBUG_ASSERT(table_share);
 
 #ifndef DBUG_OFF
   if (table_share->tmp_table == NO_TMP_TABLE)
@@ -6513,6 +6753,12 @@ void ha_fake_trx_id(THD *thd)
 
   if (!WSREP(thd))
   {
+    DBUG_VOID_RETURN;
+  }
+
+  if (thd->wsrep_ws_handle.trx_id != WSREP_UNDEFINED_TRX_ID)
+  {
+    WSREP_DEBUG("fake trx id skipped: %" PRIu64, thd->wsrep_ws_handle.trx_id);
     DBUG_VOID_RETURN;
   }
 
@@ -6741,7 +6987,7 @@ bool HA_CREATE_INFO::check_conflicting_charset_declarations(CHARSET_INFO *cs)
 /* Remove all indexes for a given table from global index statistics */
 
 static
-int del_global_index_stats_for_table(THD *thd, uchar* cache_key, uint cache_key_length)
+int del_global_index_stats_for_table(THD *thd, uchar* cache_key, size_t cache_key_length)
 {
   int res = 0;
   DBUG_ENTER("del_global_index_stats_for_table");
@@ -6777,12 +7023,12 @@ int del_global_index_stats_for_table(THD *thd, uchar* cache_key, uint cache_key_
 
 /* Remove a table from global table statistics */
 
-int del_global_table_stat(THD *thd, LEX_CSTRING *db, LEX_CSTRING *table)
+int del_global_table_stat(THD *thd, const LEX_CSTRING *db, const LEX_CSTRING *table)
 {
   TABLE_STATS *table_stats;
   int res = 0;
   uchar *cache_key;
-  uint cache_key_length;
+  size_t cache_key_length;
   DBUG_ENTER("del_global_table_stat");
 
   cache_key_length= db->length + 1 + table->length + 1;
@@ -6819,7 +7065,7 @@ end:
 int del_global_index_stat(THD *thd, TABLE* table, KEY* key_info)
 {
   INDEX_STATS *index_stats;
-  uint key_length= table->s->table_cache_key.length + key_info->name.length + 1;
+  size_t key_length= table->s->table_cache_key.length + key_info->name.length + 1;
   int res = 0;
   DBUG_ENTER("del_global_index_stat");
   mysql_mutex_lock(&LOCK_global_index_stats);
@@ -6836,12 +7082,12 @@ int del_global_index_stat(THD *thd, TABLE* table, KEY* key_info)
 bool Vers_parse_info::is_start(const char *name) const
 {
   DBUG_ASSERT(name);
-  return as_row.start && as_row.start == LString_i(name);
+  return as_row.start && as_row.start.streq(name);
 }
 bool Vers_parse_info::is_end(const char *name) const
 {
   DBUG_ASSERT(name);
-  return as_row.end && as_row.end == LString_i(name);
+  return as_row.end && as_row.end.streq(name);
 }
 bool Vers_parse_info::is_start(const Create_field &f) const
 {
@@ -6858,14 +7104,14 @@ static Create_field *vers_init_sys_field(THD *thd, const char *field_name, int f
   if (!f)
     return NULL;
 
-  memset(f, 0, sizeof(*f));
   f->field_name.str= field_name;
   f->field_name.length= strlen(field_name);
   f->charset= system_charset_info;
-  f->flags= flags;
+  f->flags= flags | NOT_NULL_FLAG;
   if (integer)
   {
-    f->set_handler(&type_handler_longlong);
+    DBUG_ASSERT(0); // Not implemented yet
+    f->set_handler(&type_handler_vers_trx_id);
     f->length= MY_INT64_NUM_DECIMAL_DIGITS - 1;
     f->flags|= UNSIGNED_FLAG;
   }
@@ -6889,22 +7135,22 @@ static bool vers_create_sys_field(THD *thd, const char *field_name,
   if (!f)
     return true;
 
-  alter_info->flags|= Alter_info::ALTER_ADD_COLUMN;
+  alter_info->flags|= ALTER_PARSER_ADD_COLUMN;
   alter_info->create_list.push_back(f);
 
   return false;
 }
 
-const LString Vers_parse_info::default_start= "row_start";
-const LString Vers_parse_info::default_end= "row_end";
+const Lex_ident Vers_parse_info::default_start= "row_start";
+const Lex_ident Vers_parse_info::default_end= "row_end";
 
-bool Vers_parse_info::fix_implicit(THD *thd, Alter_info *alter_info, int *added)
+bool Vers_parse_info::fix_implicit(THD *thd, Alter_info *alter_info)
 {
   // If user specified some of these he must specify the others too. Do nothing.
   if (*this)
     return false;
 
-  alter_info->flags|= Alter_info::ALTER_ADD_COLUMN;
+  alter_info->flags|= ALTER_PARSER_ADD_COLUMN;
 
   system_time= start_end_t(default_start, default_end);
   as_row= system_time;
@@ -6914,264 +7160,109 @@ bool Vers_parse_info::fix_implicit(THD *thd, Alter_info *alter_info, int *added)
   {
     return true;
   }
-  if (added)
-    *added+= 2;
   return false;
 }
 
-bool Table_scope_and_contents_source_st::vers_native(THD *thd) const
-{
-  if (ha_check_storage_engine_flag(db_type, HTON_NATIVE_SYS_VERSIONING))
-    return true;
-
-#ifdef WITH_PARTITION_STORAGE_ENGINE
-  partition_info *info= thd->work_part_info;
-  if (info && !(used_fields & HA_CREATE_USED_ENGINE))
-  {
-    if (handlerton *hton= info->default_engine_type)
-      return ha_check_storage_engine_flag(hton, HTON_NATIVE_SYS_VERSIONING);
-
-    List_iterator_fast<partition_element> it(info->partitions);
-    while (partition_element *partition_element= it++)
-    {
-      if (partition_element->find_engine_flag(HTON_NATIVE_SYS_VERSIONING))
-        return true;
-    }
-  }
-#endif
-  return false;
-}
 
 bool Table_scope_and_contents_source_st::vers_fix_system_fields(
-  THD *thd,
-  Alter_info *alter_info,
-  const TABLE_LIST &create_table,
-  const TABLE_LIST *select_tables,
-  List<Item> *items,
-  bool *versioned_write)
+  THD *thd, Alter_info *alter_info, const TABLE_LIST &create_table)
 {
-  DBUG_ASSERT(!(alter_info->flags & Alter_info::ALTER_DROP_SYSTEM_VERSIONING));
-  int vers_tables= 0;
-
-  if (select_tables)
-  {
-    for (const TABLE_LIST *table= select_tables; table; table= table->next_local)
-    {
-      if (table->table && table->table->versioned())
-        vers_tables++;
-    }
-  }
+  DBUG_ASSERT(!(alter_info->flags & ALTER_DROP_SYSTEM_VERSIONING));
 
   DBUG_EXECUTE_IF("sysvers_force", if (!tmp_table()) {
-                  alter_info->flags|= Alter_info::ALTER_ADD_SYSTEM_VERSIONING;
+                  alter_info->flags|= ALTER_ADD_SYSTEM_VERSIONING;
                   options|= HA_VERSIONED_TABLE; });
-
-  // Possibly override default storage engine to match one used in source table.
-  if (vers_tables && alter_info->flags & Alter_info::ALTER_ADD_SYSTEM_VERSIONING &&
-      !(used_fields & HA_CREATE_USED_ENGINE))
-  {
-    List_iterator_fast<Create_field> it(alter_info->create_list);
-    while (Create_field *f= it++)
-    {
-      if (vers_info.is_start(*f) || vers_info.is_end(*f))
-      {
-        if (f->field)
-        {
-          db_type= f->field->orig_table->file->ht;
-        }
-        break;
-      }
-    }
-  }
 
   if (!vers_info.need_check(alter_info))
     return false;
 
   if (!vers_info.versioned_fields && vers_info.unversioned_fields &&
-      !(alter_info->flags & Alter_info::ALTER_ADD_SYSTEM_VERSIONING))
+      !(alter_info->flags & ALTER_ADD_SYSTEM_VERSIONING))
   {
     // All is correct but this table is not versioned.
     options&= ~HA_VERSIONED_TABLE;
     return false;
   }
 
-  if (!(alter_info->flags & Alter_info::ALTER_ADD_SYSTEM_VERSIONING) && vers_info)
+  if (!(alter_info->flags & ALTER_ADD_SYSTEM_VERSIONING) && vers_info)
   {
-    my_error(ER_MISSING, MYF(0), create_table.table_name, "WITH SYSTEM VERSIONING");
+    my_error(ER_MISSING, MYF(0), create_table.table_name.str,
+             "WITH SYSTEM VERSIONING");
     return true;
   }
 
-  if (vers_tables)
-  {
-    DBUG_ASSERT(options & HA_VERSIONED_TABLE);
-    DBUG_ASSERT(versioned_write);
-    *versioned_write= true;
-  }
-
   List_iterator<Create_field> it(alter_info->create_list);
-  bool explicit_declared= vers_info.as_row.start || vers_info.as_row.end;
   while (Create_field *f= it++)
   {
     if ((f->versioning == Column_definition::VERSIONING_NOT_SET &&
-         !(alter_info->flags & Alter_info::ALTER_ADD_SYSTEM_VERSIONING)) ||
+         !(alter_info->flags & ALTER_ADD_SYSTEM_VERSIONING)) ||
         f->versioning == Column_definition::WITHOUT_VERSIONING)
     {
       f->flags|= VERS_UPDATE_UNVERSIONED_FLAG;
     }
-
-    /* Assign selected implicit fields when no explicit fields */
-    if (!vers_tables || explicit_declared)
-      continue;
-
-    DBUG_ASSERT(versioned_write);
-    if (vers_info.is_start(*f) &&
-      vers_info.default_start == f->field_name)
-    {
-      if (vers_info.as_row.start)
-        it.remove();
-      else
-      {
-        vers_info.set_start(f->field_name);
-        *versioned_write= false;
-      }
-      continue;
-    }
-    if (vers_info.is_end(*f) &&
-      vers_info.default_end == f->field_name)
-    {
-      if (vers_info.as_row.end)
-        it.remove();
-      else
-      {
-        vers_info.set_end(f->field_name);
-        *versioned_write= false;
-      }
-      continue;
-    }
   } // while (Create_field *f= it++)
 
-  /* Assign selected system fields to explicit system fields if any */
-  if (vers_tables)
-  {
-    it.rewind();
-    while (Create_field *f= it++)
-    {
-      uint flags_left= VERS_SYSTEM_FIELD;
-      if (flags_left && (vers_info.is_start(*f) || vers_info.is_end(*f)) && !f->field)
-      {
-        uint sys_flag= f->flags & flags_left;
-        flags_left-= sys_flag;
-        List_iterator_fast<Item> it2(*items);
-        while (Item *item= it2++)
-        {
-          if (item->type() != Item::FIELD_ITEM)
-            continue;
-          Field *fld= static_cast<Item_field *>(item)->field;
-          DBUG_ASSERT(fld);
-          if ((fld->flags & sys_flag) &&
-            LString_i(f->field_name) == fld->field_name)
-          {
-            f->field= fld;
-            *versioned_write= false;
-          }
-        } // while (item)
-      } // if (flags_left ...
-    } // while (Create_field *f= it++)
-  } // if (vers_tables)
-
-  int added= 0;
-  if (vers_info.fix_implicit(thd, alter_info, &added))
+  if (vers_info.fix_implicit(thd, alter_info))
     return true;
 
-  DBUG_ASSERT(added >= 0);
-  if (vers_tables)
+  return false;
+}
+
+
+bool Table_scope_and_contents_source_st::vers_check_system_fields(
+        THD *thd, Alter_info *alter_info, const Lex_table_name &table_name,
+        const Lex_table_name &db, int select_count)
+{
+  if (!(options & HA_VERSIONED_TABLE))
+    return false;
+
+  if (!(alter_info->flags & ALTER_DROP_SYSTEM_VERSIONING))
   {
-    DBUG_ASSERT(items);
-    while (added--)
+    uint versioned_fields= 0;
+    uint fieldnr= 0;
+    List_iterator<Create_field> field_it(alter_info->create_list);
+    while (Create_field *f= field_it++)
     {
-      Item_default_value *item= new (thd->mem_root)
-        Item_default_value(thd, thd->lex->current_context());
-      items->push_back(item, thd->mem_root);
+      /*
+         The field from the CREATE part can be duplicated in the SELECT part of
+         CREATE...SELECT. In that case double counts should be avoided.
+         select_create::create_table_from_items just pushes the fields back into
+         the create_list, without additional manipulations, so the fields from
+         SELECT go last there.
+       */
+      bool is_dup= false;
+      if (fieldnr >= alter_info->create_list.elements - select_count)
+      {
+        List_iterator<Create_field> dup_it(alter_info->create_list);
+        for (Create_field *dup= dup_it++; !is_dup && dup != f; dup= dup_it++)
+          is_dup= my_strcasecmp(default_charset_info,
+                                dup->field_name.str, f->field_name.str) == 0;
+      }
+
+      if (!(f->flags & VERS_UPDATE_UNVERSIONED_FLAG) && !is_dup)
+        versioned_fields++;
+      fieldnr++;
+    }
+    if (versioned_fields == VERSIONING_FIELDS)
+    {
+      my_error(ER_VERS_TABLE_MUST_HAVE_COLUMNS, MYF(0), table_name.str);
+      return true;
     }
   }
 
-  int plain_cols= 0; // columns don't have WITH or WITHOUT SYSTEM VERSIONING
-  int vers_cols= 0; // columns have WITH SYSTEM VERSIONING
-  it.rewind();
-  while (const Create_field *f= it++)
-  {
-    if (vers_info.is_start(*f) || vers_info.is_end(*f))
-      continue;
+  if (!(alter_info->flags & ALTER_ADD_SYSTEM_VERSIONING))
+    return false;
 
-    if (f->versioning == Column_definition::VERSIONING_NOT_SET)
-      plain_cols++;
-    else if (f->versioning == Column_definition::WITH_VERSIONING)
-      vers_cols++;
-  }
+  bool can_native= ha_check_storage_engine_flag(db_type,
+                                                HTON_NATIVE_SYS_VERSIONING)
+                   || db_type->db_type == DB_TYPE_PARTITION_DB;
 
-  if (!thd->lex->tmp_table() &&
-    // CREATE from SELECT (Create_fields are not yet added)
-    !select_tables &&
-    vers_cols == 0 &&
-    (plain_cols == 0 || !vers_info))
-  {
-    my_error(ER_VERS_TABLE_MUST_HAVE_COLUMNS, MYF(0), create_table.table_name);
-    return true;
-  }
-
-  if (vers_info.check_with_conditions(create_table.table_name))
-    return true;
-
-  bool native= vers_native(thd);
-  if (vers_info.check_sys_fields(create_table.table_name, alter_info, native))
-    return true;
-
-  return false;
+  return vers_info.check_sys_fields(table_name, db, alter_info, can_native);
 }
 
-static bool add_field_to_drop_list_if_not_exists(THD *thd, Alter_info *alter_info, Field *field)
-{
-  DBUG_ASSERT(field);
-  DBUG_ASSERT(field->field_name.str);
-  List_iterator_fast<Alter_drop> it(alter_info->drop_list);
-  while (Alter_drop *drop= it++)
-  {
-    if (!my_strcasecmp(system_charset_info, field->field_name.str, drop->name))
-      return false;
-  }
-
-  alter_info->flags|= Alter_info::ALTER_DROP_COLUMN;
-  Alter_drop *ad= new (thd->mem_root)
-      Alter_drop(Alter_drop::COLUMN, field->field_name.str, false);
-  return !ad || alter_info->drop_list.push_back(ad, thd->mem_root);
-}
-
-static bool is_dropping_primary_key(Alter_info *alter_info)
-{
-  List_iterator_fast<Alter_drop> it(alter_info->drop_list);
-  while (Alter_drop *ad= it++)
-  {
-    if (ad->type == Alter_drop::KEY &&
-        !my_strcasecmp(system_charset_info, ad->name, primary_key_name))
-      return true;
-  }
-  return false;
-}
-
-static bool is_adding_primary_key(Alter_info *alter_info)
-{
-  List_iterator_fast<Key> it(alter_info->key_list);
-  while (Key *key= it++)
-  {
-    if (key->type == Key::PRIMARY)
-      return true;
-  }
-  return false;
-}
 
 bool Vers_parse_info::fix_alter_info(THD *thd, Alter_info *alter_info,
-                                          HA_CREATE_INFO *create_info,
-                                          TABLE *table)
+                                     HA_CREATE_INFO *create_info, TABLE *table)
 {
   TABLE_SHARE *share= table->s;
   const char *table_name= share->table_name.str;
@@ -7185,99 +7276,70 @@ bool Vers_parse_info::fix_alter_info(THD *thd, Alter_info *alter_info,
     return true;
   }
 
-  if (alter_info->flags & Alter_info::ALTER_ADD_SYSTEM_VERSIONING && table->versioned())
+  if (alter_info->flags & ALTER_ADD_SYSTEM_VERSIONING &&
+      table->versioned())
   {
     my_error(ER_VERS_ALREADY_VERSIONED, MYF(0), table_name);
     return true;
   }
 
-  if (alter_info->flags & Alter_info::ALTER_DROP_SYSTEM_VERSIONING)
+  if (alter_info->flags & ALTER_DROP_SYSTEM_VERSIONING)
   {
     if (!share->versioned)
     {
       my_error(ER_VERS_NOT_VERSIONED, MYF(0), table_name);
       return true;
     }
-
-    if (add_field_to_drop_list_if_not_exists(thd, alter_info, share->vers_start_field()) ||
-        add_field_to_drop_list_if_not_exists(thd, alter_info, share->vers_end_field()))
-      return true;
-
-    if (share->primary_key != MAX_KEY && !is_adding_primary_key(alter_info) &&
-        !is_dropping_primary_key(alter_info))
+#ifdef WITH_PARTITION_STORAGE_ENGINE
+    if (table->part_info &&
+        table->part_info->part_type == VERSIONING_PARTITION)
     {
-      alter_info->flags|= Alter_info::ALTER_DROP_INDEX;
-      Alter_drop *ad= new (thd->mem_root)
-          Alter_drop(Alter_drop::KEY, primary_key_name, false);
-      if (!ad || alter_info->drop_list.push_back(ad, thd->mem_root))
-        return true;
-
-      alter_info->flags|= Alter_info::ALTER_ADD_INDEX;
-      LEX_CSTRING key_name= {NULL, 0};
-      DDL_options_st options;
-      options.init();
-      Key *pk= new (thd->mem_root)
-          Key(Key::PRIMARY, &key_name, HA_KEY_ALG_UNDEF, false, options);
-      if (!pk)
-        return true;
-
-      st_key &key= table->key_info[share->primary_key];
-      for (st_key_part_info *it= key.key_part,
-                            *end= it + key.user_defined_key_parts;
-           it != end; ++it)
-      {
-        if (it->field->vers_sys_field())
-          continue;
-
-        Key_part_spec *key_part_spec= new (thd->mem_root)
-            Key_part_spec(&it->field->field_name, it->length);
-        if (!key_part_spec ||
-            pk->columns.push_back(key_part_spec, thd->mem_root))
-          return true;
-      }
-
-      alter_info->key_list.push_back(pk);
+      my_error(ER_DROP_VERSIONING_SYSTEM_TIME_PARTITION, MYF(0), table_name);
+      return true;
     }
+#endif
 
     return false;
   }
 
+  if (!(alter_info->flags & ALTER_ADD_SYSTEM_VERSIONING))
   {
     List_iterator_fast<Create_field> it(alter_info->create_list);
     while (Create_field *f= it++)
     {
-      if (f->change.length && f->flags & VERS_SYSTEM_FIELD)
+      if (f->flags & VERS_SYSTEM_FIELD)
       {
-        my_error(ER_UNSUPPORTED_ACTION_ON_GENERATED_COLUMN, MYF(0));
+        my_error(ER_VERS_DUPLICATE_ROW_START_END, MYF(0),
+                 f->flags & VERS_SYS_START_FLAG ? "START" : "END", f->field_name.str);
         return true;
       }
     }
   }
 
-  if ((versioned_fields || unversioned_fields) && !share->versioned)
+  if ((alter_info->flags & ALTER_DROP_PERIOD ||
+       versioned_fields || unversioned_fields) && !share->versioned)
   {
     my_error(ER_VERS_NOT_VERSIONED, MYF(0), table_name);
     return true;
   }
 
-  if (add_period)
+  if (share->versioned)
   {
-    if (share->versioned)
+    if (alter_info->flags & ALTER_ADD_PERIOD)
     {
       my_error(ER_VERS_ALREADY_VERSIONED, MYF(0), table_name);
       return true;
     }
-  }
 
-  if (share->versioned)
-  {
     // copy info from existing table
     create_info->options|= HA_VERSIONED_TABLE;
 
-    DBUG_ASSERT(share->vers_start_field() && share->vers_end_field());
-    LString start(share->vers_start_field()->field_name);
-    LString end(share->vers_end_field()->field_name);
-    DBUG_ASSERT(start.ptr() && end.ptr());
+    DBUG_ASSERT(share->vers_start_field());
+    DBUG_ASSERT(share->vers_end_field());
+    Lex_ident start(share->vers_start_field()->field_name);
+    Lex_ident end(share->vers_end_field()->field_name);
+    DBUG_ASSERT(start.str);
+    DBUG_ASSERT(end.str);
 
     as_row= start_end_t(start, end);
     system_time= as_row;
@@ -7290,7 +7352,7 @@ bool Vers_parse_info::fix_alter_info(THD *thd, Alter_info *alter_info,
         if (f->versioning == Column_definition::WITHOUT_VERSIONING)
           f->flags|= VERS_UPDATE_UNVERSIONED_FLAG;
 
-        if (f->change.str && (start == f->change || end == f->change))
+        if (f->change.str && (start.streq(f->change) || end.streq(f->change)))
         {
           my_error(ER_VERS_ALTER_SYSTEM_FIELD, MYF(0), f->change.str);
           return true;
@@ -7298,76 +7360,10 @@ bool Vers_parse_info::fix_alter_info(THD *thd, Alter_info *alter_info,
       }
     }
 
-    if (alter_info->drop_list.elements)
-    {
-      bool done_start= false;
-      bool done_end= false;
-      List_iterator<Alter_drop> it(alter_info->drop_list);
-      while (Alter_drop *d= it++)
-      {
-        const char *name= d->name;
-        Field *f= NULL;
-        if (!done_start && is_start(name))
-        {
-          f= share->vers_start_field();
-          done_start= true;
-        }
-        else if (!done_end && is_end(name))
-        {
-          f= share->vers_end_field();
-          done_end= true;
-        }
-        else
-          continue;
-        if (f->invisible > INVISIBLE_USER)
-        {
-          my_error(ER_CANT_DROP_FIELD_OR_KEY, MYF(0), d->type_name(), name);
-          return true;
-        }
-
-        bool integer= table->vers_start_field()->type() == MYSQL_TYPE_LONGLONG;
-        Create_field *field= vers_init_sys_field(thd, name, f->flags & VERS_SYSTEM_FIELD, integer);
-        if (!field)
-          return true;
-
-        field->change= f->field_name;
-
-        alter_info->flags|= Alter_info::ALTER_CHANGE_COLUMN;
-        alter_info->create_list.push_back(field);
-
-        it.remove();
-
-        if (done_start && done_end)
-          break;
-      }
-
-      if ((done_start || done_end) && done_start != done_end)
-      {
-        String tmp;
-        tmp.append("DROP COLUMN ");
-        tmp.append(done_start ? table->vers_end_field()->field_name
-                              : table->vers_start_field()->field_name);
-        my_error(ER_MISSING, MYF(0), table_name, tmp.c_ptr());
-        return true;
-      }
-    }
-
     return false;
   }
 
-  if (fix_implicit(thd, alter_info))
-    return true;
-
-  if (alter_info->flags & Alter_info::ALTER_ADD_SYSTEM_VERSIONING)
-  {
-    if (check_with_conditions(table_name))
-      return true;
-    bool native= create_info->vers_native(thd);
-    if (check_sys_fields(table_name, alter_info, native))
-      return true;
-  }
-
-  return false;
+  return fix_implicit(thd, alter_info);
 }
 
 bool
@@ -7384,7 +7380,7 @@ Vers_parse_info::fix_create_like(Alter_info &alter_info, HA_CREATE_INFO &create_
     int remove= 2;
     while (remove && (f= it++))
     {
-      if (f->flags & (VERS_SYS_START_FLAG|VERS_SYS_END_FLAG))
+      if (f->flags & VERS_SYSTEM_FIELD)
       {
         it.remove();
         remove--;
@@ -7394,7 +7390,7 @@ Vers_parse_info::fix_create_like(Alter_info &alter_info, HA_CREATE_INFO &create_
     push_warning_printf(current_thd, Sql_condition::WARN_LEVEL_WARN,
                         ER_UNKNOWN_ERROR,
                         "System versioning is stripped from temporary `%s.%s`",
-                        table.db, table.table_name);
+                        table.db.str, table.table_name.str);
     return false;
   }
 
@@ -7416,8 +7412,8 @@ Vers_parse_info::fix_create_like(Alter_info &alter_info, HA_CREATE_INFO &create_
 
   if (!f_start || !f_end)
   {
-    my_error(ER_MISSING, MYF(0), src_table.table_name,
-      f_start ? "AS ROW END" : "AS ROW START");
+    my_error(ER_MISSING, MYF(0), src_table.table_name.str,
+             f_start ? "AS ROW END" : "AS ROW START");
     return true;
   }
 
@@ -7430,105 +7426,121 @@ Vers_parse_info::fix_create_like(Alter_info &alter_info, HA_CREATE_INFO &create_
 
 bool Vers_parse_info::need_check(const Alter_info *alter_info) const
 {
-  return versioned_fields || unversioned_fields || add_period ||
-         alter_info->flags & Alter_info::ALTER_ADD_SYSTEM_VERSIONING ||
-         alter_info->flags & Alter_info::ALTER_DROP_SYSTEM_VERSIONING || *this;
+  return versioned_fields || unversioned_fields ||
+         alter_info->flags & ALTER_ADD_PERIOD ||
+         alter_info->flags & ALTER_DROP_PERIOD ||
+         alter_info->flags & ALTER_ADD_SYSTEM_VERSIONING ||
+         alter_info->flags & ALTER_DROP_SYSTEM_VERSIONING || *this;
 }
 
-bool Vers_parse_info::check_with_conditions(const char *table_name) const
+bool Vers_parse_info::check_conditions(const Lex_table_name &table_name,
+                                       const Lex_table_name &db) const
 {
   if (!as_row.start || !as_row.end)
   {
-    my_error(ER_MISSING, MYF(0), table_name,
+    my_error(ER_MISSING, MYF(0), table_name.str,
                 as_row.start ? "AS ROW END" : "AS ROW START");
     return true;
   }
 
   if (!system_time.start || !system_time.end)
   {
-    my_error(ER_MISSING, MYF(0), table_name, "PERIOD FOR SYSTEM_TIME");
+    my_error(ER_MISSING, MYF(0), table_name.str, "PERIOD FOR SYSTEM_TIME");
     return true;
   }
 
-  if (as_row.start != system_time.start || as_row.end != system_time.end)
+  if (!as_row.start.streq(system_time.start) ||
+      !as_row.end.streq(system_time.end))
   {
     my_error(ER_VERS_PERIOD_COLUMNS, MYF(0), as_row.start.str, as_row.end.str);
     return true;
   }
 
+  if (db.streq(MYSQL_SCHEMA_NAME))
+  {
+    my_error(ER_VERS_DB_NOT_SUPPORTED, MYF(0), MYSQL_SCHEMA_NAME.str);
+    return true;
+  }
   return false;
 }
 
-bool Vers_parse_info::check_sys_fields(const char *table_name,
-                                       Alter_info *alter_info,
-                                       bool native) const
+static bool is_versioning_timestamp(const Create_field *f)
 {
+  return f->type_handler() == &type_handler_timestamp2 &&
+         f->length == MAX_DATETIME_FULL_WIDTH;
+}
+
+static bool is_some_bigint(const Create_field *f)
+{
+  return f->type_handler() == &type_handler_longlong ||
+         f->type_handler() == &type_handler_vers_trx_id;
+}
+
+static bool is_versioning_bigint(const Create_field *f)
+{
+  return is_some_bigint(f) && f->flags & UNSIGNED_FLAG &&
+         f->length == MY_INT64_NUM_DECIMAL_DIGITS - 1;
+}
+
+static bool require_timestamp(const Create_field *f, Lex_table_name table_name)
+{
+  my_error(ER_VERS_FIELD_WRONG_TYPE, MYF(0), f->field_name.str, "TIMESTAMP(6)",
+           table_name.str);
+  return true;
+}
+static bool require_bigint(const Create_field *f, Lex_table_name table_name)
+{
+  my_error(ER_VERS_FIELD_WRONG_TYPE, MYF(0), f->field_name.str,
+           "BIGINT(20) UNSIGNED", table_name.str);
+  return true;
+}
+
+bool Vers_parse_info::check_sys_fields(const Lex_table_name &table_name,
+                                       const Lex_table_name &db,
+                                       Alter_info *alter_info,
+                                       bool can_native) const
+{
+  if (check_conditions(table_name, db))
+    return true;
+
+  const Create_field *row_start= NULL;
+  const Create_field *row_end= NULL;
+
   List_iterator<Create_field> it(alter_info->create_list);
-  vers_sys_type_t found= VERS_UNDEFINED;
-  uint found_flag= 0;
   while (Create_field *f= it++)
   {
-    vers_sys_type_t check_unit= VERS_UNDEFINED;
-    uint sys_flag= f->flags & VERS_SYSTEM_FIELD;
-
-    if (!sys_flag)
-      continue;
-
-    if (sys_flag & found_flag)
-    {
-      my_error(ER_VERS_DUPLICATE_ROW_START_END, MYF(0),
-                found_flag & VERS_SYS_START_FLAG ? "START" : "END", f->field_name.str);
-      return true;
-    }
-
-    sys_flag|= found_flag;
-
-    if ((f->type_handler() == &type_handler_datetime2 ||
-          f->type_handler() == &type_handler_timestamp2) &&
-        f->length == MAX_DATETIME_FULL_WIDTH)
-    {
-      check_unit= VERS_TIMESTAMP;
-    }
-    else if (native
-      && f->type_handler() == &type_handler_longlong
-      && (f->flags & UNSIGNED_FLAG)
-      && f->length == (MY_INT64_NUM_DECIMAL_DIGITS - 1))
-    {
-      check_unit= VERS_TRX_ID;
-    }
-    else
-    {
-      if (!found)
-        found= VERS_TIMESTAMP;
-      goto error;
-    }
-
-    if (check_unit)
-    {
-      if (found)
-      {
-        if (found == check_unit)
-        {
-          if (found == VERS_TRX_ID && !TR_table::use_transaction_registry)
-          {
-            my_error(ER_VERS_TRT_IS_DISABLED, MYF(0));
-            return true;
-          }
-          return false;
-        }
-      error:
-        my_error(ER_VERS_FIELD_WRONG_TYPE, MYF(0), f->field_name.str,
-                  found == VERS_TIMESTAMP ?
-                    "TIMESTAMP(6)" :
-                    "BIGINT(20) UNSIGNED",
-                  table_name);
-        return true;
-      }
-      found= check_unit;
-    }
+    if (!row_start && f->flags & VERS_SYS_START_FLAG)
+      row_start= f;
+    else if (!row_end && f->flags & VERS_SYS_END_FLAG)
+      row_end= f;
   }
 
-  my_error(ER_MISSING, MYF(0), table_name, found_flag & VERS_SYS_START_FLAG ?
-    "ROW END" : found_flag ? "ROW START" : "ROW START/END");
-  return true;
+  const bool expect_timestamp=
+      !can_native || !is_some_bigint(row_start) || !is_some_bigint(row_end);
+
+  if (expect_timestamp)
+  {
+    if (!is_versioning_timestamp(row_start))
+      return require_timestamp(row_start, table_name);
+
+    if (!is_versioning_timestamp(row_end))
+      return require_timestamp(row_end, table_name);
+  }
+  else
+  {
+    if (!is_versioning_bigint(row_start))
+      return require_bigint(row_start, table_name);
+
+    if (!is_versioning_bigint(row_end))
+      return require_bigint(row_end, table_name);
+  }
+
+  if (is_versioning_bigint(row_start) && is_versioning_bigint(row_end) &&
+      !TR_table::use_transaction_registry)
+  {
+    my_error(ER_VERS_TRT_IS_DISABLED, MYF(0));
+    return true;
+  }
+
+  return false;
 }

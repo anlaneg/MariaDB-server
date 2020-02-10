@@ -11,7 +11,7 @@
 
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
-   Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02111-1301 USA */
+   Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1335 USA */
 
 #include "mariadb.h"
 #include <violite.h>
@@ -171,7 +171,7 @@ void tp_callback(TP_connection *c)
 
   c->state = TP_STATE_RUNNING;
 
-  if (!thd)
+  if (unlikely(!thd))
   {
     /* No THD, need to login first. */
     DBUG_ASSERT(c->connect);
@@ -185,7 +185,7 @@ void tp_callback(TP_connection *c)
   }
   else if (threadpool_process_request(thd))
   {
-    /* QUIT or an error occured. */
+    /* QUIT or an error occurred. */
     goto error;
   }
 
@@ -353,7 +353,8 @@ static int threadpool_process_request(THD *thd)
   {
     Vio *vio;
     thd->net.reading_or_writing= 0;
-    mysql_audit_release(thd);
+    if (mysql_audit_release_required(thd))
+      mysql_audit_release(thd);
 
     if ((retval= do_command(thd)) != 0)
       goto end;
@@ -470,7 +471,7 @@ void tp_timeout_handler(TP_connection *c)
     return;
   THD *thd=c->thd;
   mysql_mutex_lock(&thd->LOCK_thd_kill);
-  thd->set_killed(KILL_WAIT_TIMEOUT);
+  thd->set_killed_no_mutex(KILL_WAIT_TIMEOUT);
   c->priority= TP_PRIORITY_HIGH;
   post_kill_notification(thd);
   mysql_mutex_unlock(&thd->LOCK_thd_kill);

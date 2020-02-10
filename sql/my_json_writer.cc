@@ -11,7 +11,7 @@
 
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
-   Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02111-1301 USA */
+   Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1335 USA */
 
 #include "mariadb.h"
 #include "sql_priv.h"
@@ -129,6 +129,13 @@ void Json_writer::add_ll(longlong val)
   add_unquoted_str(buf);
 }
 
+void Json_writer::add_ull(ulonglong val)
+{
+  char buf[64];
+  my_snprintf(buf, sizeof(buf), "%llu", val);
+  add_unquoted_str(buf);
+}
+
 
 /* Add a memory size, printing in Kb, Kb, Gb if necessary */
 void Json_writer::add_size(longlong val)
@@ -221,7 +228,7 @@ bool Single_line_formatting_helper::on_add_member(const char *name)
       buf_ptr+=len;
       *(buf_ptr++)= 0;
 
-      line_len= owner->indent_level + len + 1;
+      line_len= owner->indent_level + (uint)len + 1;
       state= ADD_MEMBER;
       return true; // handled
     }
@@ -286,7 +293,7 @@ bool Single_line_formatting_helper::on_add_str(const char *str)
     memcpy(buf_ptr, str, len);
     buf_ptr+=len;
     *(buf_ptr++)= 0;
-    line_len += len + 4;
+    line_len += (uint)len + 4;
     return true; // handled
   }
 

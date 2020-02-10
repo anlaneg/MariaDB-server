@@ -11,7 +11,7 @@
 
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
-   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA */
+   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1335  USA */
 
 #include "mariadb.h"
 #include "sql_priv.h"
@@ -49,11 +49,11 @@ Event_db_repository *Event_worker_thread::db_repository;
 
 
 static
-const LEX_STRING scheduler_states_names[] =
+const LEX_CSTRING scheduler_states_names[] =
 {
-  { C_STRING_WITH_LEN("INITIALIZED") },
-  { C_STRING_WITH_LEN("RUNNING") },
-  { C_STRING_WITH_LEN("STOPPING") }
+  { STRING_WITH_LEN("INITIALIZED") },
+  { STRING_WITH_LEN("RUNNING") },
+  { STRING_WITH_LEN("STOPPING") }
 };
 
 struct scheduler_param {

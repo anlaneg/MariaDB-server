@@ -16,7 +16,7 @@ enum enum_server_command{ SERVCOM_A, SERVCOM_B };
 #include "plugin_audit_v4.h"
 
 extern void auditing(MYSQL_THD thd, unsigned int event_class, const void *ev);
-extern int get_db_mysql57(MYSQL_THD thd, char **name, int *len);
+extern int get_db_mysql57(MYSQL_THD thd, char **name, size_t *len);
 
 
 struct mysql_event_general_302
@@ -35,7 +35,7 @@ struct mysql_event_general_302
   unsigned long long general_rows;
   unsigned long long query_id;
   char *database;
-  int database_length;
+  size_t database_length;
 };
 
 
@@ -57,11 +57,11 @@ static int auditing_v4(MYSQL_THD thd, mysql_event_class_t class, const void *ev)
     ev_302.general_error_code= event->general_error_code;
     ev_302.general_thread_id= event->general_thread_id;
     ev_302.general_user= event->general_user.str;
-    ev_302.general_user_length= event->general_user.length;
+    ev_302.general_user_length= (unsigned int)event->general_user.length;
     ev_302.general_command= event->general_command.str;
-    ev_302.general_command_length= event->general_command.length;
+    ev_302.general_command_length= (unsigned int)event->general_command.length;
     ev_302.general_query= event->general_query.str;
-    ev_302.general_query_length= event->general_query.length;
+    ev_302.general_query_length= (unsigned int)event->general_query.length;
     ev_302.general_charset= event->general_charset;
     ev_302.general_time= event->general_time;
     ev_302.general_rows= event->general_rows;
