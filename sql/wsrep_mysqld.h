@@ -19,6 +19,7 @@
 #include <wsrep.h>
 
 #ifdef WITH_WSREP
+extern bool WSREP_ON_;
 
 #include <mysql/plugin.h>
 #include "mysql/service_wsrep.h"
@@ -98,6 +99,7 @@ extern ulong       wsrep_running_applier_threads;
 extern ulong       wsrep_running_rollbacker_threads;
 extern bool        wsrep_new_cluster;
 extern bool        wsrep_gtid_mode;
+extern my_bool     wsrep_strict_ddl;
 
 enum enum_wsrep_reject_types {
   WSREP_REJECT_NONE,    /* nothing rejected */
@@ -108,7 +110,7 @@ enum enum_wsrep_reject_types {
 enum enum_wsrep_OSU_method {
     WSREP_OSU_TOI,
     WSREP_OSU_RSU,
-    WSREP_OSU_NONE,
+    WSREP_OSU_NONE
 };
 
 enum enum_wsrep_sync_wait {
@@ -213,15 +215,12 @@ extern void wsrep_prepend_PATH (const char* path);
 
 /* Other global variables */
 extern wsrep_seqno_t wsrep_locked_seqno;
-#define WSREP_ON                         \
-  ((global_system_variables.wsrep_on) && \
-   wsrep_provider                     && \
-   strcmp(wsrep_provider, WSREP_NONE))
+#define WSREP_ON unlikely(WSREP_ON_)
 
 /* use xxxxxx_NNULL macros when thd pointer is guaranteed to be non-null to
  * avoid compiler warnings (GCC 6 and later) */
-#define WSREP_NNULL(thd) \
-  (WSREP_ON && thd->variables.wsrep_on)
+
+#define WSREP_NNULL(thd) (WSREP_ON && thd->variables.wsrep_on)
 
 #define WSREP(thd) \
   (thd && WSREP_NNULL(thd))
@@ -242,13 +241,9 @@ extern wsrep_seqno_t wsrep_locked_seqno;
    ((wsrep_forced_binlog_format != BINLOG_FORMAT_UNSPEC) ?     \
    wsrep_forced_binlog_format : my_format)
 
-// prefix all messages with "WSREP"
-#define WSREP_LOG(fun, ...)                                       \
-    do {                                                          \
-        char msg[1024]= {'\0'};                                  \
-        snprintf(msg, sizeof(msg) - 1, ## __VA_ARGS__);           \
-        fun("WSREP: %s", msg);                                    \
-    } while(0)
+/* A wrapper function for MySQL log functions. The call will prefix
+   the log message with WSREP and forward the result buffer to fun. */
+void WSREP_LOG(void (*fun)(const char* fmt, ...), const char* fmt, ...);
 
 #define WSREP_DEBUG(...)                                                \
     if (wsrep_debug)     sql_print_information( "WSREP: " __VA_ARGS__)
@@ -360,9 +355,15 @@ extern PSI_thread_key key_wsrep_sst_donor_monitor;
 
 struct TABLE_LIST;
 class Alter_info;
+struct HA_CREATE_INFO;
+
 int wsrep_to_isolation_begin(THD *thd, const char *db_, const char *table_,
                              const TABLE_LIST* table_list,
-                             Alter_info* alter_info= NULL);
+                             const Alter_info* alter_info= NULL,
+                             const HA_CREATE_INFO* create_info= NULL);
+
+bool wsrep_should_replicate_ddl(THD* thd, const enum legacy_db_type db_type);
+bool wsrep_should_replicate_ddl_iterate(THD* thd, const TABLE_LIST* table_list);
 
 void wsrep_to_isolation_end(THD *thd);
 
@@ -527,11 +528,6 @@ extern void
 wsrep_handle_mdl_conflict(MDL_context *requestor_ctx,
                           MDL_ticket *ticket,
                           const MDL_key *key);
-IO_CACHE * get_trans_log(THD * thd);
-bool wsrep_trans_cache_is_empty(THD *thd);
-void thd_binlog_flush_pending_rows_event(THD *thd, bool stmt_end);
-void thd_binlog_rollback_stmt(THD * thd);
-void thd_binlog_trx_reset(THD * thd);
 
 enum wsrep_thread_type {
   WSREP_APPLIER_THREAD=1,
@@ -613,9 +609,9 @@ enum wsrep::streaming_context::fragment_unit wsrep_fragment_unit(ulong unit);
 /* These macros are needed to compile MariaDB without WSREP support
  * (e.g. embedded) */
 
+#define WSREP_ON false
 #define WSREP(T)  (0)
 #define WSREP_NNULL(T) (0)
-#define WSREP_ON  (0)
 #define WSREP_EMULATE_BINLOG(thd) (0)
 #define WSREP_EMULATE_BINLOG_NNULL(thd) (0)
 #define WSREP_BINLOG_FORMAT(my_format) ((ulong)my_format)

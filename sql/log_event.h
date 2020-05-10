@@ -222,6 +222,7 @@ class String;
 #define GTID_HEADER_LEN       19
 #define GTID_LIST_HEADER_LEN   4
 #define START_ENCRYPTION_HEADER_LEN 0
+#define XA_PREPARE_HEADER_LEN 0
 
 /* 
   Max number of possible extra bytes in a replication event compared to a
@@ -523,11 +524,11 @@ class String;
 */
 #define OPTIONS_WRITTEN_TO_BIN_LOG \
   (OPTION_AUTO_IS_NULL | OPTION_NO_FOREIGN_KEY_CHECKS |  \
-   OPTION_RELAXED_UNIQUE_CHECKS | OPTION_NOT_AUTOCOMMIT)
+   OPTION_RELAXED_UNIQUE_CHECKS | OPTION_NOT_AUTOCOMMIT | OPTION_IF_EXISTS)
 
 /* Shouldn't be defined before */
 #define EXPECTED_OPTIONS \
-  ((1ULL << 14) | (1ULL << 26) | (1ULL << 27) | (1ULL << 19))
+  ((1ULL << 14) | (1ULL << 26) | (1ULL << 27) | (1ULL << 19) | (1ULL << 28))
 
 #if OPTIONS_WRITTEN_TO_BIN_LOG != EXPECTED_OPTIONS
 #error OPTIONS_WRITTEN_TO_BIN_LOG must NOT change their values!
@@ -664,6 +665,7 @@ enum Log_event_type
   /* MySQL 5.7 events, ignored by MariaDB */
   TRANSACTION_CONTEXT_EVENT= 36,
   VIEW_CHANGE_EVENT= 37,
+  /* not ignored */
   XA_PREPARE_LOG_EVENT= 38,
 
   /*
@@ -930,6 +932,8 @@ typedef struct st_print_event_info
 
 class Log_event_writer
 {
+  /* Log_event_writer is updated when ctx is set */
+  int (Log_event_writer::*encrypt_or_write)(const uchar *pos, size_t len);
 public:
   ulonglong bytes_written;
   void *ctx;         ///< Encryption context or 0 if no encryption is needed
@@ -940,10 +944,14 @@ public:
   int write_footer();
   my_off_t pos() { return my_b_safe_tell(file); }
   void add_status(enum_logged_status status);
+  void set_incident();
+  void set_encrypted_writer()
+  { encrypt_or_write= &Log_event_writer::encrypt_and_write; }
 
   Log_event_writer(IO_CACHE *file_arg, binlog_cache_data *cache_data_arg,
                    Binlog_crypt_data *cr= 0)
-  : bytes_written(0), ctx(0),
+    :encrypt_or_write(&Log_event_writer::write_internal),
+    bytes_written(0), ctx(0),
     file(file_arg), cache_data(cache_data_arg), crypto(cr) { }
 
 private:
@@ -1357,7 +1365,8 @@ public:
 
   static void *operator new(size_t size)
   {
-    return (void*) my_malloc((uint)size, MYF(MY_WME|MY_FAE));
+    extern PSI_memory_key key_memory_log_event;
+    return my_malloc(key_memory_log_event, size, MYF(MY_WME|MY_FAE));
   }
 
   static void operator delete(void *ptr, size_t)
@@ -3022,6 +3031,32 @@ private:
 #endif
 };
 
+
+class Xid_apply_log_event: public Log_event
+{
+public:
+#ifdef MYSQL_SERVER
+  Xid_apply_log_event(THD* thd_arg):
+   Log_event(thd_arg, 0, TRUE) {}
+#endif
+  Xid_apply_log_event(const char* buf,
+                const Format_description_log_event *description_event):
+    Log_event(buf, description_event) {}
+
+  ~Xid_apply_log_event() {}
+  bool is_valid() const { return 1; }
+private:
+#if defined(MYSQL_SERVER) && defined(HAVE_REPLICATION)
+  virtual int do_commit()= 0;
+  virtual int do_apply_event(rpl_group_info *rgi);
+  int do_record_gtid(THD *thd, rpl_group_info *rgi, bool in_trans,
+                     void **out_hton);
+  enum_skip_reason do_shall_skip(rpl_group_info *rgi);
+  virtual const char* get_query()= 0;
+#endif
+};
+
+
 /**
   @class Xid_log_event
 
@@ -3034,18 +3069,22 @@ private:
 typedef ulonglong my_xid; // this line is the same as in handler.h
 #endif
 
-class Xid_log_event: public Log_event
+class Xid_log_event: public Xid_apply_log_event
 {
- public:
-   my_xid xid;
+public:
+  my_xid xid;
 
 #ifdef MYSQL_SERVER
   Xid_log_event(THD* thd_arg, my_xid x, bool direct):
-   Log_event(thd_arg, 0, TRUE), xid(x)
+   Xid_apply_log_event(thd_arg), xid(x)
    {
      if (direct)
        cache_type= Log_event::EVENT_NO_CACHE;
    }
+  const char* get_query()
+  {
+    return "COMMIT /* implicit, from Xid_log_event */";
+  }
 #ifdef HAVE_REPLICATION
   void pack_info(Protocol* protocol);
 #endif /* HAVE_REPLICATION */
@@ -3061,14 +3100,171 @@ class Xid_log_event: public Log_event
 #ifdef MYSQL_SERVER
   bool write();
 #endif
-  bool is_valid() const { return 1; }
 
 private:
 #if defined(MYSQL_SERVER) && defined(HAVE_REPLICATION)
-  virtual int do_apply_event(rpl_group_info *rgi);
-  enum_skip_reason do_shall_skip(rpl_group_info *rgi);
+  int do_commit();
 #endif
 };
+
+
+/**
+  @class XA_prepare_log_event
+
+  Similar to Xid_log_event except that
+  - it is specific to XA transaction
+  - it carries out the prepare logics rather than the final committing
+    when @c one_phase member is off. The latter option is only for
+    compatibility with the upstream.
+
+  From the groupping perspective the event finalizes the current
+  "prepare" group that is started with Gtid_log_event similarly to the
+  regular replicated transaction.
+*/
+
+/**
+  Function serializes XID which is characterized by by four last arguments
+  of the function.
+  Serialized XID is presented in valid hex format and is returned to
+  the caller in a buffer pointed by the first argument.
+  The buffer size provived by the caller must be not less than
+  8 + 2 * XIDDATASIZE +  4 * sizeof(XID::formatID) + 1, see
+  {MYSQL_,}XID definitions.
+
+  @param buf  pointer to a buffer allocated for storing serialized data
+  @param fmt  formatID value
+  @param gln  gtrid_length value
+  @param bln  bqual_length value
+  @param dat  data value
+
+  @return  the value of the buffer pointer
+*/
+
+inline char *serialize_xid(char *buf, long fmt, long gln, long bln,
+                           const char *dat)
+{
+  int i;
+  char *c= buf;
+  /*
+    Build a string consisting of the hex format representation of XID
+    as passed through fmt,gln,bln,dat argument:
+      X'hex11hex12...hex1m',X'hex21hex22...hex2n',11
+    and store it into buf.
+  */
+  c[0]= 'X';
+  c[1]= '\'';
+  c+= 2;
+  for (i= 0; i < gln; i++)
+  {
+    c[0]=_dig_vec_lower[((uchar*) dat)[i] >> 4];
+    c[1]=_dig_vec_lower[((uchar*) dat)[i] & 0x0f];
+    c+= 2;
+  }
+  c[0]= '\'';
+  c[1]= ',';
+  c[2]= 'X';
+  c[3]= '\'';
+  c+= 4;
+
+  for (; i < gln + bln; i++)
+  {
+    c[0]=_dig_vec_lower[((uchar*) dat)[i] >> 4];
+    c[1]=_dig_vec_lower[((uchar*) dat)[i] & 0x0f];
+    c+= 2;
+  }
+  c[0]= '\'';
+  sprintf(c+1, ",%lu", fmt);
+
+ return buf;
+}
+
+/*
+  The size of the string containing serialized Xid representation
+  is computed as a sum of
+  eight as the number of formatting symbols (X'',X'',)
+  plus 2 x XIDDATASIZE (2 due to hex format),
+  plus space for decimal digits of XID::formatID,
+  plus one for 0x0.
+*/
+static const uint ser_buf_size=
+  8 + 2 * MYSQL_XIDDATASIZE + 4 * sizeof(long) + 1;
+
+struct event_mysql_xid_t :  MYSQL_XID
+{
+  char buf[ser_buf_size];
+  char *serialize()
+  {
+    return serialize_xid(buf, formatID, gtrid_length, bqual_length, data);
+  }
+};
+
+#ifndef MYSQL_CLIENT
+struct event_xid_t : XID
+{
+  char buf[ser_buf_size];
+
+  char *serialize(char *buf_arg)
+  {
+    return serialize_xid(buf_arg, formatID, gtrid_length, bqual_length, data);
+  }
+  char *serialize()
+  {
+    return serialize(buf);
+  }
+};
+#endif
+
+class XA_prepare_log_event: public Xid_apply_log_event
+{
+protected:
+
+  /* Constant contributor to subheader in write() by members of XID struct. */
+  static const int xid_subheader_no_data= 12;
+  event_mysql_xid_t m_xid;
+  void *xid;
+  bool one_phase;
+
+public:
+#ifdef MYSQL_SERVER
+  XA_prepare_log_event(THD* thd_arg, XID *xid_arg, bool one_phase_arg):
+    Xid_apply_log_event(thd_arg), xid(xid_arg), one_phase(one_phase_arg)
+  {
+    cache_type= Log_event::EVENT_NO_CACHE;
+  }
+#ifdef HAVE_REPLICATION
+  void pack_info(Protocol* protocol);
+#endif /* HAVE_REPLICATION */
+#else
+  bool print(FILE* file, PRINT_EVENT_INFO* print_event_info);
+#endif
+  XA_prepare_log_event(const char* buf,
+                       const Format_description_log_event *description_event);
+  ~XA_prepare_log_event() {}
+  Log_event_type get_type_code() { return XA_PREPARE_LOG_EVENT; }
+  bool is_valid() const { return m_xid.formatID != -1; }
+  int get_data_size()
+  {
+    return xid_subheader_no_data + m_xid.gtrid_length + m_xid.bqual_length;
+  }
+
+#ifdef MYSQL_SERVER
+  bool write();
+#endif
+
+private:
+#if defined(MYSQL_SERVER) && defined(HAVE_REPLICATION)
+  char query[sizeof("XA COMMIT ONE PHASE") + 1 + ser_buf_size];
+  int do_commit();
+  const char* get_query()
+  {
+    sprintf(query,
+            (one_phase ? "XA COMMIT %s ONE PHASE" : "XA PREPARE %s"),
+            m_xid.serialize());
+    return query;
+  }
+#endif
+};
+
 
 /**
   @class User_var_log_event
@@ -3382,8 +3578,12 @@ public:
   uint64 seq_no;
   uint64 commit_id;
   uint32 domain_id;
+#ifdef MYSQL_SERVER
+  event_xid_t xid;
+#else
+  event_mysql_xid_t xid;
+#endif
   uchar flags2;
-
   /* Flags2. */
 
   /* FL_STANDALONE is set when there is no terminating COMMIT event. */
@@ -3410,6 +3610,10 @@ public:
   static const uchar FL_WAITED= 16;
   /* FL_DDL is set for event group containing DDL. */
   static const uchar FL_DDL= 32;
+  /* FL_PREPARED_XA is set for XA transaction. */
+  static const uchar FL_PREPARED_XA= 64;
+  /* FL_"COMMITTED or ROLLED-BACK"_XA is set for XA transaction. */
+  static const uchar FL_COMPLETED_XA= 128;
 
 #ifdef MYSQL_SERVER
   Gtid_log_event(THD *thd_arg, uint64 seq_no, uint32 domain_id, bool standalone,
@@ -4880,6 +5084,12 @@ public:
 
 #if defined(MYSQL_SERVER) && defined(HAVE_REPLICATION)
   virtual uint8 get_trg_event_map()= 0;
+
+  inline bool do_invoke_trigger()
+  {
+    return (slave_run_triggers_for_rbr && !master_had_triggers) ||
+            slave_run_triggers_for_rbr == SLAVE_RUN_TRIGGERS_FOR_RBR_ENFORCE;
+  }
 #endif
 
 protected:
@@ -5362,11 +5572,12 @@ public:
   Incident_log_event(THD *thd_arg, Incident incident, const LEX_CSTRING *msg)
     : Log_event(thd_arg, 0, FALSE), m_incident(incident)
   {
+    extern PSI_memory_key key_memory_Incident_log_event_message;
     DBUG_ENTER("Incident_log_event::Incident_log_event");
     DBUG_PRINT("enter", ("m_incident: %d", m_incident));
     m_message.length= 0;
-    if (unlikely(!(m_message.str= (char*) my_malloc(msg->length+1,
-                                                    MYF(MY_WME)))))
+    if (!(m_message.str= (char*) my_malloc(key_memory_Incident_log_event_message,
+                                           msg->length + 1, MYF(MY_WME))))
     {
       /* Mark this event invalid */
       m_incident= INCIDENT_NONE;

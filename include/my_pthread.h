@@ -1,5 +1,5 @@
 /* Copyright (c) 2000, 2014, Oracle and/or its affiliates.
-   Copyright (c) 2009, 2019, MariaDB Corporation.
+   Copyright (c) 2009, 2020, MariaDB Corporation.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -22,8 +22,6 @@
 #ifndef ETIME
 #define ETIME ETIMEDOUT				/* For FreeBSD */
 #endif
-
-#include <my_atomic.h>
 
 #ifdef  __cplusplus
 #define EXTERNC extern "C"
@@ -116,7 +114,7 @@ int pthread_cancel(pthread_t thread);
 #define pthread_key_create(A,B) ((*A=TlsAlloc())==0xFFFFFFFF)
 #define pthread_key_delete(A) TlsFree(A)
 #define my_pthread_setspecific_ptr(T,V) (!TlsSetValue((T),(V)))
-#define pthread_setspecific(A,B) (!TlsSetValue((A),(B)))
+#define pthread_setspecific(A,B) (!TlsSetValue((A),(LPVOID)(B)))
 #define pthread_getspecific(A) (TlsGetValue(A))
 #define my_pthread_getspecific(T,A) ((T) TlsGetValue(A))
 #define my_pthread_getspecific_ptr(T,V) ((T) TlsGetValue(V))
@@ -353,31 +351,17 @@ size_t my_setstacksize(pthread_attr_t *attr, size_t stacksize);
 #endif /* !cmp_timespec */
 
 #ifndef set_timespec_time_nsec
-#define set_timespec_time_nsec(ABSTIME,NSEC) do {    \
-  ulonglong _now_= (NSEC);                             \
-  (ABSTIME).MY_tv_sec=  (_now_ / 1000000000ULL);       \
-  (ABSTIME).MY_tv_nsec= (_now_ % 1000000000ULL);       \
+#define set_timespec_time_nsec(ABSTIME,NSEC) do {		\
+  ulonglong _now_= (NSEC);					\
+  (ABSTIME).MY_tv_sec=  (time_t) (_now_ / 1000000000ULL);	\
+  (ABSTIME).MY_tv_nsec= (ulong) (_now_ % 1000000000UL);		\
 } while(0)
 #endif /* !set_timespec_time_nsec */
 
 #ifdef MYSQL_CLIENT
 #define _current_thd() NULL
-#elif defined(_WIN32)
-#ifdef __cplusplus
-extern "C"
-#endif
-MYSQL_THD _current_thd_noinline();
-#define _current_thd() _current_thd_noinline()
 #else
-/*
-  THR_THD is a key which will be used to set/get THD* for a thread,
-  using my_pthread_setspecific_ptr()/my_thread_getspecific_ptr().
-*/
-extern pthread_key(MYSQL_THD, THR_THD);
-static inline MYSQL_THD _current_thd(void)
-{
-  return my_pthread_getspecific_ptr(MYSQL_THD,THR_THD);
-}
+MYSQL_THD _current_thd();
 #endif
 
 /* safe_mutex adds checking to mutex for easier debugging */
@@ -684,7 +668,7 @@ extern void my_mutex_end(void);
   We need to have at least 256K stack to handle calls to myisamchk_init()
   with the current number of keys and key parts.
 */
-#ifdef __SANITIZE_ADDRESS__
+#if defined(__SANITIZE_ADDRESS__) || defined(WITH_UBSAN)
 #define DEFAULT_THREAD_STACK	(383*1024L) /* 392192 */
 #else
 #define DEFAULT_THREAD_STACK	(292*1024L) /* 299008 */
@@ -732,25 +716,15 @@ struct st_my_thread_var
 #endif
 };
 
-extern struct st_my_thread_var *_my_thread_var(void) __attribute__ ((const));
+struct st_my_thread_var *_my_thread_var(void);
 extern void **my_thread_var_dbug(void);
 extern safe_mutex_t **my_thread_var_mutex_in_use(void);
 extern uint my_thread_end_wait_time;
 extern my_bool safe_mutex_deadlock_detector;
 #define my_thread_var (_my_thread_var())
 #define my_errno my_thread_var->thr_errno
-/*
-  Keep track of shutdown,signal, and main threads so that my_end() will not
-  report errors with them
-*/
+int set_mysys_var(struct st_my_thread_var *mysys_var);
 
-/* Which kind of thread library is in use */
-
-#define THD_LIB_OTHER 1
-#define THD_LIB_NPTL  2
-#define THD_LIB_LT    4
-
-extern uint thd_lib_detected;
 
 /*
   thread_safe_xxx functions are for critical statistic or counters.
@@ -807,26 +781,6 @@ extern uint thd_lib_detected;
 #define statistic_add(V,C,L)     (V)+=(C)
 #define statistic_sub(V,C,L)     (V)-=(C)
 #endif /* SAFE_STATISTICS */
-
-static inline void thread_safe_increment32(int32 *value)
-{
-  (void) my_atomic_add32_explicit(value, 1, MY_MEMORY_ORDER_RELAXED);
-}
-
-static inline void thread_safe_decrement32(int32 *value)
-{
-  (void) my_atomic_add32_explicit(value, -1, MY_MEMORY_ORDER_RELAXED);
-}
-
-static inline void thread_safe_increment64(int64 *value)
-{
-  (void) my_atomic_add64_explicit(value, 1, MY_MEMORY_ORDER_RELAXED);
-}
-
-static inline void thread_safe_decrement64(int64 *value)
-{
-  (void) my_atomic_add64_explicit(value, -1, MY_MEMORY_ORDER_RELAXED);
-}
 
 /*
   No locking needed, the counter is owned by the thread

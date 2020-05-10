@@ -24,7 +24,6 @@
 #include "rpl_mi.h"
 #include "rpl_rli.h"
 #include "sql_repl.h"
-#include "sql_acl.h"                            // SUPER_ACL
 #include "log_event.h"
 #include "rpl_filter.h"
 #include <my_dir.h>
@@ -1221,7 +1220,8 @@ check_slave_start_position(binlog_send_info *info, const char **errormsg,
       if (!delete_list)
       {
         if (!(delete_list= (slave_connection_state::entry **)
-              my_malloc(sizeof(*delete_list) * st->hash.records, MYF(MY_WME))))
+              my_malloc(PSI_INSTRUMENT_ME,
+                        sizeof(*delete_list) * st->hash.records, MYF(MY_WME))))
         {
           *errormsg= "Out of memory while checking slave start position";
           err= ER_OUT_OF_RESOURCES;
@@ -1283,8 +1283,9 @@ gtid_find_binlog_file(slave_connection_state *state, char *out_name,
   const char *errormsg= NULL;
   char buf[FN_REFLEN];
 
-  init_alloc_root(&memroot, "gtid_find_binlog_file",
-                  8192, 0, MYF(MY_THREAD_SPECIFIC));
+  init_alloc_root(PSI_INSTRUMENT_ME, &memroot,
+                  10*(FN_REFLEN+sizeof(binlog_file_entry)), 0,
+                  MYF(MY_THREAD_SPECIFIC));
   if (!(list= get_binlog_list(&memroot)))
   {
     errormsg= "Out of memory while looking for GTID position in binlog";
@@ -1651,7 +1652,7 @@ is_until_reached(binlog_send_info *info, ulong *ev_offset,
       return false;
     break;
   case GTID_UNTIL_STOP_AFTER_TRANSACTION:
-    if (event_type != XID_EVENT &&
+    if (event_type != XID_EVENT && event_type != XA_PREPARE_LOG_EVENT &&
         (event_type != QUERY_EVENT ||    /* QUERY_COMPRESSED_EVENT would never be commmit or rollback */
          !Query_log_event::peek_is_commit_rollback
                (info->packet->ptr()+*ev_offset,
@@ -1886,7 +1887,7 @@ send_event_to_slave(binlog_send_info *info, Log_event_type event_type,
       info->gtid_skip_group= GTID_SKIP_NOT;
     return NULL;
   case GTID_SKIP_TRANSACTION:
-    if (event_type == XID_EVENT ||
+    if (event_type == XID_EVENT || event_type == XA_PREPARE_LOG_EVENT ||
         (event_type == QUERY_EVENT && /* QUERY_COMPRESSED_EVENT would never be commmit or rollback */
          Query_log_event::peek_is_commit_rollback(packet->ptr() + ev_offset,
                                                   len - ev_offset,
@@ -3079,7 +3080,7 @@ int start_slave(THD* thd , Master_info* mi,  bool net_report)
   char relay_log_info_file_tmp[FN_REFLEN];
   DBUG_ENTER("start_slave");
 
-  if (check_access(thd, SUPER_ACL, any_db, NULL, NULL, 0, 0))
+  if (check_global_access(thd, PRIV_STMT_START_SLAVE))
     DBUG_RETURN(-1);
 
   create_logfile_name_with_suffix(master_info_file_tmp,
@@ -3282,7 +3283,7 @@ int stop_slave(THD* thd, Master_info* mi, bool net_report )
   DBUG_ENTER("stop_slave");
   DBUG_PRINT("enter",("Connection: %s", mi->connection_name.str));
 
-  if (check_access(thd, SUPER_ACL, any_db, NULL, NULL, 0, 0))
+  if (check_global_access(thd, PRIV_STMT_STOP_SLAVE))
     DBUG_RETURN(-1);
   THD_STAGE_INFO(thd, stage_killing_slave);
   int thread_mask;
@@ -3940,7 +3941,7 @@ int reset_master(THD* thd, rpl_gtid *init_state, uint32 init_state_len,
   }
 
 #ifdef WITH_WSREP
-  if (WSREP_ON)
+  if (WSREP(thd))
   {
     /* RESET MASTER will initialize GTID sequence, and that would happen locally
        in this node, so better reject it
@@ -4215,7 +4216,7 @@ void show_binlog_info_get_fields(THD *thd, List<Item> *field_list)
 
 
 /**
-  Execute a SHOW MASTER STATUS statement.
+  Execute a SHOW BINLOG STATUS statement.
 
   @param thd Pointer to THD object for the client thread executing the
   statement.
@@ -4307,8 +4308,7 @@ bool show_binlogs(THD* thd)
                             Protocol::SEND_NUM_ROWS | Protocol::SEND_EOF))
     DBUG_RETURN(TRUE);
 
-  init_alloc_root(&mem_root, "binlog_file_list", 8192, 0,
-                  MYF(MY_THREAD_SPECIFIC));
+  init_alloc_root(PSI_INSTRUMENT_ME, &mem_root, 8192, 0, MYF(MY_THREAD_SPECIFIC));
 retry:
   /*
     The current mutex handling here is to ensure we get the current log position

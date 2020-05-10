@@ -199,7 +199,7 @@ enum ESphRankMode
 	SPH_RANK_PROXIMITY_BM25		= 0,	///< default mode, phrase proximity major factor and BM25 minor one
 	SPH_RANK_BM25				= 1,	///< statistical mode, BM25 ranking only (faster but worse quality)
 	SPH_RANK_NONE				= 2,	///< no ranking, all matches get a weight of 1
-	SPH_RANK_WORDCOUNT			= 3,	///< simple word-count weighting, rank is a weighted sum of per-field keyword occurence counts
+	SPH_RANK_WORDCOUNT			= 3,	///< simple word-count weighting, rank is a weighted sum of per-field keyword occurrence counts
 	SPH_RANK_PROXIMITY			= 4,	///< phrase proximity
 	SPH_RANK_MATCHANY			= 5,	///< emulate old match-any weighting
 	SPH_RANK_FIELDMASK			= 6,	///< sets bits where there were matches
@@ -596,6 +596,7 @@ private:
 
 	struct Override_t
 	{
+		Override_t() : m_dIds(PSI_INSTRUMENT_MEM), m_dValues(PSI_INSTRUMENT_MEM) {}
 		union Value_t
 		{
 			uint32		m_uValue;
@@ -737,8 +738,9 @@ static int sphinx_init_func ( void * p )
 	{
 		sphinx_init = 1;
 		void ( pthread_mutex_init ( &sphinx_mutex, MY_MUTEX_INIT_FAST ) );
-		sphinx_hash_init ( &sphinx_open_tables, system_charset_info, 32, 0, 0,
-			sphinx_get_key, 0, 0 );
+                sphinx_hash_init ( PSI_NOT_INSTRUMENTED, &sphinx_open_tables,
+                                   system_charset_info, 32, 0, 0,
+                                   sphinx_get_key, 0, 0 );
 
 		#if MYSQL_VERSION_ID > 50100
 		handlerton * hton = (handlerton*) p;
@@ -1303,6 +1305,7 @@ CSphSEQuery::CSphSEQuery ( const char * sQuery, int iLength, const char * sIndex
 	, m_fGeoLongitude ( 0.0f )
 	, m_sComment ( (char*) "" )
 	, m_sSelect ( (char*) "*" )
+        , m_dOverrides (PSI_INSTRUMENT_MEM)
 
 	, m_pBuf ( NULL )
 	, m_pCur ( NULL )
@@ -3357,7 +3360,7 @@ int ha_sphinx::rename_table ( const char *, const char * )
 // if start_key matches any rows.
 //
 // Called from opt_range.cc by check_quick_keys().
-ha_rows ha_sphinx::records_in_range ( uint, key_range *, key_range * )
+ha_rows ha_sphinx::records_in_range ( uint, const key_range *, const key_range *, page_range *)
 {
 	SPH_ENTER_METHOD();
 	SPH_RET(3); // low number to force index usage

@@ -112,10 +112,10 @@ CREATE DEFINER='mysqltest_inv'@'localhost'
   TRIGGER trg1 BEFORE INSERT ON t1
 FOR EACH ROW
 SET @new_sum = 0;
-ERROR 42000: Access denied; you need (at least one of) the SUPER privilege(s) for this operation
+ERROR 42000: Access denied; you need (at least one of) the SUPER, SET USER privilege(s) for this operation
 connection default;
 use mysqltest_db1;
-GRANT SUPER ON *.* TO mysqltest_dfn@localhost;
+GRANT SET USER ON *.* TO mysqltest_dfn@localhost;
 disconnect wl2818_definer_con;
 connect  wl2818_definer_con,localhost,mysqltest_dfn,,mysqltest_db1;
 connection wl2818_definer_con;
@@ -194,8 +194,8 @@ use mysqltest_db1;
 GRANT DELETE ON mysqltest_db1.* TO mysqltest_u1@localhost;
 SHOW GRANTS FOR mysqltest_u1@localhost;
 Grants for mysqltest_u1@localhost
-GRANT USAGE ON *.* TO 'mysqltest_u1'@'localhost'
-GRANT DELETE, TRIGGER ON `mysqltest_db1`.* TO 'mysqltest_u1'@'localhost'
+GRANT USAGE ON *.* TO `mysqltest_u1`@`localhost`
+GRANT DELETE, TRIGGER ON `mysqltest_db1`.* TO `mysqltest_u1`@`localhost`
 connection bug15166_u1_con;
 use mysqltest_db1;
 CREATE TRIGGER t1_trg_after_delete AFTER DELETE ON t1

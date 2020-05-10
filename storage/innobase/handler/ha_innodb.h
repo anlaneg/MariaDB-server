@@ -184,9 +184,10 @@ public:
 	int start_stmt(THD *thd, thr_lock_type lock_type) override;
 
 	ha_rows records_in_range(
-		uint			inx,
-		key_range*		min_key,
-		key_range*		max_key) override;
+                uint                    inx,
+                const key_range*        min_key,
+                const key_range*        max_key,
+                page_range*             pages) override;
 
 	ha_rows estimate_rows_upper_bound() override;
 
@@ -263,8 +264,6 @@ public:
 		uint			key_length,
 		qc_engine_callback*	call_back,
 		ulonglong*		engine_data) override;
-
-	bool primary_key_is_clustered() override;
 
 	int cmp_ref(const uchar* ref1, const uchar* ref2) override;
 
@@ -445,6 +444,11 @@ public:
 	/** @return whether innodb_strict_mode is active */
 	bool is_innodb_strict_mode()
 	{ return is_innodb_strict_mode(m_user_thd); }
+	Compare_keys
+	compare_key_parts(const Field& old_field,
+			  const Column_definition& new_field,
+			  const KEY_PART_INFO& old_part,
+			  const KEY_PART_INFO& new_part) const override;
 
 protected:
 	dberr_t innobase_get_autoinc(ulonglong* value);
@@ -968,3 +972,15 @@ ib_push_frm_error(
 @return true if index column length exceeds limit */
 MY_ATTRIBUTE((warn_unused_result))
 bool too_big_key_part_length(size_t max_field_len, const KEY& key);
+
+/** This function is used to rollback one X/Open XA distributed transaction
+which is in the prepared state
+
+@param[in] hton InnoDB handlerton
+@param[in] xid X/Open XA transaction identification
+
+@return 0 or error number */
+int innobase_rollback_by_xid(handlerton* hton, XID* xid);
+
+/** Free tablespace resources allocated. */
+void innobase_space_shutdown();

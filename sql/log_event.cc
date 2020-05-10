@@ -18,7 +18,7 @@
 
 #include "mariadb.h"
 #include "sql_priv.h"
-
+#include "handler.h"
 #ifndef MYSQL_CLIENT
 #include "unireg.h"
 #include "log_event.h"
@@ -55,6 +55,10 @@
 #include "zlib.h"
 
 #define my_b_write_string(A, B) my_b_write((A), (uchar*)(B), (uint) (sizeof(B) - 1))
+
+PSI_memory_key key_memory_log_event;
+PSI_memory_key key_memory_Incident_log_event_message;
+PSI_memory_key key_memory_Rows_query_log_event_rows_query;
 
 /**
   BINLOG_CHECKSUM variable.
@@ -410,7 +414,7 @@ query_event_uncompress(const Format_description_log_event *description_event,
   }
   else 
   {
-    new_dst = (char *)my_malloc(alloc_size, MYF(MY_WME));
+    new_dst = (char *)my_malloc(PSI_INSTRUMENT_ME, alloc_size, MYF(MY_WME));
     if (!new_dst)
       return 1;
 
@@ -532,7 +536,7 @@ row_log_event_uncompress(const Format_description_log_event *description_event,
   }
   else
   {
-    new_dst = (char *)my_malloc(alloc_size, MYF(MY_WME));
+    new_dst = (char *)my_malloc(PSI_INSTRUMENT_ME, alloc_size, MYF(MY_WME));
     if (!new_dst)
       return 1;
 
@@ -873,7 +877,7 @@ int Log_event::read_log_event(IO_CACHE* file, String* packet,
     */
     sz += MY_AES_BLOCK_SIZE;
 #endif
-    char *newpkt= (char*)my_malloc(sz, MYF(MY_WME));
+    char *newpkt= (char*)my_malloc(PSI_INSTRUMENT_ME, sz, MYF(MY_WME));
     if (!newpkt)
       DBUG_RETURN(LOG_READ_MEM);
     memcpy(newpkt, packet->ptr(), ev_offset);
@@ -1178,6 +1182,9 @@ Log_event* Log_event::read_log_event(const char* buf, uint event_len,
     case XID_EVENT:
       ev = new Xid_log_event(buf, fdle);
       break;
+    case XA_PREPARE_LOG_EVENT:
+      ev = new XA_prepare_log_event(buf, fdle);
+      break;
     case RAND_EVENT:
       ev = new Rand_log_event(buf, fdle);
       break;
@@ -1229,7 +1236,6 @@ Log_event* Log_event::read_log_event(const char* buf, uint event_len,
     case PREVIOUS_GTIDS_LOG_EVENT:
     case TRANSACTION_CONTEXT_EVENT:
     case VIEW_CHANGE_EVENT:
-    case XA_PREPARE_LOG_EVENT:
       ev= new Ignorable_log_event(buf, fdle,
                                   get_type_str((Log_event_type) event_type));
       break;
@@ -1429,7 +1435,7 @@ Query_log_event::Query_log_event(const char* buf, uint event_len,
                                  Log_event_type event_type)
   :Log_event(buf, description_event), data_buf(0), query(NullS),
    db(NullS), catalog_len(0), status_vars_len(0),
-   flags2_inited(0), sql_mode_inited(0), charset_inited(0),
+   flags2_inited(0), sql_mode_inited(0), charset_inited(0), flags2(0),
    auto_increment_increment(1), auto_increment_offset(1),
    time_zone_len(0), lc_time_names_number(0), charset_database_number(0),
    table_map_for_update(0), master_data_written(0)
@@ -1665,7 +1671,8 @@ Query_log_event::Query_log_event(const char* buf, uint event_len,
     */
 
 #if !defined(MYSQL_CLIENT) && defined(HAVE_QUERY_CACHE)
-  if (!(start= data_buf = (Log_event::Byte*) my_malloc(catalog_len + 1
+  if (!(start= data_buf = (Log_event::Byte*) my_malloc(PSI_INSTRUMENT_ME,
+                                                       catalog_len + 1
                                                     +  time_zone_len + 1
                                                     +  user.length + 1
                                                     +  host.length + 1
@@ -1676,7 +1683,8 @@ Query_log_event::Query_log_event(const char* buf, uint event_len,
                                                     +  QUERY_CACHE_FLAGS_SIZE,
                                                        MYF(MY_WME))))
 #else
-  if (!(start= data_buf = (Log_event::Byte*) my_malloc(catalog_len + 1
+  if (!(start= data_buf = (Log_event::Byte*) my_malloc(PSI_INSTRUMENT_ME,
+                                                       catalog_len + 1
                                                     +  time_zone_len + 1
                                                     +  user.length + 1
                                                     +  host.length + 1
@@ -1783,8 +1791,8 @@ Query_compressed_log_event::Query_compressed_log_event(const char *buf,
     }
 
     /* Reserve one byte for '\0' */
-    query_buf = (Log_event::Byte*)my_malloc(ALIGN_SIZE(un_len + 1),
-                                            MYF(MY_WME));
+    query_buf = (Log_event::Byte*)my_malloc(PSI_INSTRUMENT_ME,
+                                            ALIGN_SIZE(un_len + 1), MYF(MY_WME));
     if(query_buf &&
        !binlog_buf_uncompress(query, (char *)query_buf, q_len, &un_len))
     {
@@ -2033,7 +2041,8 @@ Format_description_log_event(uint8 binlog_ver, const char* server_ver)
     common_header_len= LOG_EVENT_HEADER_LEN;
     number_of_event_types= LOG_EVENT_TYPES;
     /* we'll catch my_malloc() error in is_valid() */
-    post_header_len=(uint8*) my_malloc(number_of_event_types*sizeof(uint8)
+    post_header_len=(uint8*) my_malloc(PSI_INSTRUMENT_ME,
+                                       number_of_event_types*sizeof(uint8)
                                        + BINLOG_CHECKSUM_ALG_DESC_LEN,
                                        MYF(0));
     /*
@@ -2066,6 +2075,7 @@ Format_description_log_event(uint8 binlog_ver, const char* server_ver)
       post_header_len[USER_VAR_EVENT-1]= USER_VAR_HEADER_LEN;
       post_header_len[FORMAT_DESCRIPTION_EVENT-1]= FORMAT_DESCRIPTION_HEADER_LEN;
       post_header_len[XID_EVENT-1]= XID_HEADER_LEN;
+      post_header_len[XA_PREPARE_LOG_EVENT-1]= XA_PREPARE_HEADER_LEN;
       post_header_len[BEGIN_LOAD_QUERY_EVENT-1]= BEGIN_LOAD_QUERY_HEADER_LEN;
       post_header_len[EXECUTE_LOAD_QUERY_EVENT-1]= EXECUTE_LOAD_QUERY_HEADER_LEN;
       /*
@@ -2159,8 +2169,8 @@ Format_description_log_event(uint8 binlog_ver, const char* server_ver)
       make the slave detect less corruptions).
     */
     number_of_event_types= FORMAT_DESCRIPTION_EVENT - 1;
-    post_header_len=(uint8*) my_malloc(number_of_event_types*sizeof(uint8),
-                                       MYF(0));
+    post_header_len=(uint8*) my_malloc(PSI_INSTRUMENT_ME,
+                                  number_of_event_types*sizeof(uint8), MYF(0));
     if (post_header_len)
     {
       post_header_len[START_EVENT_V3-1]= START_V3_HEADER_LEN;
@@ -2228,7 +2238,8 @@ Format_description_log_event(const char* buf,
                       common_header_len, number_of_event_types));
   /* If alloc fails, we'll detect it in is_valid() */
 
-  post_header_len= (uint8*) my_memdup((uchar*)buf+ST_COMMON_HEADER_LEN_OFFSET+1,
+  post_header_len= (uint8*) my_memdup(PSI_INSTRUMENT_ME,
+                                      buf+ST_COMMON_HEADER_LEN_OFFSET+1,
                                       number_of_event_types*
                                       sizeof(*post_header_len),
                                       MYF(0));
@@ -2517,7 +2528,7 @@ Rotate_log_event::Rotate_log_event(const char* buf, uint event_len,
   ident_len= (uint)(event_len - (LOG_EVENT_MINIMAL_HEADER_LEN + post_header_len));
   ident_offset= post_header_len;
   set_if_smaller(ident_len,FN_REFLEN-1);
-  new_log_ident= my_strndup(buf + ident_offset, (uint) ident_len, MYF(MY_WME));
+  new_log_ident= my_strndup(PSI_INSTRUMENT_ME, buf + ident_offset, (uint) ident_len, MYF(MY_WME));
   DBUG_PRINT("debug", ("new_log_ident: '%s'", new_log_ident));
   DBUG_VOID_RETURN;
 }
@@ -2544,7 +2555,7 @@ Binlog_checkpoint_log_event::Binlog_checkpoint_log_event(
   binlog_file_len= uint4korr(buf);
   if (event_len - (header_size + post_header_len) < binlog_file_len)
     return;
-  binlog_file_name= my_strndup(buf + post_header_len, binlog_file_len,
+  binlog_file_name= my_strndup(PSI_INSTRUMENT_ME, buf + post_header_len, binlog_file_len,
                                MYF(MY_WME));
   return;
 }
@@ -2569,7 +2580,7 @@ Gtid_log_event::Gtid_log_event(const char *buf, uint event_len,
   buf+= 8;
   domain_id= uint4korr(buf);
   buf+= 4;
-  flags2= *buf;
+  flags2= *(buf++);
   if (flags2 & FL_GROUP_COMMIT_ID)
   {
     if (event_len < (uint)header_size + GTID_HEADER_LEN + 2)
@@ -2577,8 +2588,21 @@ Gtid_log_event::Gtid_log_event(const char *buf, uint event_len,
       seq_no= 0;                                // So is_valid() returns false
       return;
     }
-    ++buf;
     commit_id= uint8korr(buf);
+    buf+= 8;
+  }
+  if (flags2 & (FL_PREPARED_XA | FL_COMPLETED_XA))
+  {
+    xid.formatID= uint4korr(buf);
+    buf+= 4;
+
+    xid.gtrid_length= (long) buf[0];
+    xid.bqual_length= (long) buf[1];
+    buf+= 2;
+
+    long data_length= xid.bqual_length + xid.gtrid_length;
+    memcpy(xid.data, buf, data_length);
+    buf+= data_length;
   }
 }
 
@@ -2603,8 +2627,8 @@ Gtid_list_log_event::Gtid_list_log_event(const char *buf, uint event_len,
   gl_flags= val & ((uint32)0xf << 28);
   buf+= 4;
   if (event_len - (header_size + post_header_len) < count*element_size ||
-      (!(list= (rpl_gtid *)my_malloc(count*sizeof(*list) + (count == 0),
-                                     MYF(MY_WME)))))
+      (!(list= (rpl_gtid *)my_malloc(PSI_INSTRUMENT_ME,
+                            count*sizeof(*list) + (count == 0), MYF(MY_WME)))))
     return;
 
   for (i= 0; i < count; ++i)
@@ -2621,7 +2645,8 @@ Gtid_list_log_event::Gtid_list_log_event(const char *buf, uint event_len,
   if ((gl_flags & FLAG_IGN_GTIDS))
   {
     uint32 i;
-    if (!(sub_id_list= (uint64 *)my_malloc(count*sizeof(uint64), MYF(MY_WME))))
+    if (!(sub_id_list= (uint64 *)my_malloc(PSI_INSTRUMENT_ME,
+                                           count*sizeof(uint64), MYF(MY_WME))))
     {
       my_free(list);
       list= NULL;
@@ -2678,8 +2703,8 @@ Gtid_list_log_event::peek(const char *event_start, size_t event_len,
   if (event_len < (uint32)fdev->common_header_len + GTID_LIST_HEADER_LEN +
       16 * count)
     return true;
-  if (!(gtid_list= (rpl_gtid *)my_malloc(sizeof(rpl_gtid)*count + (count == 0),
-                                         MYF(MY_WME))))
+  if (!(gtid_list= (rpl_gtid *)my_malloc(PSI_INSTRUMENT_ME,
+                          sizeof(rpl_gtid)*count + (count == 0), MYF(MY_WME))))
     return true;
   *out_gtid_list= gtid_list;
   *out_list_len= count;
@@ -2764,12 +2789,49 @@ Rand_log_event::Rand_log_event(const char* buf,
 Xid_log_event::
 Xid_log_event(const char* buf,
               const Format_description_log_event *description_event)
-  :Log_event(buf, description_event)
+  :Xid_apply_log_event(buf, description_event)
 {
   /* The Post-Header is empty. The Variable Data part begins immediately. */
   buf+= description_event->common_header_len +
     description_event->post_header_len[XID_EVENT-1];
   memcpy((char*) &xid, buf, sizeof(xid));
+}
+
+/**************************************************************************
+  XA_prepare_log_event methods
+**************************************************************************/
+XA_prepare_log_event::
+XA_prepare_log_event(const char* buf,
+                     const Format_description_log_event *description_event)
+  :Xid_apply_log_event(buf, description_event)
+{
+  buf+= description_event->common_header_len +
+    description_event->post_header_len[XA_PREPARE_LOG_EVENT-1];
+  one_phase= * (bool *) buf;
+  buf+= 1;
+
+  m_xid.formatID= uint4korr(buf);
+  buf+= 4;
+  m_xid.gtrid_length= uint4korr(buf);
+  buf+= 4;
+  // Todo: validity here and elsewhere checks to be replaced by MDEV-21839 fixes
+  if (m_xid.gtrid_length <= 0 || m_xid.gtrid_length > MAXGTRIDSIZE)
+  {
+    m_xid.formatID= -1;
+    return;
+  }
+  m_xid.bqual_length= uint4korr(buf);
+  buf+= 4;
+  if (m_xid.bqual_length < 0 || m_xid.bqual_length > MAXBQUALSIZE)
+  {
+    m_xid.formatID= -1;
+    return;
+  }
+  DBUG_ASSERT(m_xid.gtrid_length + m_xid.bqual_length <= XIDDATASIZE);
+
+  memcpy(m_xid.data, buf, m_xid.gtrid_length + m_xid.bqual_length);
+
+  xid= NULL;
 }
 
 
@@ -2886,7 +2948,7 @@ Create_file_log_event::Create_file_log_event(const char* buf, uint len,
   uint header_len= description_event->common_header_len;
   uint8 load_header_len= description_event->post_header_len[LOAD_EVENT-1];
   uint8 create_file_header_len= description_event->post_header_len[CREATE_FILE_EVENT-1];
-  if (!(event_buf= (char*) my_memdup(buf, len, MYF(MY_WME))) ||
+  if (!(event_buf= (char*) my_memdup(PSI_INSTRUMENT_ME, buf, len, MYF(MY_WME))) ||
       copy_log_event(event_buf,len,
                      (((uchar)buf[EVENT_TYPE_OFFSET] == LOAD_EVENT) ?
                       load_header_len + header_len :
@@ -3188,7 +3250,7 @@ Rows_log_event::Rows_log_event(const char *buf, uint event_len,
         /* Just store/use the first tag of this type, skip others */
         if (likely(!m_extra_row_data))
         {
-          m_extra_row_data= (uchar*) my_malloc(infoLen,
+          m_extra_row_data= (uchar*) my_malloc(PSI_INSTRUMENT_ME, infoLen,
                                                MYF(MY_WME));
           if (likely(m_extra_row_data != NULL))
           {
@@ -3277,7 +3339,7 @@ Rows_log_event::Rows_log_event(const char *buf, uint event_len,
   DBUG_PRINT("info",("m_table_id: %llu  m_flags: %d  m_width: %lu  data_size: %lu",
                      m_table_id, m_flags, m_width, (ulong) data_size));
 
-  m_rows_buf= (uchar*) my_malloc(data_size, MYF(MY_WME));
+  m_rows_buf= (uchar*) my_malloc(PSI_INSTRUMENT_ME, data_size, MYF(MY_WME));
   if (likely((bool)m_rows_buf))
   {
 #if !defined(MYSQL_CLIENT) && defined(HAVE_REPLICATION)
@@ -3300,7 +3362,7 @@ void Rows_log_event::uncompress_buf()
   if (!un_len)
     return;
 
-  uchar *new_buf= (uchar*) my_malloc(ALIGN_SIZE(un_len), MYF(MY_WME));
+  uchar *new_buf= (uchar*) my_malloc(PSI_INSTRUMENT_ME, ALIGN_SIZE(un_len), MYF(MY_WME));
   if (new_buf)
   {
     if(!binlog_buf_uncompress((char *)m_rows_buf, (char *)new_buf,
@@ -3535,7 +3597,7 @@ Table_map_log_event::Table_map_log_event(const char *buf, uint event_len,
                      m_colcnt, (long) (ptr_colcnt-(const uchar*)vpart)));
 
   /* Allocate mem for all fields in one go. If fails, caught in is_valid() */
-  m_memory= (uchar*) my_multi_malloc(MYF(MY_WME),
+  m_memory= (uchar*) my_multi_malloc(PSI_INSTRUMENT_ME, MYF(MY_WME),
                                      &m_dbnam, (uint) m_dblen + 1,
                                      &m_tblnam, (uint) m_tbllen + 1,
                                      &m_coltype, (uint) m_colcnt,
@@ -3554,7 +3616,7 @@ Table_map_log_event::Table_map_log_event(const char *buf, uint event_len,
     if (m_field_metadata_size <= (m_colcnt * 2))
     {
       uint num_null_bytes= (m_colcnt + 7) / 8;
-      m_meta_memory= (uchar *)my_multi_malloc(MYF(MY_WME),
+      m_meta_memory= (uchar *)my_multi_malloc(PSI_INSTRUMENT_ME, MYF(MY_WME),
           &m_null_bits, num_null_bytes,
           &m_field_metadata, m_field_metadata_size,
           NULL);
@@ -3578,7 +3640,7 @@ Table_map_log_event::Table_map_log_event(const char *buf, uint event_len,
     {
       m_optional_metadata_len= event_len - bytes_read;
       m_optional_metadata=
-        static_cast<unsigned char*>(my_malloc(m_optional_metadata_len, MYF(MY_WME)));
+        static_cast<unsigned char*>(my_malloc(PSI_INSTRUMENT_ME, m_optional_metadata_len, MYF(MY_WME)));
       memcpy(m_optional_metadata, ptr_after_colcnt, m_optional_metadata_len);
     }
   }
@@ -3958,7 +4020,7 @@ Incident_log_event::Incident_log_event(const char *buf, uint event_len,
     m_incident= INCIDENT_NONE;
     DBUG_VOID_RETURN;
   }
-  if (!(m_message.str= (char*) my_malloc(len+1, MYF(MY_WME))))
+  if (!(m_message.str= (char*) my_malloc(key_memory_log_event, len+1, MYF(MY_WME))))
   {
     /* Mark this event invalid */
     m_incident= INCIDENT_NONE;

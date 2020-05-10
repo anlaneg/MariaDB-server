@@ -90,6 +90,7 @@ host	localhost
 user	testuser1
 json_detailed(priv)	{
     "access": 0,
+    "version_id": VERSION_ID,
     "plugin": "mysql_native_password",
     "authentication_string": "",
     "password_last_changed": #
@@ -98,6 +99,7 @@ host	localhost
 user	testuser2
 json_detailed(priv)	{
     "access": 6,
+    "version_id": VERSION_ID,
     "plugin": "mysql_native_password",
     "authentication_string": "",
     "password_last_changed": #
@@ -106,6 +108,7 @@ host	localhost
 user	testuser3
 json_detailed(priv)	{
     "access": 0,
+    "version_id": VERSION_ID,
     "plugin": "mysql_native_password",
     "authentication_string": "",
     "password_last_changed": #
@@ -138,6 +141,7 @@ host	localhost
 user	testuser1
 json_detailed(priv)	{
     "access": 0,
+    "version_id": VERSION_ID,
     "plugin": "mysql_native_password",
     "authentication_string": "",
     "password_last_changed": #
@@ -146,6 +150,7 @@ host	localhost
 user	testuser2
 json_detailed(priv)	{
     "access": 6,
+    "version_id": VERSION_ID,
     "plugin": "mysql_native_password",
     "authentication_string": "",
     "password_last_changed": #
@@ -154,6 +159,7 @@ host	localhost
 user	testuser3
 json_detailed(priv)	{
     "access": 0,
+    "version_id": VERSION_ID,
     "plugin": "mysql_native_password",
     "authentication_string": "",
     "password_last_changed": #
@@ -172,6 +178,7 @@ host	localhost
 user	testuser1
 json_detailed(priv)	{
     "access": 0,
+    "version_id": VERSION_ID,
     "plugin": "mysql_native_password",
     "authentication_string": "",
     "password_last_changed": #
@@ -180,6 +187,7 @@ host	localhost
 user	testuser2
 json_detailed(priv)	{
     "access": 6,
+    "version_id": VERSION_ID,
     "plugin": "mysql_native_password",
     "authentication_string": "",
     "password_last_changed": #
@@ -188,15 +196,16 @@ host	localhost
 user	testuser3
 json_detailed(priv)	{
     "access": 0,
+    "version_id": VERSION_ID,
     "plugin": "mysql_native_password",
     "authentication_string": "",
     "password_last_changed": #
 }
 SHOW GRANTS;
 Grants for testuser1@localhost
-GRANT USAGE ON *.* TO 'testuser1'@'localhost'
-GRANT SELECT, UPDATE ON `db_datadict`.* TO 'testuser1'@'localhost' WITH GRANT OPTION
-GRANT SELECT ON `mysql`.`global_priv` TO 'testuser1'@'localhost'
+GRANT USAGE ON *.* TO `testuser1`@`localhost`
+GRANT SELECT, UPDATE ON `db_datadict`.* TO `testuser1`@`localhost` WITH GRANT OPTION
+GRANT SELECT ON `mysql`.`global_priv` TO `testuser1`@`localhost`
 
 # Now add SELECT on *.* to testuser1;
 connection default;
@@ -228,6 +237,7 @@ host	localhost
 user	testuser1
 json_detailed(priv)	{
     "access": 1,
+    "version_id": VERSION_ID,
     "plugin": "mysql_native_password",
     "authentication_string": "",
     "password_last_changed": #
@@ -236,6 +246,7 @@ host	localhost
 user	testuser2
 json_detailed(priv)	{
     "access": 6,
+    "version_id": VERSION_ID,
     "plugin": "mysql_native_password",
     "authentication_string": "",
     "password_last_changed": #
@@ -244,6 +255,7 @@ host	localhost
 user	testuser3
 json_detailed(priv)	{
     "access": 0,
+    "version_id": VERSION_ID,
     "plugin": "mysql_native_password",
     "authentication_string": "",
     "password_last_changed": #
@@ -276,6 +288,7 @@ host	localhost
 user	testuser1
 json_detailed(priv)	{
     "access": 1025,
+    "version_id": VERSION_ID,
     "plugin": "mysql_native_password",
     "authentication_string": "",
     "password_last_changed": #
@@ -284,6 +297,7 @@ host	localhost
 user	testuser2
 json_detailed(priv)	{
     "access": 6,
+    "version_id": VERSION_ID,
     "plugin": "mysql_native_password",
     "authentication_string": "",
     "password_last_changed": #
@@ -292,6 +306,7 @@ host	localhost
 user	testuser3
 json_detailed(priv)	{
     "access": 0,
+    "version_id": VERSION_ID,
     "plugin": "mysql_native_password",
     "authentication_string": "",
     "password_last_changed": #
@@ -310,6 +325,7 @@ host	localhost
 user	testuser1
 json_detailed(priv)	{
     "access": 1025,
+    "version_id": VERSION_ID,
     "plugin": "mysql_native_password",
     "authentication_string": "",
     "password_last_changed": #
@@ -318,6 +334,7 @@ host	localhost
 user	testuser2
 json_detailed(priv)	{
     "access": 6,
+    "version_id": VERSION_ID,
     "plugin": "mysql_native_password",
     "authentication_string": "",
     "password_last_changed": #
@@ -326,15 +343,16 @@ host	localhost
 user	testuser3
 json_detailed(priv)	{
     "access": 0,
+    "version_id": VERSION_ID,
     "plugin": "mysql_native_password",
     "authentication_string": "",
     "password_last_changed": #
 }
 SHOW GRANTS;
 Grants for testuser1@localhost
-GRANT SELECT ON *.* TO 'testuser1'@'localhost' WITH GRANT OPTION
-GRANT SELECT, UPDATE ON `db_datadict`.* TO 'testuser1'@'localhost' WITH GRANT OPTION
-GRANT SELECT ON `mysql`.`global_priv` TO 'testuser1'@'localhost'
+GRANT SELECT ON *.* TO `testuser1`@`localhost` WITH GRANT OPTION
+GRANT SELECT, UPDATE ON `db_datadict`.* TO `testuser1`@`localhost` WITH GRANT OPTION
+GRANT SELECT ON `mysql`.`global_priv` TO `testuser1`@`localhost`
 connect  testuser2, localhost, testuser2, , db_datadict;
 SELECT * FROM information_schema.user_privileges
 WHERE grantee LIKE '''testuser%'''
@@ -352,7 +370,7 @@ WHERE user LIKE 'testuser%' ORDER BY host, user;
 ERROR 42000: SELECT command denied to user 'testuser2'@'localhost' for table 'global_priv'
 SHOW GRANTS;
 Grants for testuser2@localhost
-GRANT INSERT, UPDATE ON *.* TO 'testuser2'@'localhost'
+GRANT INSERT, UPDATE ON *.* TO `testuser2`@`localhost`
 connect  testuser3, localhost, testuser3, , test;
 SELECT * FROM information_schema.user_privileges
 WHERE grantee LIKE '''testuser%'''
@@ -366,7 +384,7 @@ WHERE user LIKE 'testuser%' ORDER BY host, user;
 ERROR 42000: SELECT command denied to user 'testuser3'@'localhost' for table 'global_priv'
 SHOW GRANTS;
 Grants for testuser3@localhost
-GRANT USAGE ON *.* TO 'testuser3'@'localhost'
+GRANT USAGE ON *.* TO `testuser3`@`localhost`
 
 # Revoke privileges from testuser1;
 connection default;
@@ -396,6 +414,7 @@ host	localhost
 user	testuser1
 json_detailed(priv)	{
     "access": 0,
+    "version_id": VERSION_ID,
     "plugin": "mysql_native_password",
     "authentication_string": "",
     "password_last_changed": #
@@ -404,6 +423,7 @@ host	localhost
 user	testuser2
 json_detailed(priv)	{
     "access": 6,
+    "version_id": VERSION_ID,
     "plugin": "mysql_native_password",
     "authentication_string": "",
     "password_last_changed": #
@@ -412,6 +432,7 @@ host	localhost
 user	testuser3
 json_detailed(priv)	{
     "access": 0,
+    "version_id": VERSION_ID,
     "plugin": "mysql_native_password",
     "authentication_string": "",
     "password_last_changed": #
@@ -429,7 +450,7 @@ WHERE user LIKE 'testuser%' ORDER BY host, user;
 ERROR 42000: SELECT command denied to user 'testuser1'@'localhost' for table 'global_priv'
 SHOW GRANTS;
 Grants for testuser1@localhost
-GRANT USAGE ON *.* TO 'testuser1'@'localhost'
+GRANT USAGE ON *.* TO `testuser1`@`localhost`
 CREATE TABLE db_datadict.tb_55 ( c1 TEXT );
 ERROR 42000: CREATE command denied to user 'testuser1'@'localhost' for table 'tb_55'
 SELECT * FROM information_schema.user_privileges
@@ -444,7 +465,7 @@ WHERE user LIKE 'testuser%' ORDER BY host, user;
 ERROR 42000: SELECT command denied to user 'testuser1'@'localhost' for table 'global_priv'
 SHOW GRANTS;
 Grants for testuser1@localhost
-GRANT USAGE ON *.* TO 'testuser1'@'localhost'
+GRANT USAGE ON *.* TO `testuser1`@`localhost`
 CREATE TABLE db_datadict.tb_66 ( c1 TEXT );
 ERROR 42000: CREATE command denied to user 'testuser1'@'localhost' for table 'tb_66'
 
@@ -477,6 +498,7 @@ host	localhost
 user	testuser1
 json_detailed(priv)	{
     "access": 0,
+    "version_id": VERSION_ID,
     "plugin": "mysql_native_password",
     "authentication_string": "",
     "password_last_changed": #
@@ -485,6 +507,7 @@ host	localhost
 user	testuser2
 json_detailed(priv)	{
     "access": 6,
+    "version_id": VERSION_ID,
     "plugin": "mysql_native_password",
     "authentication_string": "",
     "password_last_changed": #
@@ -493,6 +516,7 @@ host	localhost
 user	testuser3
 json_detailed(priv)	{
     "access": 0,
+    "version_id": VERSION_ID,
     "plugin": "mysql_native_password",
     "authentication_string": "",
     "password_last_changed": #
@@ -511,6 +535,7 @@ host	localhost
 user	testuser1
 json_detailed(priv)	{
     "access": 0,
+    "version_id": VERSION_ID,
     "plugin": "mysql_native_password",
     "authentication_string": "",
     "password_last_changed": #
@@ -519,6 +544,7 @@ host	localhost
 user	testuser2
 json_detailed(priv)	{
     "access": 6,
+    "version_id": VERSION_ID,
     "plugin": "mysql_native_password",
     "authentication_string": "",
     "password_last_changed": #
@@ -527,15 +553,16 @@ host	localhost
 user	testuser3
 json_detailed(priv)	{
     "access": 0,
+    "version_id": VERSION_ID,
     "plugin": "mysql_native_password",
     "authentication_string": "",
     "password_last_changed": #
 }
 SHOW GRANTS;
 Grants for testuser1@localhost
-GRANT USAGE ON *.* TO 'testuser1'@'localhost'
-GRANT ALL PRIVILEGES ON `db_datadict`.* TO 'testuser1'@'localhost' WITH GRANT OPTION
-GRANT SELECT ON `mysql`.`global_priv` TO 'testuser1'@'localhost'
+GRANT USAGE ON *.* TO `testuser1`@`localhost`
+GRANT ALL PRIVILEGES ON `db_datadict`.* TO `testuser1`@`localhost` WITH GRANT OPTION
+GRANT SELECT ON `mysql`.`global_priv` TO `testuser1`@`localhost`
 CREATE TABLE db_datadict.tb_56 ( c1 TEXT );
 ERROR 42000: CREATE command denied to user 'testuser1'@'localhost' for table 'tb_56'
 USE db_datadict;
@@ -552,6 +579,7 @@ host	localhost
 user	testuser1
 json_detailed(priv)	{
     "access": 0,
+    "version_id": VERSION_ID,
     "plugin": "mysql_native_password",
     "authentication_string": "",
     "password_last_changed": #
@@ -560,6 +588,7 @@ host	localhost
 user	testuser2
 json_detailed(priv)	{
     "access": 6,
+    "version_id": VERSION_ID,
     "plugin": "mysql_native_password",
     "authentication_string": "",
     "password_last_changed": #
@@ -568,15 +597,16 @@ host	localhost
 user	testuser3
 json_detailed(priv)	{
     "access": 0,
+    "version_id": VERSION_ID,
     "plugin": "mysql_native_password",
     "authentication_string": "",
     "password_last_changed": #
 }
 SHOW GRANTS;
 Grants for testuser1@localhost
-GRANT USAGE ON *.* TO 'testuser1'@'localhost'
-GRANT ALL PRIVILEGES ON `db_datadict`.* TO 'testuser1'@'localhost' WITH GRANT OPTION
-GRANT SELECT ON `mysql`.`global_priv` TO 'testuser1'@'localhost'
+GRANT USAGE ON *.* TO `testuser1`@`localhost`
+GRANT ALL PRIVILEGES ON `db_datadict`.* TO `testuser1`@`localhost` WITH GRANT OPTION
+GRANT SELECT ON `mysql`.`global_priv` TO `testuser1`@`localhost`
 CREATE TABLE tb_57 ( c1 TEXT )
 ENGINE = <other_engine_type>;
 
@@ -608,6 +638,7 @@ host	localhost
 user	testuser1
 json_detailed(priv)	{
     "access": 0,
+    "version_id": VERSION_ID,
     "plugin": "mysql_native_password",
     "authentication_string": "",
     "password_last_changed": #
@@ -616,6 +647,7 @@ host	localhost
 user	testuser2
 json_detailed(priv)	{
     "access": 6,
+    "version_id": VERSION_ID,
     "plugin": "mysql_native_password",
     "authentication_string": "",
     "password_last_changed": #
@@ -624,6 +656,7 @@ host	localhost
 user	testuser3
 json_detailed(priv)	{
     "access": 0,
+    "version_id": VERSION_ID,
     "plugin": "mysql_native_password",
     "authentication_string": "",
     "password_last_changed": #
@@ -641,7 +674,7 @@ WHERE user LIKE 'testuser%' ORDER BY host, user;
 ERROR 42000: SELECT command denied to user 'testuser1'@'localhost' for table 'global_priv'
 SHOW GRANTS;
 Grants for testuser1@localhost
-GRANT USAGE ON *.* TO 'testuser1'@'localhost'
+GRANT USAGE ON *.* TO `testuser1`@`localhost`
 CREATE TABLE db_datadict.tb_58 ( c1 TEXT )
 ENGINE = <other_engine_type>;
 USE db_datadict;
@@ -673,7 +706,7 @@ PRIVILEGE_TYPE	USAGE
 IS_GRANTABLE	NO
 SHOW GRANTS FOR 'testuser1'@'localhost';
 Grants for testuser1@localhost
-GRANT USAGE ON *.* TO 'testuser1'@'localhost'
+GRANT USAGE ON *.* TO `testuser1`@`localhost`
 GRANT SELECT, FILE ON *.* TO 'testuser1'@'localhost';
 SELECT * FROM information_schema.user_privileges
 WHERE grantee = '''testuser1''@''localhost''';
@@ -687,7 +720,7 @@ PRIVILEGE_TYPE	FILE
 IS_GRANTABLE	NO
 SHOW GRANTS FOR 'testuser1'@'localhost';
 Grants for testuser1@localhost
-GRANT SELECT, FILE ON *.* TO 'testuser1'@'localhost'
+GRANT SELECT, FILE ON *.* TO `testuser1`@`localhost`
 DROP USER   'testuser1'@'localhost';
 SELECT * FROM information_schema.user_privileges
 WHERE grantee = '''testuser1''@''localhost''';

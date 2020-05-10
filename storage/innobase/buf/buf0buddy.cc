@@ -1,7 +1,7 @@
 /*****************************************************************************
 
 Copyright (c) 2006, 2016, Oracle and/or its affiliates. All Rights Reserved.
-Copyright (c) 2018, 2019, MariaDB Corporation.
+Copyright (c) 2018, 2020, MariaDB Corporation.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License as published by the Free Software
@@ -181,38 +181,29 @@ struct	CheckZipFree {
 };
 
 /** Validate a buddy list.
-@param[in]	buf_pool	buffer pool instance
 @param[in]	i		buddy size to validate */
-static
-void
-buf_buddy_list_validate(
-	const buf_pool_t*	buf_pool,
-	ulint			i)
+static void buf_buddy_list_validate(ulint i)
 {
-	ut_list_validate(buf_pool->zip_free[i], CheckZipFree(i));
+	ut_list_validate(buf_pool.zip_free[i], CheckZipFree(i));
 }
 
 /**********************************************************************//**
 Debug function to validate that a buffer is indeed free i.e.: in the
 zip_free[].
+@param[in]	buf		block to check
+@param[in]	i		index of buf_pool.zip_free[]
 @return true if free */
-UNIV_INLINE
-bool
-buf_buddy_check_free(
-/*=================*/
-	buf_pool_t*		buf_pool,/*!< in: buffer pool instance */
-	const buf_buddy_free_t*	buf,	/*!< in: block to check */
-	ulint			i)	/*!< in: index of buf_pool->zip_free[] */
+static bool buf_buddy_check_free(const buf_buddy_free_t* buf, ulint i)
 {
 	const ulint	size	= BUF_BUDDY_LOW << i;
 
-	ut_ad(buf_pool_mutex_own(buf_pool));
+	ut_ad(mutex_own(&buf_pool.mutex));
 	ut_ad(!ut_align_offset(buf, size));
 	ut_ad(i >= buf_buddy_get_slot(UNIV_ZIP_SIZE_MIN));
 
 	buf_buddy_free_t* itr;
 
-	for (itr = UT_LIST_GET_FIRST(buf_pool->zip_free[i]);
+	for (itr = UT_LIST_GET_FIRST(buf_pool.zip_free[i]);
 	     itr && itr != buf;
 	     itr = UT_LIST_GET_NEXT(list, itr)) {
 	}
@@ -232,7 +223,7 @@ buf_buddy_is_free(
 /*==============*/
 	buf_buddy_free_t*	buf,	/*!< in: block to check */
 	ulint			i)	/*!< in: index of
-					buf_pool->zip_free[] */
+					buf_pool.zip_free[] */
 {
 #ifdef UNIV_DEBUG
 	const ulint	size	= BUF_BUDDY_LOW << i;
@@ -268,98 +259,83 @@ buf_buddy_is_free(
 	       : BUF_BUDDY_STATE_PARTIALLY_USED);
 }
 
-/**********************************************************************//**
-Add a block to the head of the appropriate buddy free list. */
+/** Add a block to the head of the appropriate buddy free list.
+@param[in,out]	buf		block to be freed
+@param[in]	i		index of buf_pool.zip_free[] */
 UNIV_INLINE
 void
-buf_buddy_add_to_free(
-/*==================*/
-	buf_pool_t*		buf_pool,	/*!< in: buffer pool instance */
-	buf_buddy_free_t*	buf,		/*!< in,own: block to be freed */
-	ulint			i)		/*!< in: index of
-						buf_pool->zip_free[] */
+buf_buddy_add_to_free(buf_buddy_free_t* buf, ulint i)
 {
-	ut_ad(buf_pool_mutex_own(buf_pool));
-	ut_ad(buf_pool->zip_free[i].start != buf);
+	ut_ad(mutex_own(&buf_pool.mutex));
+	ut_ad(buf_pool.zip_free[i].start != buf);
 
 	buf_buddy_stamp_free(buf, i);
-	UT_LIST_ADD_FIRST(buf_pool->zip_free[i], buf);
-	ut_d(buf_buddy_list_validate(buf_pool, i));
+	UT_LIST_ADD_FIRST(buf_pool.zip_free[i], buf);
+	ut_d(buf_buddy_list_validate(i));
 }
 
-/**********************************************************************//**
-Remove a block from the appropriate buddy free list. */
+/** Remove a block from the appropriate buddy free list.
+@param[in,out]	buf		block to be freed
+@param[in]	i		index of buf_pool.zip_free[] */
 UNIV_INLINE
 void
-buf_buddy_remove_from_free(
-/*=======================*/
-	buf_pool_t*		buf_pool,	/*!< in: buffer pool instance */
-	buf_buddy_free_t*	buf,		/*!< in,own: block to be
-						freed */
-	ulint			i)		/*!< in: index of
-						buf_pool->zip_free[] */
+buf_buddy_remove_from_free(buf_buddy_free_t* buf, ulint i)
 {
-	ut_ad(buf_pool_mutex_own(buf_pool));
-	ut_ad(buf_buddy_check_free(buf_pool, buf, i));
+	ut_ad(mutex_own(&buf_pool.mutex));
+	ut_ad(buf_buddy_check_free(buf, i));
 
-	UT_LIST_REMOVE(buf_pool->zip_free[i], buf);
+	UT_LIST_REMOVE(buf_pool.zip_free[i], buf);
 	buf_buddy_stamp_nonfree(buf, i);
 }
 
-/**********************************************************************//**
-Try to allocate a block from buf_pool->zip_free[].
-@return allocated block, or NULL if buf_pool->zip_free[] was empty */
-static
-buf_buddy_free_t*
-buf_buddy_alloc_zip(
-/*================*/
-	buf_pool_t*	buf_pool,	/*!< in: buffer pool instance */
-	ulint		i)		/*!< in: index of buf_pool->zip_free[] */
+/** Try to allocate a block from buf_pool.zip_free[].
+@param[in]	i		index of buf_pool.zip_free[]
+@return allocated block, or NULL if buf_pool.zip_free[] was empty */
+static buf_buddy_free_t* buf_buddy_alloc_zip(ulint i)
 {
 	buf_buddy_free_t*	buf;
 
-	ut_ad(buf_pool_mutex_own(buf_pool));
+	ut_ad(mutex_own(&buf_pool.mutex));
 	ut_a(i < BUF_BUDDY_SIZES);
 	ut_a(i >= buf_buddy_get_slot(UNIV_ZIP_SIZE_MIN));
 
-	ut_d(buf_buddy_list_validate(buf_pool, i));
+	ut_d(buf_buddy_list_validate(i));
 
-	buf = UT_LIST_GET_FIRST(buf_pool->zip_free[i]);
+	buf = UT_LIST_GET_FIRST(buf_pool.zip_free[i]);
 
-	if (buf_pool->curr_size < buf_pool->old_size
-	    && UT_LIST_GET_LEN(buf_pool->withdraw)
-		< buf_pool->withdraw_target) {
+	if (buf_pool.curr_size < buf_pool.old_size
+	    && UT_LIST_GET_LEN(buf_pool.withdraw)
+	    < buf_pool.withdraw_target) {
 
 		while (buf != NULL
-		       && buf_frame_will_withdrawn(
-			       buf_pool, reinterpret_cast<byte*>(buf))) {
+		       && buf_pool.will_be_withdrawn(
+			       reinterpret_cast<byte*>(buf))) {
 			/* This should be withdrawn, not to be allocated */
 			buf = UT_LIST_GET_NEXT(list, buf);
 		}
 	}
 
 	if (buf) {
-		buf_buddy_remove_from_free(buf_pool, buf, i);
+		buf_buddy_remove_from_free(buf, i);
 	} else if (i + 1 < BUF_BUDDY_SIZES) {
 		/* Attempt to split. */
-		buf = buf_buddy_alloc_zip(buf_pool, i + 1);
+		buf = buf_buddy_alloc_zip(i + 1);
 
 		if (buf) {
 			buf_buddy_free_t* buddy =
 				reinterpret_cast<buf_buddy_free_t*>(
 					buf->stamp.bytes
 					+ (BUF_BUDDY_LOW << i));
-
-			ut_ad(!buf_pool_contains_zip(buf_pool, buddy));
-			buf_buddy_add_to_free(buf_pool, buddy, i);
+			ut_ad(!buf_pool.contains_zip(buddy));
+			buf_buddy_add_to_free(buddy, i);
 		}
 	}
 
 	if (buf) {
 		/* Trash the page other than the BUF_BUDDY_STAMP_NONFREE. */
-		UNIV_MEM_TRASH((void*) buf, ~i, BUF_BUDDY_STAMP_OFFSET);
+               UNIV_MEM_TRASH((void*) buf, (int) ~i, BUF_BUDDY_STAMP_OFFSET);
 		UNIV_MEM_TRASH(BUF_BUDDY_STAMP_OFFSET + 4
-			       + buf->stamp.bytes, ~i,
+			       + buf->stamp.bytes, (int) ~i,
 			       (BUF_BUDDY_LOW << i)
 			       - (BUF_BUDDY_STAMP_OFFSET + 4));
 		ut_ad(mach_read_from_4(buf->stamp.bytes
@@ -370,24 +346,21 @@ buf_buddy_alloc_zip(
 	return(buf);
 }
 
-/**********************************************************************//**
-Deallocate a buffer frame of srv_page_size. */
+/** Deallocate a buffer frame of srv_page_size.
+@param[in]	buf		buffer frame to deallocate */
 static
 void
-buf_buddy_block_free(
-/*=================*/
-	buf_pool_t*	buf_pool,	/*!< in: buffer pool instance */
-	void*		buf)		/*!< in: buffer frame to deallocate */
+buf_buddy_block_free(void* buf)
 {
 	const ulint	fold	= BUF_POOL_ZIP_FOLD_PTR(buf);
 	buf_page_t*	bpage;
 	buf_block_t*	block;
 
-	ut_ad(buf_pool_mutex_own(buf_pool));
-	ut_ad(!mutex_own(&buf_pool->zip_mutex));
+	ut_ad(mutex_own(&buf_pool.mutex));
+	ut_ad(!mutex_own(&buf_pool.zip_mutex));
 	ut_a(!ut_align_offset(buf, srv_page_size));
 
-	HASH_SEARCH(hash, buf_pool->zip_hash, fold, buf_page_t*, bpage,
+	HASH_SEARCH(hash, buf_pool.zip_hash, fold, buf_page_t*, bpage,
 		    ut_ad(buf_page_get_state(bpage) == BUF_BLOCK_MEMORY
 			  && bpage->in_zip_hash && !bpage->in_page_hash),
 		    ((buf_block_t*) bpage)->frame == buf);
@@ -396,7 +369,7 @@ buf_buddy_block_free(
 	ut_ad(!bpage->in_page_hash);
 	ut_ad(bpage->in_zip_hash);
 	ut_d(bpage->in_zip_hash = FALSE);
-	HASH_DELETE(buf_page_t, hash, buf_pool->zip_hash, fold, bpage);
+	HASH_DELETE(buf_page_t, hash, buf_pool.zip_hash, fold, bpage);
 
 	ut_d(memset(buf, 0, srv_page_size));
 	UNIV_MEM_INVALID(buf, srv_page_size);
@@ -406,8 +379,8 @@ buf_buddy_block_free(
 	buf_LRU_block_free_non_file_page(block);
 	buf_page_mutex_exit(block);
 
-	ut_ad(buf_pool->buddy_n_frames > 0);
-	ut_d(buf_pool->buddy_n_frames--);
+	ut_ad(buf_pool.buddy_n_frames > 0);
+	ut_d(buf_pool.buddy_n_frames--);
 }
 
 /**********************************************************************//**
@@ -418,10 +391,9 @@ buf_buddy_block_register(
 /*=====================*/
 	buf_block_t*	block)	/*!< in: buffer frame to allocate */
 {
-	buf_pool_t*	buf_pool = buf_pool_from_block(block);
 	const ulint	fold = BUF_POOL_ZIP_FOLD(block);
-	ut_ad(buf_pool_mutex_own(buf_pool));
-	ut_ad(!mutex_own(&buf_pool->zip_mutex));
+	ut_ad(mutex_own(&buf_pool.mutex));
+	ut_ad(!mutex_own(&buf_pool.zip_mutex));
 	ut_ad(buf_block_get_state(block) == BUF_BLOCK_READY_FOR_USE);
 
 	buf_block_set_state(block, BUF_BLOCK_MEMORY);
@@ -432,24 +404,19 @@ buf_buddy_block_register(
 	ut_ad(!block->page.in_page_hash);
 	ut_ad(!block->page.in_zip_hash);
 	ut_d(block->page.in_zip_hash = TRUE);
-	HASH_INSERT(buf_page_t, hash, buf_pool->zip_hash, fold, &block->page);
+	HASH_INSERT(buf_page_t, hash, buf_pool.zip_hash, fold, &block->page);
 
-	ut_d(buf_pool->buddy_n_frames++);
+	ut_d(buf_pool.buddy_n_frames++);
 }
 
-/**********************************************************************//**
-Allocate a block from a bigger object.
+/** Allocate a block from a bigger object.
+@param[in]	buf		a block that is free to use
+@param[in]	i		index of buf_pool.zip_free[]
+@param[in]	j		size of buf as an index of buf_pool.zip_free[]
 @return allocated block */
 static
 void*
-buf_buddy_alloc_from(
-/*=================*/
-	buf_pool_t*	buf_pool,	/*!< in: buffer pool instance */
-	void*		buf,		/*!< in: a block that is free to use */
-	ulint		i,		/*!< in: index of
-					buf_pool->zip_free[] */
-	ulint		j)		/*!< in: size of buf as an index
-					of buf_pool->zip_free[] */
+buf_buddy_alloc_from(void* buf, ulint i, ulint j)
 {
 	ulint	offs	= BUF_BUDDY_LOW << j;
 	ut_ad(j <= BUF_BUDDY_SIZES);
@@ -466,92 +433,76 @@ buf_buddy_alloc_from(
 
 		zip_buf = reinterpret_cast<buf_buddy_free_t*>(
 			reinterpret_cast<byte*>(buf) + offs);
-		buf_buddy_add_to_free(buf_pool, zip_buf, j);
+		buf_buddy_add_to_free(zip_buf, j);
 	}
 
 	buf_buddy_stamp_nonfree(reinterpret_cast<buf_buddy_free_t*>(buf), i);
 	return(buf);
 }
 
-/**********************************************************************//**
-Allocate a block.  The thread calling this function must hold
-buf_pool->mutex and must not hold buf_pool->zip_mutex or any block->mutex.
-The buf_pool_mutex may be released and reacquired.
+/** Allocate a block.
+@param[in]	i	index of buf_pool.zip_free[] or BUF_BUDDY_SIZES
+@param[out]	lru	whether buf_pool.mutex was temporarily released
 @return allocated block, never NULL */
-void*
-buf_buddy_alloc_low(
-/*================*/
-	buf_pool_t*	buf_pool,	/*!< in/out: buffer pool instance */
-	ulint		i,		/*!< in: index of buf_pool->zip_free[],
-					or BUF_BUDDY_SIZES */
-	bool*		lru)		/*!< in: pointer to a variable that
-					will be assigned true if storage was
-					allocated from the LRU list and
-					buf_pool->mutex was temporarily
-					released */
+byte *buf_buddy_alloc_low(ulint i, bool *lru)
 {
 	buf_block_t*	block;
 
-	ut_ad(buf_pool_mutex_own(buf_pool));
-	ut_ad(!mutex_own(&buf_pool->zip_mutex));
+	ut_ad(mutex_own(&buf_pool.mutex));
+	ut_ad(!mutex_own(&buf_pool.zip_mutex));
 	ut_ad(i >= buf_buddy_get_slot(UNIV_ZIP_SIZE_MIN));
 
 	if (i < BUF_BUDDY_SIZES) {
 		/* Try to allocate from the buddy system. */
-		block = (buf_block_t*) buf_buddy_alloc_zip(buf_pool, i);
+		block = (buf_block_t*) buf_buddy_alloc_zip(i);
 
 		if (block) {
 			goto func_exit;
 		}
 	}
 
-	/* Try allocating from the buf_pool->free list. */
-	block = buf_LRU_get_free_only(buf_pool);
+	/* Try allocating from the buf_pool.free list. */
+	block = buf_LRU_get_free_only();
 
 	if (block) {
-
 		goto alloc_big;
 	}
 
 	/* Try replacing an uncompressed page in the buffer pool. */
-	buf_pool_mutex_exit(buf_pool);
-	block = buf_LRU_get_free_block(buf_pool);
-	*lru = true;
-	buf_pool_mutex_enter(buf_pool);
+	mutex_exit(&buf_pool.mutex);
+	block = buf_LRU_get_free_block();
+	mutex_enter(&buf_pool.mutex);
+	if (lru) {
+		*lru = true;
+	}
 
 alloc_big:
 	buf_buddy_block_register(block);
 
 	block = (buf_block_t*) buf_buddy_alloc_from(
-		buf_pool, block->frame, i, BUF_BUDDY_SIZES);
+		block->frame, i, BUF_BUDDY_SIZES);
 
 func_exit:
-	buf_pool->buddy_stat[i].used++;
-	return(block);
+	buf_pool.buddy_stat[i].used++;
+	return reinterpret_cast<byte*>(block);
 }
 
-/**********************************************************************//**
-Try to relocate a block.
+/** Try to relocate a block. The caller must hold zip_free_mutex, and this
+function will release and lock it again.
+@param[in]	src		block to relocate
+@param[in]	dst		free block to relocated to
+@param[in]	i		index of buf_pool.zip_free[]
+@param[in]	force		true if we must relocated always
 @return true if relocated */
-static
-bool
-buf_buddy_relocate(
-/*===============*/
-	buf_pool_t*	buf_pool,	/*!< in: buffer pool instance */
-	void*		src,		/*!< in: block to relocate */
-	void*		dst,		/*!< in: free block to relocate to */
-	ulint		i,		/*!< in: index of
-					buf_pool->zip_free[] */
-	bool		force)		/*!< in: true if we must relocate
-					always */
+static bool buf_buddy_relocate(void* src, void* dst, ulint i, bool force)
 {
 	buf_page_t*	bpage;
 	const ulint	size = BUF_BUDDY_LOW << i;
 	ulint		space;
 	ulint		offset;
 
-	ut_ad(buf_pool_mutex_own(buf_pool));
-	ut_ad(!mutex_own(&buf_pool->zip_mutex));
+	ut_ad(mutex_own(&buf_pool.mutex));
+	ut_ad(!mutex_own(&buf_pool.zip_mutex));
 	ut_ad(!ut_align_offset(src, size));
 	ut_ad(!ut_align_offset(dst, size));
 	ut_ad(i >= buf_buddy_get_slot(UNIV_ZIP_SIZE_MIN));
@@ -571,22 +522,16 @@ buf_buddy_relocate(
 
 	const page_id_t	page_id(space, offset);
 
-	/* If space,offset is bogus, then we know that the
-	buf_page_hash_get_low() call below will return NULL. */
-	if (!force && buf_pool != buf_pool_get(page_id)) {
-		return(false);
-	}
-
-	rw_lock_t*	hash_lock = buf_page_hash_lock_get(buf_pool, page_id);
+	rw_lock_t*	hash_lock = buf_page_hash_lock_get(page_id);
 
 	rw_lock_x_lock(hash_lock);
 
-	bpage = buf_page_hash_get_low(buf_pool, page_id);
+	bpage = buf_page_hash_get_low(page_id);
 
 	if (!bpage || bpage->zip.data != src) {
 		/* The block has probably been freshly
 		allocated by buf_LRU_get_free_block() but not
-		added to buf_pool->page_hash yet.  Obviously,
+		added to buf_pool.page_hash yet.  Obviously,
 		it cannot be relocated. */
 
 		rw_lock_x_unlock(hash_lock);
@@ -598,11 +543,10 @@ buf_buddy_relocate(
 		/* It might be just uninitialized page.
 		We should search from LRU list also. */
 
-		bpage = UT_LIST_GET_FIRST(buf_pool->LRU);
+		bpage = UT_LIST_GET_FIRST(buf_pool.LRU);
 		while (bpage != NULL) {
 			if (bpage->zip.data == src) {
-				hash_lock = buf_page_hash_lock_get(
-					buf_pool, bpage->id);
+				hash_lock = buf_page_hash_lock_get(bpage->id);
 				rw_lock_x_lock(hash_lock);
 				break;
 			}
@@ -649,7 +593,7 @@ buf_buddy_relocate(
 		buf_buddy_mem_invalid(
 			reinterpret_cast<buf_buddy_free_t*>(src), i);
 
-		buf_buddy_stat_t*	buddy_stat = &buf_pool->buddy_stat[i];
+		buf_buddy_stat_t*	buddy_stat = &buf_pool.buddy_stat[i];
 		buddy_stat->relocated++;
 		buddy_stat->relocated_usec+= (my_interval_timer() - ns) / 1000;
 		return(true);
@@ -661,43 +605,38 @@ buf_buddy_relocate(
 	return(false);
 }
 
-/**********************************************************************//**
-Deallocate a block. */
-void
-buf_buddy_free_low(
-/*===============*/
-	buf_pool_t*	buf_pool,	/*!< in: buffer pool instance */
-	void*		buf,		/*!< in: block to be freed, must not be
-					pointed to by the buffer pool */
-	ulint		i)		/*!< in: index of buf_pool->zip_free[],
-					or BUF_BUDDY_SIZES */
+/** Deallocate a block.
+@param[in]	buf	block to be freed, must not be pointed to
+			by the buffer pool
+@param[in]	i	index of buf_pool.zip_free[], or BUF_BUDDY_SIZES */
+void buf_buddy_free_low(void* buf, ulint i)
 {
 	buf_buddy_free_t*	buddy;
 
-	ut_ad(buf_pool_mutex_own(buf_pool));
-	ut_ad(!mutex_own(&buf_pool->zip_mutex));
+	ut_ad(mutex_own(&buf_pool.mutex));
+	ut_ad(!mutex_own(&buf_pool.zip_mutex));
 	ut_ad(i <= BUF_BUDDY_SIZES);
 	ut_ad(i >= buf_buddy_get_slot(UNIV_ZIP_SIZE_MIN));
-	ut_ad(buf_pool->buddy_stat[i].used > 0);
+	ut_ad(buf_pool.buddy_stat[i].used > 0);
 
-	buf_pool->buddy_stat[i].used--;
+	buf_pool.buddy_stat[i].used--;
 recombine:
 	UNIV_MEM_ALLOC(buf, BUF_BUDDY_LOW << i);
 
 	if (i == BUF_BUDDY_SIZES) {
-		buf_buddy_block_free(buf_pool, buf);
+		buf_buddy_block_free(buf);
 		return;
 	}
 
 	ut_ad(i < BUF_BUDDY_SIZES);
 	ut_ad(buf == ut_align_down(buf, BUF_BUDDY_LOW << i));
-	ut_ad(!buf_pool_contains_zip(buf_pool, buf));
+	ut_ad(!buf_pool.contains_zip(buf));
 
 	/* Do not recombine blocks if there are few free blocks.
 	We may waste up to 15360*max_len bytes to free blocks
 	(1024 + 2048 + 4096 + 8192 = 15360) */
-	if (UT_LIST_GET_LEN(buf_pool->zip_free[i]) < 16
-	    && buf_pool->curr_size >= buf_pool->old_size) {
+	if (UT_LIST_GET_LEN(buf_pool.zip_free[i]) < 16
+	    && buf_pool.curr_size >= buf_pool.old_size) {
 		goto func_exit;
 	}
 
@@ -709,36 +648,34 @@ recombine:
 	switch (buf_buddy_is_free(buddy, i)) {
 	case BUF_BUDDY_STATE_FREE:
 		/* The buddy is free: recombine */
-		buf_buddy_remove_from_free(buf_pool, buddy, i);
+		buf_buddy_remove_from_free(buddy, i);
 buddy_is_free:
-		ut_ad(!buf_pool_contains_zip(buf_pool, buddy));
+		ut_ad(!buf_pool.contains_zip(buddy));
 		i++;
 		buf = ut_align_down(buf, BUF_BUDDY_LOW << i);
 
 		goto recombine;
 
 	case BUF_BUDDY_STATE_USED:
-		ut_d(buf_buddy_list_validate(buf_pool, i));
+		ut_d(buf_buddy_list_validate(i));
 
 		/* The buddy is not free. Is there a free block of
 		this size? */
 		if (buf_buddy_free_t* zip_buf =
-			UT_LIST_GET_FIRST(buf_pool->zip_free[i])) {
+			UT_LIST_GET_FIRST(buf_pool.zip_free[i])) {
 
 			/* Remove the block from the free list, because
 			a successful buf_buddy_relocate() will overwrite
 			zip_free->list. */
-			buf_buddy_remove_from_free(buf_pool, zip_buf, i);
+			buf_buddy_remove_from_free(zip_buf, i);
 
 			/* Try to relocate the buddy of buf to the free
 			block. */
-			if (buf_buddy_relocate(buf_pool, buddy, zip_buf, i,
-					       false)) {
-
+			if (buf_buddy_relocate(buddy, zip_buf, i, false)) {
 				goto buddy_is_free;
 			}
 
-			buf_buddy_add_to_free(buf_pool, zip_buf, i);
+			buf_buddy_add_to_free(zip_buf, i);
 		}
 
 		break;
@@ -750,40 +687,32 @@ buddy_is_free:
 
 func_exit:
 	/* Free the block to the buddy list. */
-	buf_buddy_add_to_free(buf_pool,
-			      reinterpret_cast<buf_buddy_free_t*>(buf),
-			      i);
+	buf_buddy_add_to_free(reinterpret_cast<buf_buddy_free_t*>(buf), i);
 }
 
-/** Reallocate a block.
-@param[in]	buf_pool	buffer pool instance
-@param[in]	buf		block to be reallocated, must be pointed
-to by the buffer pool
-@param[in]	size		block size, up to srv_page_size
-@retval false	if failed because of no free blocks. */
+/** Try to reallocate a block.
+@param[in]	buf	buf_pool block to be reallocated
+@param[in]	size	block size, up to srv_page_size
+@return	whether the reallocation succeeded */
 bool
-buf_buddy_realloc(
-	buf_pool_t*	buf_pool,
-	void*		buf,
-	ulint		size)
+buf_buddy_realloc(void* buf, ulint size)
 {
 	buf_block_t*	block = NULL;
 	ulint		i = buf_buddy_get_slot(size);
 
-	ut_ad(buf_pool_mutex_own(buf_pool));
-	ut_ad(!mutex_own(&buf_pool->zip_mutex));
+	ut_ad(mutex_own(&buf_pool.mutex));
+	ut_ad(!mutex_own(&buf_pool.zip_mutex));
 	ut_ad(i <= BUF_BUDDY_SIZES);
 	ut_ad(i >= buf_buddy_get_slot(UNIV_ZIP_SIZE_MIN));
 
 	if (i < BUF_BUDDY_SIZES) {
 		/* Try to allocate from the buddy system. */
-		block = reinterpret_cast<buf_block_t*>(
-			buf_buddy_alloc_zip(buf_pool, i));
+		block = reinterpret_cast<buf_block_t*>(buf_buddy_alloc_zip(i));
 	}
 
 	if (block == NULL) {
-		/* Try allocating from the buf_pool->free list. */
-		block = buf_LRU_get_free_only(buf_pool);
+		/* Try allocating from the buf_pool.free list. */
+		block = buf_LRU_get_free_only();
 
 		if (block == NULL) {
 			return(false); /* free_list was not enough */
@@ -793,40 +722,37 @@ buf_buddy_realloc(
 
 		block = reinterpret_cast<buf_block_t*>(
 			buf_buddy_alloc_from(
-				buf_pool, block->frame, i, BUF_BUDDY_SIZES));
+				block->frame, i, BUF_BUDDY_SIZES));
 	}
 
-	buf_pool->buddy_stat[i].used++;
+	buf_pool.buddy_stat[i].used++;
 
 	/* Try to relocate the buddy of buf to the free block. */
-	if (buf_buddy_relocate(buf_pool, buf, block, i, true)) {
+	if (buf_buddy_relocate(buf, block, i, true)) {
 		/* succeeded */
-		buf_buddy_free_low(buf_pool, buf, i);
+		buf_buddy_free_low(buf, i);
 	} else {
 		/* failed */
-		buf_buddy_free_low(buf_pool, block, i);
+		buf_buddy_free_low(block, i);
 	}
 
 	return(true); /* free_list was enough */
 }
 
-/** Combine all pairs of free buddies.
-@param[in]	buf_pool	buffer pool instance */
-void
-buf_buddy_condense_free(
-	buf_pool_t*	buf_pool)
+/** Combine all pairs of free buddies. */
+void buf_buddy_condense_free()
 {
-	ut_ad(buf_pool_mutex_own(buf_pool));
-	ut_ad(buf_pool->curr_size < buf_pool->old_size);
+	ut_ad(mutex_own(&buf_pool.mutex));
+	ut_ad(buf_pool.curr_size < buf_pool.old_size);
 
-	for (ulint i = 0; i < UT_ARR_SIZE(buf_pool->zip_free); ++i) {
+	for (ulint i = 0; i < UT_ARR_SIZE(buf_pool.zip_free); ++i) {
 		buf_buddy_free_t* buf =
-			UT_LIST_GET_FIRST(buf_pool->zip_free[i]);
+			UT_LIST_GET_FIRST(buf_pool.zip_free[i]);
 
 		/* seek to withdraw target */
 		while (buf != NULL
-		       && !buf_frame_will_withdrawn(
-				buf_pool, reinterpret_cast<byte*>(buf))) {
+		       && !buf_pool.will_be_withdrawn(
+			       reinterpret_cast<byte*>(buf))) {
 			buf = UT_LIST_GET_NEXT(list, buf);
 		}
 
@@ -843,8 +769,7 @@ buf_buddy_condense_free(
 			/* seek to the next withdraw target */
 			while (true) {
 				while (next != NULL
-				       && !buf_frame_will_withdrawn(
-						buf_pool,
+				       && !buf_pool.will_be_withdrawn(
 						reinterpret_cast<byte*>(next))) {
 					 next = UT_LIST_GET_NEXT(list, next);
 				}
@@ -860,10 +785,10 @@ buf_buddy_condense_free(
 			    == BUF_BUDDY_STATE_FREE) {
 				/* Both buf and buddy are free.
 				Try to combine them. */
-				buf_buddy_remove_from_free(buf_pool, buf, i);
-				buf_pool->buddy_stat[i].used++;
+				buf_buddy_remove_from_free(buf, i);
+				buf_pool.buddy_stat[i].used++;
 
-				buf_buddy_free_low(buf_pool, buf, i);
+				buf_buddy_free_low(buf, i);
 			}
 
 			buf = next;

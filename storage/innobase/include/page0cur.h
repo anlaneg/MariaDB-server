@@ -1,7 +1,7 @@
 /*****************************************************************************
 
 Copyright (c) 1994, 2016, Oracle and/or its affiliates. All Rights Reserved.
-Copyright (c) 2018, 2019, MariaDB Corporation.
+Copyright (c) 2018, 2020, MariaDB Corporation.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License as published by the Free Software
@@ -147,32 +147,11 @@ page_cur_tuple_insert(
 	page_cur_t*	cursor,	/*!< in/out: a page cursor */
 	const dtuple_t*	tuple,	/*!< in: pointer to a data tuple */
 	dict_index_t*	index,	/*!< in: record descriptor */
-	offset_t**	offsets,/*!< out: offsets on *rec */
+	rec_offs**	offsets,/*!< out: offsets on *rec */
 	mem_heap_t**	heap,	/*!< in/out: pointer to memory heap, or NULL */
 	ulint		n_ext,	/*!< in: number of externally stored columns */
-	mtr_t*		mtr)	/*!< in: mini-transaction handle, or NULL */
-	MY_ATTRIBUTE((nonnull(1,2,3,4,5), warn_unused_result));
-/***********************************************************//**
-Inserts a record next to page cursor. Returns pointer to inserted record if
-succeed, i.e., enough space available, NULL otherwise. The cursor stays at
-the same logical position, but the physical position may change if it is
-pointing to a compressed page that was reorganized.
-
-IMPORTANT: The caller will have to update IBUF_BITMAP_FREE
-if this is a compressed leaf page in a secondary index.
-This has to be done either within the same mini-transaction,
-or by invoking ibuf_reset_free_bits() before mtr_commit().
-
-@return pointer to record if succeed, NULL otherwise */
-UNIV_INLINE
-rec_t*
-page_cur_rec_insert(
-/*================*/
-	page_cur_t*	cursor,	/*!< in/out: a page cursor */
-	const rec_t*	rec,	/*!< in: record to insert */
-	dict_index_t*	index,	/*!< in: record descriptor */
-	offset_t*	offsets,/*!< in/out: rec_get_offsets(rec, index) */
-	mtr_t*		mtr);	/*!< in: mini-transaction handle, or NULL */
+	mtr_t*		mtr)	/*!< in/out: mini-transaction */
+	MY_ATTRIBUTE((nonnull, warn_unused_result));
 /***********************************************************//**
 Inserts a record next to page cursor on an uncompressed page.
 Returns pointer to inserted record if succeed, i.e., enough
@@ -184,7 +163,7 @@ page_cur_insert_rec_low(
 	const page_cur_t*cur,	/*!< in: page cursor */
 	dict_index_t*	index,	/*!< in: record descriptor */
 	const rec_t*	rec,	/*!< in: record to insert after cur */
-	offset_t*	offsets,/*!< in/out: rec_get_offsets(rec, index) */
+	rec_offs*	offsets,/*!< in/out: rec_get_offsets(rec, index) */
 	mtr_t*		mtr)	/*!< in/out: mini-transaction */
 	MY_ATTRIBUTE((nonnull, warn_unused_result));
 
@@ -206,24 +185,9 @@ page_cur_insert_rec_zip(
 	page_cur_t*	cursor,	/*!< in/out: page cursor */
 	dict_index_t*	index,	/*!< in: record descriptor */
 	const rec_t*	rec,	/*!< in: pointer to a physical record */
-	offset_t*	offsets,/*!< in/out: rec_get_offsets(rec, index) */
+	rec_offs*	offsets,/*!< in/out: rec_get_offsets(rec, index) */
 	mtr_t*		mtr)	/*!< in/out: mini-transaction */
 	MY_ATTRIBUTE((nonnull, warn_unused_result));
-/*************************************************************//**
-Copies records from page to a newly created page, from a given record onward,
-including that record. Infimum and supremum records are not copied.
-
-IMPORTANT: The caller will have to update IBUF_BITMAP_FREE
-if this is a compressed leaf page in a secondary index.
-This has to be done either within the same mini-transaction,
-or by invoking ibuf_reset_free_bits() before mtr_commit(). */
-void
-page_copy_rec_list_end_to_created_page(
-/*===================================*/
-	page_t*		new_page,	/*!< in/out: index page to copy to */
-	rec_t*		rec,		/*!< in: first record to copy */
-	dict_index_t*	index,		/*!< in: record descriptor */
-	mtr_t*		mtr);		/*!< in: mtr */
 /***********************************************************//**
 Deletes a record at the page cursor. The cursor is moved to the
 next record after the deleted one. */
@@ -232,10 +196,60 @@ page_cur_delete_rec(
 /*================*/
 	page_cur_t*		cursor,	/*!< in/out: a page cursor */
 	const dict_index_t*	index,	/*!< in: record descriptor */
-	const offset_t*		offsets,/*!< in: rec_get_offsets(
+	const rec_offs*		offsets,/*!< in: rec_get_offsets(
 					cursor->rec, index) */
 	mtr_t*			mtr)	/*!< in/out: mini-transaction */
 	MY_ATTRIBUTE((nonnull));
+
+/** Apply a INSERT_HEAP_REDUNDANT or INSERT_REUSE_REDUNDANT record that was
+written by page_cur_insert_rec_low() for a ROW_FORMAT=REDUNDANT page.
+@param block      B-tree or R-tree page in ROW_FORMAT=COMPACT or DYNAMIC
+@param reuse      false=allocate from PAGE_HEAP_TOP; true=reuse PAGE_FREE
+@param prev       byte offset of the predecessor, relative to PAGE_NEW_INFIMUM
+@param enc_hdr    encoded fixed-size header bits
+@param hdr_c      number of common record header bytes with prev
+@param data_c     number of common data bytes with prev
+@param data       literal header and data bytes
+@param data_len   length of the literal data, in bytes
+@return whether the operation failed (inconcistency was noticed) */
+bool page_apply_insert_redundant(const buf_block_t &block, bool reuse,
+                                 ulint prev, ulint enc_hdr,
+                                 size_t hdr_c, size_t data_c,
+                                 const void *data, size_t data_len);
+
+/** Apply a INSERT_HEAP_DYNAMIC or INSERT_REUSE_DYNAMIC record that was
+written by page_cur_insert_rec_low() for a ROW_FORMAT=COMPACT or DYNAMIC page.
+@param block      B-tree or R-tree page in ROW_FORMAT=COMPACT or DYNAMIC
+@param reuse      false=allocate from PAGE_HEAP_TOP; true=reuse PAGE_FREE
+@param prev       byte offset of the predecessor, relative to PAGE_NEW_INFIMUM
+@param shift      unless !reuse: number of bytes the PAGE_FREE is moving
+@param enc_hdr_l  number of copied record header bytes, plus record type bits
+@param hdr_c      number of common record header bytes with prev
+@param data_c     number of common data bytes with prev
+@param data       literal header and data bytes
+@param data_len   length of the literal data, in bytes
+@return whether the operation failed (inconcistency was noticed) */
+bool page_apply_insert_dynamic(const buf_block_t &block, bool reuse,
+                               ulint prev, ulint shift, ulint enc_hdr_l,
+                               size_t hdr_c, size_t data_c,
+                               const void *data, size_t data_len);
+
+/** Apply a DELETE_ROW_FORMAT_REDUNDANT record that was written by
+page_cur_delete_rec() for a ROW_FORMAT=REDUNDANT page.
+@param block    B-tree or R-tree page in ROW_FORMAT=REDUNDANT
+@param prev     byte offset of the predecessor, relative to PAGE_OLD_INFIMUM
+@return whether the operation failed (inconcistency was noticed) */
+bool page_apply_delete_redundant(const buf_block_t &block, ulint prev);
+
+/** Apply a DELETE_ROW_FORMAT_DYNAMIC record that was written by
+page_cur_delete_rec() for a ROW_FORMAT=COMPACT or DYNAMIC page.
+@param block      B-tree or R-tree page in ROW_FORMAT=COMPACT or DYNAMIC
+@param prev       byte offset of the predecessor, relative to PAGE_NEW_INFIMUM
+@param hdr_size   record header size, excluding REC_N_NEW_EXTRA_BYTES
+@param data_size  data payload size, in bytes
+@return whether the operation failed (inconcistency was noticed) */
+bool page_apply_delete_dynamic(const buf_block_t &block, ulint prev,
+                               size_t hdr_size, size_t data_size);
 
 /** Search the right position for a page cursor.
 @param[in] block buffer block
@@ -321,63 +335,13 @@ page_cur_open_on_rnd_user_rec(
 /*==========================*/
 	buf_block_t*	block,	/*!< in: page */
 	page_cur_t*	cursor);/*!< out: page cursor */
-/** Write a redo log record of inserting a record into an index page.
-@param[in]	insert_rec	inserted record
-@param[in]	rec_size	rec_get_size(insert_rec)
-@param[in]	cursor_rec	predecessor of insert_rec
-@param[in,out]	index		index tree
-@param[in,out]	mtr		mini-transaction */
-void
-page_cur_insert_rec_write_log(
-	const rec_t*	insert_rec,
-	ulint		rec_size,
-	const rec_t*	cursor_rec,
-	dict_index_t*	index,
-	mtr_t*		mtr)
-	MY_ATTRIBUTE((nonnull));
-/***********************************************************//**
-Parses a log record of a record insert on a page.
-@return end of log record or NULL */
-const byte*
-page_cur_parse_insert_rec(
-/*======================*/
-	bool		is_short,/*!< in: true if short inserts */
-	const byte*	ptr,	/*!< in: buffer */
-	const byte*	end_ptr,/*!< in: buffer end */
-	buf_block_t*	block,	/*!< in: page or NULL */
-	dict_index_t*	index,	/*!< in: record descriptor */
-	mtr_t*		mtr);	/*!< in: mtr or NULL */
-/**********************************************************//**
-Parses a log record of copying a record list end to a new created page.
-@return end of log record or NULL */
-const byte*
-page_parse_copy_rec_list_to_created_page(
-/*=====================================*/
-	const byte*	ptr,	/*!< in: buffer */
-	const byte*	end_ptr,/*!< in: buffer end */
-	buf_block_t*	block,	/*!< in: page or NULL */
-	dict_index_t*	index,	/*!< in: record descriptor */
-	mtr_t*		mtr);	/*!< in: mtr or NULL */
-/***********************************************************//**
-Parses log record of a record delete on a page.
-@return pointer to record end or NULL */
-const byte*
-page_cur_parse_delete_rec(
-/*======================*/
-	const byte*	ptr,	/*!< in: buffer */
-	const byte*	end_ptr,/*!< in: buffer end */
-	buf_block_t*	block,	/*!< in: page or NULL */
-	dict_index_t*	index,	/*!< in: record descriptor */
-	mtr_t*		mtr)	/*!< in/out: mini-transaction,
-				or NULL if block=NULL */
-	MY_ATTRIBUTE((warn_unused_result, nonnull(1,2,4)));
 
 /** Index page cursor */
 
 struct page_cur_t{
 	const dict_index_t*	index;
 	rec_t*		rec;	/*!< pointer to a record on page */
-	offset_t*	offsets;
+	rec_offs*	offsets;
 	buf_block_t*	block;	/*!< pointer to the block containing rec */
 };
 

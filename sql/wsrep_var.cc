@@ -30,17 +30,17 @@ ulong   wsrep_reject_queries;
 
 int wsrep_init_vars()
 {
-  wsrep_provider        = my_strdup(WSREP_NONE, MYF(MY_WME));
-  wsrep_provider_options= my_strdup("", MYF(MY_WME));
-  wsrep_cluster_address = my_strdup("", MYF(MY_WME));
-  wsrep_cluster_name    = my_strdup(WSREP_CLUSTER_NAME, MYF(MY_WME));
-  wsrep_node_name       = my_strdup("", MYF(MY_WME));
-  wsrep_node_address    = my_strdup("", MYF(MY_WME));
-  wsrep_node_incoming_address= my_strdup(WSREP_NODE_INCOMING_AUTO, MYF(MY_WME));
+  wsrep_provider        = my_strdup(PSI_INSTRUMENT_ME, WSREP_NONE, MYF(MY_WME));
+  wsrep_provider_options= my_strdup(PSI_INSTRUMENT_ME, "", MYF(MY_WME));
+  wsrep_cluster_address = my_strdup(PSI_INSTRUMENT_ME, "", MYF(MY_WME));
+  wsrep_cluster_name    = my_strdup(PSI_INSTRUMENT_ME, WSREP_CLUSTER_NAME, MYF(MY_WME));
+  wsrep_node_name       = my_strdup(PSI_INSTRUMENT_ME, "", MYF(MY_WME));
+  wsrep_node_address    = my_strdup(PSI_INSTRUMENT_ME, "", MYF(MY_WME));
+  wsrep_node_incoming_address= my_strdup(PSI_INSTRUMENT_ME, WSREP_NODE_INCOMING_AUTO, MYF(MY_WME));
   if (wsrep_gtid_mode)
-    wsrep_start_position  = my_strdup(WSREP_START_POSITION_ZERO_GTID, MYF(MY_WME));
+    wsrep_start_position  = my_strdup(PSI_INSTRUMENT_ME, WSREP_START_POSITION_ZERO_GTID, MYF(MY_WME));
   else
-    wsrep_start_position  = my_strdup(WSREP_START_POSITION_ZERO, MYF(MY_WME));
+    wsrep_start_position  = my_strdup(PSI_INSTRUMENT_ME, WSREP_START_POSITION_ZERO, MYF(MY_WME));
   return 0;
 }
 
@@ -50,7 +50,7 @@ static int get_provider_option_value(const char* opts,
 {
   int ret= 1;
   ulong opt_value_tmp;
-  char *opt_value_str, *s, *opts_copy= my_strdup(opts, MYF(MY_WME));
+  char *opt_value_str, *s, *opts_copy= my_strdup(PSI_INSTRUMENT_ME, opts, MYF(MY_WME));
 
   if ((opt_value_str= strstr(opts_copy, opt_name)) == NULL)
     goto end;
@@ -91,6 +91,12 @@ static bool refresh_provider_options()
   }
 }
 
+static void wsrep_set_wsrep_on()
+{
+  WSREP_ON_= global_system_variables.wsrep_on && wsrep_provider &&
+    strcmp(wsrep_provider, WSREP_NONE);
+}
+
 /* This is intentionally declared as a weak global symbol, so that
 linking will succeed even if the server is built with a dynamically
 linked InnoDB. */
@@ -124,6 +130,8 @@ bool wsrep_on_update (sys_var *self, THD* thd, enum_var_type var_type)
 
     thd->variables.wsrep_on= global_system_variables.wsrep_on= saved_wsrep_on;
   }
+
+  wsrep_set_wsrep_on();
 
   return false;
 }
@@ -418,6 +426,7 @@ bool wsrep_provider_update (sys_var *self, THD* thd, enum_var_type type)
   if (!rcode)
     refresh_provider_options();
 
+  wsrep_set_wsrep_on();
   mysql_mutex_lock(&LOCK_global_system_variables);
 
   return rcode;
@@ -436,7 +445,8 @@ void wsrep_provider_init (const char* value)
   }
 
   if (wsrep_provider) my_free((void *)wsrep_provider);
-  wsrep_provider= my_strdup(value, MYF(0));
+  wsrep_provider= my_strdup(PSI_INSTRUMENT_MEM, value, MYF(0));
+  wsrep_set_wsrep_on();
 }
 
 bool wsrep_provider_options_check(sys_var *self, THD* thd, set_var* var)
@@ -466,7 +476,7 @@ void wsrep_provider_options_init(const char* value)
 {
   if (wsrep_provider_options && wsrep_provider_options != value) 
     my_free((void *)wsrep_provider_options);
-  wsrep_provider_options= (value) ? my_strdup(value, MYF(0)) : NULL;
+  wsrep_provider_options= value ? my_strdup(PSI_INSTRUMENT_MEM, value, MYF(0)) : NULL;
 }
 
 bool wsrep_reject_queries_update(sys_var *self, THD* thd, enum_var_type type)
@@ -578,8 +588,8 @@ void wsrep_cluster_address_init (const char* value)
               (wsrep_cluster_address) ? wsrep_cluster_address : "null", 
               (value) ? value : "null");
 
-  my_free((void*) wsrep_cluster_address);
-  wsrep_cluster_address= my_strdup(value ? value : "", MYF(0));
+  my_free(const_cast<char*>(wsrep_cluster_address));
+  wsrep_cluster_address= my_strdup(PSI_INSTRUMENT_MEM, safe_str(value), MYF(0));
 }
 
 /* wsrep_cluster_name cannot be NULL or an empty string. */
@@ -652,7 +662,7 @@ void wsrep_node_address_init (const char* value)
   if (wsrep_node_address && strcmp(wsrep_node_address, value))
     my_free ((void*)wsrep_node_address);
 
-  wsrep_node_address= (value) ? my_strdup(value, MYF(0)) : NULL;
+  wsrep_node_address= value ? my_strdup(PSI_INSTRUMENT_MEM, value, MYF(0)) : NULL;
 }
 
 static void wsrep_slave_count_change_update ()
@@ -924,6 +934,8 @@ static void export_wsrep_status_to_mysql(THD* thd)
 
 int wsrep_show_status (THD *thd, SHOW_VAR *var, char *buff)
 {
+  /* Note that we should allow show status like 'wsrep%' even
+  when WSREP(thd) is false. */
   if (WSREP_ON)
   {
     export_wsrep_status_to_mysql(thd);

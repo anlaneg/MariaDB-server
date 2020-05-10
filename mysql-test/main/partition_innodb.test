@@ -240,12 +240,12 @@ CREATE TABLE t1 (
 
 ALTER TABLE t1 PARTITION BY HASH (id) PARTITIONS 1;
 
---error ER_FOREIGN_KEY_ON_PARTITIONED
+--error ER_FEATURE_NOT_SUPPORTED_WITH_PARTITIONING
 ALTER TABLE t1 ADD CONSTRAINT test_ibfk_1 FOREIGN KEY (parent_id) REFERENCES t2 (id);
 
 ALTER TABLE t1 PARTITION BY HASH (id) PARTITIONS 2;
 
---error ER_FOREIGN_KEY_ON_PARTITIONED
+--error ER_FEATURE_NOT_SUPPORTED_WITH_PARTITIONING
 ALTER TABLE t1 ADD CONSTRAINT test_ibfk_1 FOREIGN KEY (parent_id) REFERENCES t2 (id);
 
 DROP TABLE t1, t2;
@@ -411,9 +411,7 @@ DROP TABLE t1;
 # Bug #14673: Wrong InnoDB default row format
 #
 create table t1 (a int) engine=innodb partition by hash(a) ;
-# Data_free for InnoDB tablespace varies depending on which
-# tests have been run before this one
---replace_column 10 # 12 #
+--replace_column 12 #
 show table status like 't1';
 drop table t1;
 
@@ -423,33 +421,23 @@ drop table t1;
 create table t1 (a int)
 engine = innodb
 partition by key (a);
-# Data_free for InnoDB tablespace varies depending on which
-# tests have been run before this one
---replace_column 10 # 12 #
+--replace_column 12 Create_time
 show table status;
 insert into t1 values (0), (1), (2), (3);
-# Data_free for InnoDB tablespace varies depending on which
-# tests have been run before this one
---replace_column 10 # 12 #
+--replace_column 12 Create_time 13 Update_time
 show table status;
 drop table t1;
 
 create table t1 (a int auto_increment primary key)
 engine = innodb
 partition by key (a);
-# Data_free for InnoDB tablespace varies depending on which
-# tests have been run before this one
---replace_column 10 # 12 #
+--replace_column 12 Create_time
 show table status;
 insert into t1 values (NULL), (NULL), (NULL), (NULL);
-# Data_free for InnoDB tablespace varies depending on which
-# tests have been run before this one
---replace_column 10 # 12 #
+--replace_column 12 Create_time 13 Update_time
 show table status;
 insert into t1 values (NULL), (NULL), (NULL), (NULL);
-# Data_free for InnoDB tablespace varies depending on which
-# tests have been run before this one
---replace_column 10 # 12 #
+--replace_column 12 Create_time 13 Update_time
 show table status;
 drop table t1;
 

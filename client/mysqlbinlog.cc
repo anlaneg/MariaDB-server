@@ -1,6 +1,6 @@
 /*
    Copyright (c) 2000, 2014, Oracle and/or its affiliates.
-   Copyright (c) 2009, 2019, MariaDB
+   Copyright (c) 2009, 2020, MariaDB
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -41,6 +41,7 @@
 /* That one is necessary for defines of OPTION_NO_FOREIGN_KEY_CHECKS etc */
 #include "sql_priv.h"
 #include "sql_basic_types.h"
+#include <atomic>
 #include "log_event.h"
 #include "compat56.h"
 #include "sql_common.h"
@@ -61,6 +62,9 @@
 extern "C" unsigned char *mysql_net_store_length(unsigned char *packet, size_t length);
 #define net_store_length mysql_net_store_length
 
+#define key_memory_TABLE_RULE_ENT 0
+#define key_memory_rpl_filter 0
+
 Rpl_filter *binlog_filter= 0;
 
 #define BIN_LOG_HEADER_SIZE	4
@@ -74,7 +78,10 @@ DYNAMIC_ARRAY binlog_events; // Storing the events output string
 DYNAMIC_ARRAY events_in_stmt; // Storing the events that in one statement
 String stop_event_string; // Storing the STOP_EVENT output string
 
+extern "C" {
 char server_version[SERVER_VERSION_LENGTH];
+}
+
 ulong server_id = 0;
 
 // needed by net_serv.c
@@ -90,7 +97,7 @@ static char *result_file_name= 0;
 static const char *output_prefix= "";
 
 #ifndef DBUG_OFF
-static const char *default_dbug_option = "d:t:o,/tmp/mysqlbinlog.trace";
+static const char *default_dbug_option = "d:t:o,/tmp/mariadb-binlog.trace";
 const char *current_dbug_option= default_dbug_option;
 #endif
 static const char *load_groups[]=
@@ -181,7 +188,7 @@ enum Exit_status {
 */
 static Annotate_rows_log_event *annotate_event= NULL;
 
-void free_annotate_event()
+static void free_annotate_event()
 {
   if (annotate_event)
   {
@@ -196,7 +203,7 @@ Log_event* read_remote_annotate_event(uchar* net_buf, ulong event_len,
   uchar *event_buf;
   Log_event* event;
 
-  if (!(event_buf= (uchar*) my_malloc(event_len + 1, MYF(MY_WME))))
+  if (!(event_buf= (uchar*) my_malloc(PSI_NOT_INSTRUMENTED, event_len + 1, MYF(MY_WME))))
   {
     error("Out of memory");
     return 0;
@@ -308,7 +315,7 @@ public:
 
   int init()
   {
-    return my_init_dynamic_array(&file_names, sizeof(File_name_record),
+    return my_init_dynamic_array(PSI_NOT_INSTRUMENTED, &file_names, sizeof(File_name_record),
                                  100, 100, MYF(0));
   }
 
@@ -543,7 +550,7 @@ Exit_status Load_log_processor::process_first_event(const char *bname,
   File_name_record rec;
   DBUG_ENTER("Load_log_processor::process_first_event");
 
-  if (!(fname= (char*) my_malloc(full_len,MYF(MY_WME))))
+  if (!(fname= (char*) my_malloc(PSI_NOT_INSTRUMENTED, full_len,MYF(MY_WME))))
   {
     error("Out of memory.");
     delete ce;
@@ -927,7 +934,7 @@ static bool print_row_event(PRINT_EVENT_INFO *print_event_info, Log_event *ev,
     }
   }
 
-  /* 
+  /*
      end of statement check:
        i) destroy/free ignored maps
       ii) if skip event
@@ -938,21 +945,21 @@ static bool print_row_event(PRINT_EVENT_INFO *print_event_info, Log_event *ev,
    */
   if (is_stmt_end)
   {
-    /* 
+    /*
       Now is safe to clear ignored map (clear_tables will also
       delete original table map events stored in the map).
     */
     if (print_event_info->m_table_map_ignored.count() > 0)
       print_event_info->m_table_map_ignored.clear_tables();
 
-    /* 
+    /*
       If there is a kept Annotate event and all corresponding
       rbr-events were filtered away, the Annotate event was not
       freed and it is just the time to do it.
     */
-      free_annotate_event();
+    free_annotate_event();
 
-    /* 
+    /*
        One needs to take into account an event that gets
        filtered but was last event in the statement. If this is
        the case, previous rows events that were written into
@@ -1958,7 +1965,7 @@ get_one_option(const struct my_option *opt, char *argument, const char *)
     {
       my_free(pass);
       char *start=argument;
-      pass= my_strdup(argument,MYF(MY_FAE));
+      pass= my_strdup(PSI_NOT_INSTRUMENTED, argument,MYF(MY_FAE));
       while (*argument) *argument++= 'x';		/* Destroy argument */
       if (*start)
         start[1]=0;				/* Cut length of argument */
@@ -3044,10 +3051,10 @@ int main(int argc, char** argv)
 
   if (opt_flashback)
   {
-    my_init_dynamic_array(&binlog_events, sizeof(LEX_STRING), 1024, 1024,
-                          MYF(0));
-    my_init_dynamic_array(&events_in_stmt, sizeof(Rows_log_event*), 1024, 1024,
-                          MYF(0));
+    my_init_dynamic_array(PSI_NOT_INSTRUMENTED, &binlog_events,
+                          sizeof(LEX_STRING), 1024, 1024, MYF(0));
+    my_init_dynamic_array(PSI_NOT_INSTRUMENTED, &events_in_stmt,
+                          sizeof(Rows_log_event*), 1024, 1024, MYF(0));
   }
   if (opt_stop_never)
     to_last_remote_log= TRUE;
@@ -3095,7 +3102,7 @@ int main(int argc, char** argv)
       retval= ERROR_STOP;
       goto err;
     }
-    dirname_for_local_load= my_strdup(my_tmpdir(&tmpdir), MY_WME);
+    dirname_for_local_load= my_strdup(PSI_NOT_INSTRUMENTED, my_tmpdir(&tmpdir), MY_WME);
   }
 
   if (load_processor.init())

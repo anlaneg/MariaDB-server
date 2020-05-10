@@ -1,5 +1,5 @@
 /* Copyright (c) 2000, 2011, Oracle and/or its affiliates.
-   Copyright (C) 2011 Monty Program Ab
+   Copyright (C) 2011, 2020, MariaDB
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -84,8 +84,10 @@ bool init_errmessage(void)
   if (!use_english)
   {
     /* Read messages from file. */
-    use_english= !read_texts(ERRMSG_FILE,lang, &original_error_messages);
-    error= TRUE;
+    use_english= read_texts(ERRMSG_FILE,lang, &original_error_messages);
+    error= use_english != FALSE;
+    if (error)
+      sql_print_error("Could not load error messages for %s",lang);
   }
 
   if (use_english)
@@ -118,8 +120,9 @@ bool init_errmessage(void)
       all_errors+= errors_per_range[i];
 
     if (!(original_error_messages= (const char***)
-          my_malloc((all_errors + MAX_ERROR_RANGES)* sizeof(void*),
-                     MYF(MY_ZEROFILL))))
+          my_malloc(PSI_NOT_INSTRUMENTED,
+                    (all_errors + MAX_ERROR_RANGES)*sizeof(void*),
+                    MYF(MY_ZEROFILL))))
       DBUG_RETURN(TRUE);
 
     errmsgs= (const char**)(original_error_messages + MAX_ERROR_RANGES);
@@ -313,7 +316,8 @@ bool read_texts(const char *file_name, const char *language,
     DBUG_RETURN(1);
 
   if (!(*data= (const char***)
-	my_malloc((size_t) ((MAX_ERROR_RANGES+1) * sizeof(char**) +
+	my_malloc(key_memory_errmsgs,
+                  (size_t) ((MAX_ERROR_RANGES+1) * sizeof(char**) +
                             MY_MAX(msg_file.text_length, msg_file.errors * 2)+
                             msg_file.errors * sizeof(char*)),
                   MYF(MY_WME))))

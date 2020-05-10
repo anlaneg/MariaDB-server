@@ -1,6 +1,6 @@
 DROP TABLE IF EXISTS t1,t2,t3,t4;
 DROP DATABASE IF EXISTS dbt3_s001;
-SET SESSION STORAGE_ENGINE='InnoDB';
+SET SESSION DEFAULT_STORAGE_ENGINE='InnoDB';
 set @innodb_stats_persistent_save= @@innodb_stats_persistent;
 set @innodb_stats_persistent_sample_pages_save=
 @@innodb_stats_persistent_sample_pages;
@@ -1186,7 +1186,7 @@ EXPLAIN
       "key_length": "3070",
       "used_key_parts": ["f2", "pk1"],
       "rows": 1,
-      "filtered": 50,
+      "filtered": 100,
       "index_condition": "t1.pk1 <= 5 and t1.pk2 <= 5 and t1.f2 = 'abc'",
       "attached_condition": "t1.f1 <= '3'"
     }
@@ -1216,7 +1216,7 @@ EXPLAIN
       "key_length": "3011",
       "used_key_parts": ["pk1", "f2", "pk2"],
       "rows": 1,
-      "filtered": 50,
+      "filtered": 100,
       "index_condition": "t1.f2 <= 5 and t1.pk2 <= 5 and t1.pk1 = 'abc'",
       "attached_condition": "t1.f1 <= '3'"
     }

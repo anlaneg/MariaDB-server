@@ -1420,9 +1420,10 @@ void get_delayed_table_estimates(TABLE *table,
   /* Calculate cost of scanning the temptable */
   double data_size= COST_MULT(item->jtbm_record_count,
                               hash_sj_engine->tmp_table->s->reclength);
-  /* Do like in handler::read_time */
-  *scan_time= data_size/IO_SIZE + 2;
-} 
+  /* Do like in handler::scan_time() */
+  *scan_time= ((data_size/table->file->stats.block_size+2) *
+               table->file->avg_io_cost());
+}
 
 
 /**
@@ -2204,7 +2205,7 @@ int pull_out_semijoin_tables(JOIN *join)
     /*
       Don't do table pull-out for nested joins (if we get nested joins here, it
       means these are outer joins. It is theoretically possible to do pull-out
-      for some of the outer tables but we dont support this currently.
+      for some of the outer tables but we don't support this currently.
     */
     bool have_join_nest_children= FALSE;
 
@@ -3050,12 +3051,13 @@ bool Sj_materialization_picker::check_qep(JOIN *join,
     }
     else
     {
-      Json_writer_object trace(join->thd);
-      trace.add("strategy", "SJ-Materialization");
       /* This is SJ-Materialization with lookups */
       Cost_estimate prefix_cost; 
       signed int first_tab= (int)idx - mat_info->tables;
       double prefix_rec_count;
+      Json_writer_object trace(join->thd);
+      trace.add("strategy", "SJ-Materialization");
+
       if (first_tab < (int)join->const_tables)
       {
         prefix_cost.reset();
@@ -3084,7 +3086,7 @@ bool Sj_materialization_picker::check_qep(JOIN *join,
       *record_count= prefix_rec_count;
       *handled_fanout= new_join_tab->emb_sj_nest->sj_inner_tables;
       *strategy= SJ_OPT_MATERIALIZE;
-      if (unlikely(join->thd->trace_started()))
+      if (unlikely(trace.trace_started()))
       {
         trace.add("records", *record_count);
         trace.add("read_time", *read_time);
@@ -3143,7 +3145,7 @@ bool Sj_materialization_picker::check_qep(JOIN *join,
       prefix_rec_count= COST_MULT(prefix_rec_count, curpos.records_read);
       prefix_cost= COST_ADD(prefix_cost, curpos.read_time);
       prefix_cost= COST_ADD(prefix_cost,
-                            prefix_rec_count / (double) TIME_FOR_COMPARE);
+                            prefix_rec_count / TIME_FOR_COMPARE);
       //TODO: take into account join condition selectivity here
     }
 
@@ -3166,7 +3168,7 @@ bool Sj_materialization_picker::check_qep(JOIN *join,
     */
     *record_count= prefix_rec_count;
     *handled_fanout= mat_nest->sj_inner_tables;
-    if (unlikely(join->thd->trace_started()))
+    if (unlikely(trace.trace_started()))
     {
       trace.add("records", *record_count);
       trace.add("read_time", *read_time);
@@ -3266,7 +3268,7 @@ bool LooseScan_picker::check_qep(JOIN *join,
     */
     *strategy= SJ_OPT_LOOSE_SCAN;
     *handled_fanout= first->table->emb_sj_nest->sj_inner_tables;
-    if (unlikely(join->thd->trace_started()))
+    if (unlikely(trace.trace_started()))
     {
       trace.add("records", *record_count);
       trace.add("read_time", *read_time);
@@ -3384,7 +3386,7 @@ bool Firstmatch_picker::check_qep(JOIN *join,
         *handled_fanout= firstmatch_need_tables;
         /* *record_count and *read_time were set by the above call */
         *strategy= SJ_OPT_FIRST_MATCH;
-        if (unlikely(join->thd->trace_started()))
+        if (unlikely(trace.trace_started()))
         {
           trace.add("records", *record_count);
           trace.add("read_time", *read_time);
@@ -3469,6 +3471,7 @@ bool Duplicate_weedout_picker::check_qep(JOIN *join,
     uint temptable_rec_size;
     Json_writer_object trace(join->thd);
     trace.add("strategy", "DuplicateWeedout");
+
     if (first_tab == join->const_tables)
     {
       prefix_rec_count= 1.0;
@@ -3529,7 +3532,7 @@ bool Duplicate_weedout_picker::check_qep(JOIN *join,
     *record_count= prefix_rec_count * sj_outer_fanout;
     *handled_fanout= dups_removed_fanout;
     *strategy= SJ_OPT_DUPS_WEEDOUT;
-    if (unlikely(join->thd->trace_started()))
+    if (unlikely(trace.trace_started()))
     {
       trace.add("records", *record_count);
       trace.add("read_time", *read_time);
@@ -3727,18 +3730,20 @@ static void recalculate_prefix_record_count(JOIN *join, uint start, uint end)
 
 void fix_semijoin_strategies_for_picked_join_order(JOIN *join)
 {
+  join->sjm_lookup_tables= 0;
+  join->sjm_scan_tables= 0;
+  if (!join->select_lex->sj_nests.elements)
+    return;
+
+  THD *thd= join->thd;
   uint table_count=join->table_count;
   uint tablenr;
   table_map remaining_tables= 0;
   table_map handled_tabs= 0;
-  join->sjm_lookup_tables= 0;
-  join->sjm_scan_tables= 0;
-  THD *thd= join->thd;
-  if (!join->select_lex->sj_nests.elements)
-    return;
   Json_writer_object trace_wrapper(thd);
   Json_writer_array trace_semijoin_strategies(thd,
-                                   "fix_semijoin_strategies_for_picked_join_order");
+                                              "fix_semijoin_strategies_for_picked_join_order");
+
   for (tablenr= table_count - 1 ; tablenr != join->const_tables - 1; tablenr--)
   {
     POSITION *pos= join->best_positions + tablenr;
@@ -4454,12 +4459,12 @@ SJ_TMP_TABLE::create_sj_weedout_tmp_table(THD *thd)
     temp_pool_slot = bitmap_lock_set_next(&temp_pool);
 
   if (temp_pool_slot != MY_BIT_NONE) // we got a slot
-    sprintf(path, "%s_%lx_%i", tmp_file_prefix,
+    sprintf(path, "%s-subquery-%lx-%i", tmp_file_prefix,
 	    current_pid, temp_pool_slot);
   else
   {
     /* if we run out of slots or we are not using tempool */
-    sprintf(path,"%s%lx_%lx_%x", tmp_file_prefix,current_pid,
+    sprintf(path,"%s-subquery-%lx-%lx-%x", tmp_file_prefix,current_pid,
             (ulong) thd->thread_id, thd->tmp_table++);
   }
   fn_format(path, path, mysql_tmpdir, "", MY_REPLACE_EXT|MY_UNPACK_FILENAME);
@@ -4470,8 +4475,8 @@ SJ_TMP_TABLE::create_sj_weedout_tmp_table(THD *thd)
     using_unique_constraint= TRUE;
 
   /* STEP 3: Allocate memory for temptable description */
-  init_sql_alloc(&own_root, "SJ_TMP_TABLE",
-                 TABLE_ALLOC_BLOCK_SIZE, 0, MYF(MY_THREAD_SPECIFIC));
+  init_sql_alloc(PSI_INSTRUMENT_ME, &own_root, TABLE_ALLOC_BLOCK_SIZE, 0,
+                 MYF(MY_THREAD_SPECIFIC));
   if (!multi_alloc_root(&own_root,
                         &table, sizeof(*table),
                         &share, sizeof(*share),

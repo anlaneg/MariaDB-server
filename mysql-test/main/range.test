@@ -960,6 +960,7 @@ CREATE TABLE t1 (
 
 INSERT INTO t1 VALUES
   ('B'), ('A'), ('A'), ('C'), ('B'), ('A'), ('A'), ('C'), ('A');
+INSERT INTO t1 VALUES ('X'),('Y'),('Z'),('X1'),('Y1'),('Z1'),('X1'),('Y1'),('Z1');
 
 SELECT a FROM t1 WHERE a='b' OR a='B';
 EXPLAIN SELECT a FROM t1 WHERE a='b' OR a='B';
@@ -1077,7 +1078,7 @@ INSERT INTO t3 VALUES
 # To make range scan compelling to the optimizer
 INSERT INTO t3 SELECT * FROM t3 WHERE a = 10;
 INSERT INTO t3 SELECT * FROM t3 WHERE a = 10;
-
+insert into t1 select -a,b from t1;
 
 #
 # Problem#1 Test queries. Will give missing results unless Problem#1 is fixed.
@@ -1717,6 +1718,22 @@ select * from t1;
 drop table t1;
 
 --echo #
+--echo # MDEV-22191: Range access is not picked when index_merge_sort_union is turned off
+--echo #
+
+set @save_optimizer_switch=@@optimizer_switch;
+set @save_optimizer_switch="index_merge_sort_union=OFF";
+CREATE TABLE t1 (a INT, INDEX(a));
+INSERT INTO t1 VALUES (0),(1),(2),(3),(4),(5),(6),(7),(8),(9);
+explain
+SELECT * FROM t1 WHERE a > 5;
+SELECT * FROM t1 WHERE a > 5;
+set @@optimizer_switch=@save_optimizer_switch;
+drop table t1;
+
+--echo # End of 5.5 tests
+
+--echo #
 --echo # BUG#13731380: RANGE OPTIMIZER CALLS RECORDS_IN_RANGE() FOR OPEN RANGE
 --echo #
 
@@ -2106,7 +2123,6 @@ drop table t1,ten,t2;
 --echo # MDEV-15777: Use inferred IS NOT NULL predicates in the range optimizer
 --echo #
 
-set @save_optimizer_switch= @@optimizer_switch;
 set @@optimizer_switch='not_null_range_scan=on';
 create table ten(a int);
 insert into ten values (0),(1),(2),(3),(4),(5),(6),(7),(8),(9);
@@ -2279,6 +2295,29 @@ drop table t1,t2;
 
 drop table ten,one_k;
 set @@optimizer_switch= @save_optimizer_switch;
+
+--echo #
+--echo # MDEV-21683: ANDing of the range from inferred NOT NULL condition and
+--echo #             the range from other conditions produces IMPOSSIBLE range
+--echo #
+
+SET @save_optimizer_switch= @@optimizer_switch;
+
+CREATE TABLE t1 (a INT, KEY(a));
+INSERT INTO t1 VALUES (8),(9);
+
+CREATE TABLE t2 (pk INT, b INT, PRIMARY KEY(pk));
+INSERT INTO t2 VALUES (1,1),(2,2);
+
+SET optimizer_switch = 'not_null_range_scan=on';
+let $q=
+SELECT * FROM t1 LEFT JOIN t2 ON a = pk WHERE b >= 0 AND pk IS NULL;
+eval EXPLAIN EXTENDED $q;
+eval $q;
+
+DROP TABLE t1, t2;
+
+SET @@optimizer_switch= @save_optimizer_switch;
 
 --echo #
 --echo # End of 10.5 tests

@@ -1,4 +1,4 @@
-/* Copyright (c) 2000, 2014, Oracle and/or its affiliates.
+/* Copyright (c) 2000, 2019, Oracle and/or its affiliates.
    Copyright (c) 2009, 2020, MariaDB Corporation
 
    This program is free software; you can redistribute it and/or modify
@@ -511,7 +511,7 @@ void LEX::add_key_to_list(LEX_CSTRING *field_name,
 }
 
 
-bool LEX::add_alter_list(const char *name, Virtual_column_info *expr,
+bool LEX::add_alter_list(LEX_CSTRING name, Virtual_column_info *expr,
                          bool exists)
 {
   MEM_ROOT *mem_root= thd->mem_root;
@@ -520,6 +520,17 @@ bool LEX::add_alter_list(const char *name, Virtual_column_info *expr,
     return true;
   alter_info.alter_list.push_back(ac, mem_root);
   alter_info.flags|= ALTER_CHANGE_COLUMN_DEFAULT;
+  return false;
+}
+
+
+bool LEX::add_alter_list(LEX_CSTRING name, LEX_CSTRING new_name, bool exists)
+{
+  Alter_column *ac= new (thd->mem_root) Alter_column(name, new_name, exists);
+  if (unlikely(ac == NULL))
+    return true;
+  alter_info.alter_list.push_back(ac, thd->mem_root);
+  alter_info.flags|= ALTER_RENAME_COLUMN;
   return false;
 }
 
@@ -1784,17 +1795,27 @@ static inline uint int_token(const char *str,uint length)
 */
 bool Lex_input_stream::consume_comment(int remaining_recursions_permitted)
 {
+  // only one level of nested comments are allowed
+  DBUG_ASSERT(remaining_recursions_permitted == 0 ||
+              remaining_recursions_permitted == 1);
   uchar c;
   while (!eof())
   {
     c= yyGet();
 
-    if (remaining_recursions_permitted > 0)
+    if (remaining_recursions_permitted == 1)
     {
       if ((c == '/') && (yyPeek() == '*'))
       {
-        yySkip(); // Eat asterisk
-        consume_comment(remaining_recursions_permitted - 1);
+        yyUnput('(');  // Replace nested "/*..." with "(*..."
+        yySkip();      // and skip "("
+
+        yySkip(); /* Eat asterisk */
+        if (consume_comment(0))
+          return true;
+
+        yyUnput(')');  // Replace "...*/" with "...*)"
+        yySkip();      // and skip ")"
         continue;
       }
     }
@@ -3503,10 +3524,74 @@ bool st_select_lex::setup_ref_array(THD *thd, uint order_group_num)
 }
 
 
+/*
+  @brief
+    Print the whole statement
+
+    @param str         Print into this string
+    @param query_type  Flags describing how to print
+
+  @detail
+    The intent is to allow to eventually print back any query.
+
+    This is useful e.g. for storage engines that take over diferrent kinds of
+    queries
+*/
+
+void LEX::print(String *str, enum_query_type query_type)
+{
+  if (sql_command == SQLCOM_UPDATE)
+  {
+    SELECT_LEX *sel= first_select_lex();
+    str->append(STRING_WITH_LEN("UPDATE "));
+    if (ignore)
+      str->append(STRING_WITH_LEN("IGNORE "));
+    // table name
+    str->append(query_tables->alias);
+    str->append(STRING_WITH_LEN(" SET "));
+    // print item assignments
+    List_iterator<Item> it(sel->item_list);
+    List_iterator<Item> it2(value_list);
+    Item *col_ref, *value;
+    bool first= true;
+    while ((col_ref= it++) && (value= it2++))
+    {
+      if (first)
+        first= false;
+      else
+        str->append(STRING_WITH_LEN(", "));
+      col_ref->print(str, query_type);
+      str->append(STRING_WITH_LEN("="));
+      value->print(str, query_type);
+    }
+
+    str->append(STRING_WITH_LEN(" WHERE "));
+    sel->where->print(str, query_type);
+
+    if (sel->order_list.elements)
+    {
+      str->append(STRING_WITH_LEN(" ORDER BY "));
+      for (ORDER *ord= sel->order_list.first; ord; ord= ord->next)
+      {
+        if (ord != sel->order_list.first)
+          str->append(STRING_WITH_LEN(", "));
+        (*ord->item)->print(str, query_type);
+      }
+    }
+    if (sel->select_limit)
+    {
+      str->append(STRING_WITH_LEN(" LIMIT "));
+      sel->select_limit->print(str, query_type);
+    }
+  }
+  else
+    DBUG_ASSERT(0); // Not implemented yet
+}
+
 void st_select_lex_unit::print(String *str, enum_query_type query_type)
 {
   if (with_clause)
-    with_clause->print(str, query_type);
+    with_clause->print(thd, str, query_type);
   for (SELECT_LEX *sl= first_select(); sl; sl= sl->next_select())
   {
     if (sl != first_select())
@@ -3751,12 +3836,12 @@ LEX::LEX()
     default_used(0), is_lex_started(0), limit_rows_examined_cnt(ULONGLONG_MAX)
 {
 
-  init_dynamic_array2(&plugins, sizeof(plugin_ref), plugins_static_buffer,
-                      INITIAL_LEX_PLUGIN_LIST_SIZE,
+  init_dynamic_array2(PSI_INSTRUMENT_ME, &plugins, sizeof(plugin_ref),
+                      plugins_static_buffer, INITIAL_LEX_PLUGIN_LIST_SIZE,
                       INITIAL_LEX_PLUGIN_LIST_SIZE, 0);
   reset_query_tables_list(TRUE);
   mi.init();
-  init_dynamic_array2(&delete_gtid_domain, sizeof(uint32),
+  init_dynamic_array2(PSI_INSTRUMENT_ME, &delete_gtid_domain, sizeof(uint32),
                       gtid_domain_static_buffer,
                       initial_gtid_domain_buffer_size,
                       initial_gtid_domain_buffer_size, 0);
@@ -5584,8 +5669,8 @@ bool LEX::set_arena_for_set_stmt(Query_arena *backup)
     mem_root_for_set_stmt= new MEM_ROOT();
     if (unlikely(!(mem_root_for_set_stmt)))
       DBUG_RETURN(1);
-    init_sql_alloc(mem_root_for_set_stmt, "set_stmt",
-                   ALLOC_ROOT_SET, ALLOC_ROOT_SET, MYF(MY_THREAD_SPECIFIC));
+    init_sql_alloc(PSI_INSTRUMENT_ME, mem_root_for_set_stmt, ALLOC_ROOT_SET,
+                   ALLOC_ROOT_SET, MYF(MY_THREAD_SPECIFIC));
   }
   if (unlikely(!(arena_for_set_stmt= new(mem_root_for_set_stmt)
                  Query_arena_memroot(mem_root_for_set_stmt,
@@ -5712,7 +5797,7 @@ int st_select_lex_unit::save_union_explain(Explain_query *output)
     eu->connection_type= Explain_node::EXPLAIN_NODE_DERIVED;
   /* 
     Note: Non-merged semi-joins cannot be made out of UNIONs currently, so we
-    dont ever set EXPLAIN_NODE_NON_MERGED_SJ.
+    don't ever set EXPLAIN_NODE_NON_MERGED_SJ.
   */
   for (SELECT_LEX *sl= first; sl; sl= sl->next_select())
     eu->add_select(sl->select_number);
@@ -6181,7 +6266,7 @@ static bool is_old(const char *str)
 bool LEX::is_trigger_new_or_old_reference(const LEX_CSTRING *name) const
 {
   // "name" is not necessarily NULL-terminated!
-  return sphead && sphead->m_handler->type() == TYPE_ENUM_TRIGGER &&
+  return sphead && sphead->m_handler->type() == SP_TYPE_TRIGGER &&
          name->length == 3 && (is_new(name->str) || is_old(name->str));
 }
 
@@ -8008,7 +8093,8 @@ Item *LEX::create_item_limit(THD *thd, const Lex_ident_cli_st *ca)
   if (unlikely(!(item= new (thd->mem_root)
                  Item_splocal(thd, rh, &sa,
                               spv->offset, spv->type_handler(),
-                              pos.pos(), pos.length()))))
+                              clone_spec_offset ? 0 : pos.pos(),
+                              clone_spec_offset ? 0 : pos.length()))))
     return NULL;
 #ifdef DBUG_ASSERT_EXISTS
   item->m_sp= sphead;
@@ -8108,14 +8194,15 @@ Item *LEX::create_item_ident_sp(THD *thd, Lex_ident_sys_st *name,
     }
 
     Query_fragment pos(thd, sphead, start, end);
+    uint f_pos= clone_spec_offset ? 0 : pos.pos();
+    uint f_length= clone_spec_offset ? 0 : pos.length();
     Item_splocal *splocal= spv->field_def.is_column_type_ref() ?
       new (thd->mem_root) Item_splocal_with_delayed_data_type(thd, rh, name,
                                                               spv->offset,
-                                                              pos.pos(),
-                                                              pos.length()) :
+                                                              f_pos, f_length) :
       new (thd->mem_root) Item_splocal(thd, rh, name,
                                        spv->offset, spv->type_handler(),
-                                       pos.pos(), pos.length());
+                                       f_pos, f_length);
     if (unlikely(splocal == NULL))
       return NULL;
 #ifdef DBUG_ASSERT_EXISTS
@@ -8934,7 +9021,7 @@ sp_package *LEX::create_package_start(THD *thd,
   }
   if (unlikely(set_command_with_check(command, options)))
     return NULL;
-  if (sph->type() == TYPE_ENUM_PACKAGE_BODY)
+  if (sph->type() == SP_TYPE_PACKAGE_BODY)
   {
     /*
       If we start parsing a "CREATE PACKAGE BODY", we need to load
@@ -11241,7 +11328,7 @@ bool LEX::add_column_foreign_key(const LEX_CSTRING *name,
 bool LEX::stmt_grant_table(THD *thd,
                            Grant_privilege *grant,
                            const Lex_grant_object_name &ident,
-                           uint grant_option)
+                           privilege_t grant_option)
 {
   sql_command= SQLCOM_GRANT;
   return
@@ -11256,7 +11343,7 @@ bool LEX::stmt_revoke_table(THD *thd,
 {
   sql_command= SQLCOM_REVOKE;
   return
-    grant->set_object_name(thd, ident, current_select, 0) ||
+    grant->set_object_name(thd, ident, current_select, NO_ACL) ||
     !(m_sql_cmd= new (thd->mem_root) Sql_cmd_grant_table(sql_command, *grant));
 }
 
@@ -11265,7 +11352,7 @@ bool LEX::stmt_grant_sp(THD *thd,
                         Grant_privilege *grant,
                         const Lex_grant_object_name &ident,
                         const Sp_handler &sph,
-                        uint grant_option)
+                        privilege_t grant_option)
 {
   sql_command= SQLCOM_GRANT;
   return
@@ -11283,14 +11370,14 @@ bool LEX::stmt_revoke_sp(THD *thd,
 {
   sql_command= SQLCOM_REVOKE;
   return
-    grant->set_object_name(thd, ident, current_select, 0) ||
+    grant->set_object_name(thd, ident, current_select, NO_ACL) ||
     add_grant_command(thd, grant->columns()) ||
     !(m_sql_cmd= new (thd->mem_root) Sql_cmd_grant_sp(sql_command,
                                                       *grant, sph));
 }
 
 
-bool LEX::stmt_grant_proxy(THD *thd, LEX_USER *user, uint grant_option)
+bool LEX::stmt_grant_proxy(THD *thd, LEX_USER *user, privilege_t grant_option)
 {
   users_list.push_front(user);
   sql_command= SQLCOM_GRANT;
@@ -11303,5 +11390,6 @@ bool LEX::stmt_revoke_proxy(THD *thd, LEX_USER *user)
 {
   users_list.push_front(user);
   sql_command= SQLCOM_REVOKE;
-  return !(m_sql_cmd= new (thd->mem_root) Sql_cmd_grant_proxy(sql_command, 0));
+  return !(m_sql_cmd= new (thd->mem_root) Sql_cmd_grant_proxy(sql_command,
+                                                              NO_ACL));
 }

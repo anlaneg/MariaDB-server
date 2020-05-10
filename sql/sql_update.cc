@@ -1,5 +1,5 @@
 /* Copyright (c) 2000, 2016, Oracle and/or its affiliates.
-   Copyright (c) 2011, 2016, MariaDB
+   Copyright (c) 2011, 2020, MariaDB
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -35,7 +35,6 @@
 #include "probes_mysql.h"
 #include "debug_sync.h"
 #include "key.h"                                // is_key_used
-#include "sql_acl.h"                            // *_ACL, check_grant
 #include "records.h"                            // init_read_record,
                                                 // end_read_record
 #include "filesort.h"                           // filesort
@@ -373,7 +372,7 @@ int mysql_update(THD *thd,
   bool          need_sort= TRUE;
   bool          reverse= FALSE;
 #ifndef NO_EMBEDDED_ACCESS_CHECKS
-  uint		want_privilege;
+  privilege_t   want_privilege(NO_ACL);
 #endif
   uint          table_count= 0;
   ha_rows	updated, found;
@@ -464,6 +463,7 @@ int mysql_update(THD *thd,
       my_error(ER_NOT_CONSTANT_EXPRESSION, MYF(0), "FOR PORTION OF");
       DBUG_RETURN(true);
     }
+    table->no_cache= true;
   }
 
   old_covering_keys= table->covering_keys;		// Keys used in WHERE
@@ -614,9 +614,11 @@ int mysql_update(THD *thd,
   else
   {
     ha_rows scanned_limit= query_plan.scanned_rows;
+    table->no_keyread= 1;
     query_plan.index= get_index_for_order(order, table, select, limit,
                                           &scanned_limit, &need_sort,
                                           &reverse);
+    table->no_keyread= 0;
     if (!need_sort)
       query_plan.scanned_rows= scanned_limit;
 
@@ -968,6 +970,9 @@ update_begin:
   */
   can_compare_record= records_are_comparable(table);
   explain->tracker.on_scan_init();
+
+  table->file->prepare_for_insert(1);
+  DBUG_ASSERT(table->file->inited != handler::NONE);
 
   THD_STAGE_INFO(thd, stage_updating);
   while (!(error=info.read_record()) && !thd->killed)
@@ -1497,8 +1502,8 @@ bool unsafe_key_update(List<TABLE_LIST> leaves, table_map tables_for_update)
     if (!tl->is_jtbm() && (tl->table->map & tables_for_update))
     {
       TABLE *table1= tl->table;
-      bool primkey_clustered= (table1->file->primary_key_is_clustered() &&
-                               table1->s->primary_key != MAX_KEY);
+      bool primkey_clustered= (table1->file->
+                               pk_is_clustering_key(table1->s->primary_key));
 
       bool table_partitioned= false;
 #ifdef WITH_PARTITION_STORAGE_ENGINE
@@ -1849,9 +1854,8 @@ int mysql_multi_update_prepare(THD *thd)
   /* now lock and fill tables */
   if (!thd->stmt_arena->is_stmt_prepare() &&
       lock_tables(thd, table_list, table_count, 0))
-  {
     DBUG_RETURN(TRUE);
-  }
+
   (void) read_statistics_for_tables_if_needed(thd, table_list);
   /* @todo: downgrade the metadata locks here. */
 
@@ -1874,8 +1878,8 @@ int mysql_multi_update_prepare(THD *thd)
         (SELECT_ACL & ~tlist->grant.privilege);
       table->grant.want_privilege= (SELECT_ACL & ~table->grant.privilege);
     }
-    DBUG_PRINT("info", ("table: %s  want_privilege: %u", tl->alias.str,
-                        (uint) table->grant.want_privilege));
+    DBUG_PRINT("info", ("table: %s  want_privilege: %llx", tl->alias.str,
+                        (longlong) table->grant.want_privilege));
   }
   /*
     Set exclude_from_table_unique_test value back to FALSE. It is needed for
@@ -2027,13 +2031,14 @@ int multi_update::prepare(List<Item> &not_used_values,
     {
       table->read_set= &table->def_read_set;
       bitmap_union(table->read_set, &table->tmp_set);
+      table->file->prepare_for_insert(1);
     }
   }
   if (unlikely(error))
     DBUG_RETURN(1);    
 
   /*
-    Save tables beeing updated in update_tables
+    Save tables being updated in update_tables
     update_table->shared is position for table
     Don't use key read on tables that are updated
   */
@@ -2587,6 +2592,9 @@ int multi_update::send_data(List<Item> &not_used_values)
       TABLE *tmp_table= tmp_tables[offset];
       if (copy_funcs(tmp_table_param[offset].items_to_copy, thd))
         DBUG_RETURN(1);
+      /* rowid field is NULL if join tmp table has null row from outer join */
+      if (tmp_table->field[0]->is_null())
+        continue;
       /* Store regular updated fields in the row. */
       DBUG_ASSERT(1 + unupdated_check_opt_tables.elements ==
                   tmp_table_param[offset].func_count);
@@ -2784,6 +2792,7 @@ int multi_update::do_updates()
       uint field_num= 0;
       do
       {
+        DBUG_ASSERT(!tmp_table->field[field_num]->is_null());
         String rowid;
         tmp_table->field[field_num]->val_str(&rowid);
         if (unlikely((local_error= tbl->file->ha_rnd_pos(tbl->record[0],

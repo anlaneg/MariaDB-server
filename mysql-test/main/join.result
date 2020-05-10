@@ -1473,8 +1473,8 @@ id	select_type	table	type	possible_keys	key	key_len	ref	rows	Extra
 1	SIMPLE	DU	system	dog_id	NULL	NULL	NULL	1	
 1	SIMPLE	D	system	PRIMARY	NULL	NULL	NULL	1	
 1	SIMPLE	DSAR	system	NULL	NULL	NULL	NULL	1	
-1	SIMPLE	DT	range	t_id	t_id	2	NULL	2	Using where
-1	SIMPLE	DSA	ref	PRIMARY	PRIMARY	8	const,test.DT.t_id,func	1	Using index
+1	SIMPLE	DSA	ref	PRIMARY	PRIMARY	4	const	3	Using where; Using index
+1	SIMPLE	DT	ALL	t_id	NULL	NULL	NULL	2	Using where; Using join buffer (flat, BNL join)
 SELECT * FROM t5 DU, t1 D, t4 DT, t2 DSA, t3 DSAR
 WHERE DU.dog_id=D.dog_id AND D.dog_id=DT.dog_id AND D.birthday=DT.birthday AND
 DT.t_id=DSA.t_id AND DT.birthday=DSA.birthday AND DSA.dog_id=DSAR.dog_id;
@@ -3340,11 +3340,11 @@ show keys from t1;
 Table	Non_unique	Key_name	Seq_in_index	Column_name	Collation	Cardinality	Sub_part	Packed	Null	Index_type	Comment	Index_comment
 t1	0	PRIMARY	1	pk	A	1010	NULL	NULL		BTREE		
 t1	0	a	1	a	A	1010	NULL	NULL	YES	BTREE		
-# t1 must use ref(t1.a=t0.a) and rows must be 1 (and not 45):
+# t1 must use eq_ref(t1.a=t0.a) and rows must be 1 (and not 45):
 explain select * from t0,t1 where t0.a=t1.a;
 id	select_type	table	type	possible_keys	key	key_len	ref	rows	Extra
 1	SIMPLE	t0	ALL	NULL	NULL	NULL	NULL	10	Using where
-1	SIMPLE	t1	ref	a	a	5	test.t0.a	1	
+1	SIMPLE	t1	eq_ref	a	a	5	test.t0.a	1	
 drop table t0,t1;
 # 
 # MDEV-21383: Possible range plan is not used under certain conditions

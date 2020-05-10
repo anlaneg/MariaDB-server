@@ -1,5 +1,5 @@
 /* Copyright (c) 2000, 2013, Oracle and/or its affiliates.
-   Copyright (c) 2010, 2019, MariaDB Corporation.
+   Copyright (c) 2010, 2020, MariaDB Corporation.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -18,6 +18,7 @@
 #define _my_sys_h
 
 #include <m_string.h>
+#include <mysql/psi/mysql_memory.h>
 
 C_MODE_START
 
@@ -89,14 +90,12 @@ typedef struct my_aio_result {
 #define MY_ZEROFILL	32U	/* my_malloc(), fill array with zero */
 #define MY_ALLOW_ZERO_PTR 64U	/* my_realloc() ; zero ptr -> malloc */
 #define MY_FREE_ON_ERROR 128U	/* my_realloc() ; Free old ptr on error */
-#define MY_HOLD_ON_ERROR 256U	/* my_realloc() ; Return old ptr on error */
 #define MY_DONT_OVERWRITE_FILE 2048U /* my_copy: Don't overwrite file */
 #define MY_THREADSAFE 2048U     /* my_seek(): lock fd mutex */
 #define MY_SYNC       4096U     /* my_copy(): sync dst file */
 #define MY_SYNC_DIR   32768U    /* my_create/delete/rename: sync directory */
 #define MY_SYNC_FILESIZE 65536U /* my_sync(): safe sync when file is extended */
 #define MY_THREAD_SPECIFIC 0x10000U /* my_malloc(): thread specific */
-#define MY_THREAD_MOVE     0x20000U /* realloc(); Memory can move */
 /* Tree that should delete things automatically */
 #define MY_TREE_WITH_DELETE 0x40000U
 
@@ -168,24 +167,22 @@ typedef void (*MALLOC_SIZE_CB) (long long size, my_bool is_thread_specific);
 extern void set_malloc_size_cb(MALLOC_SIZE_CB func);
 
 	/* defines when allocating data */
-extern void *my_malloc(size_t Size,myf MyFlags);
-extern void *my_multi_malloc(myf MyFlags, ...);
-extern void *my_multi_malloc_large(myf MyFlags, ...);
-extern void *my_realloc(void *oldpoint, size_t Size, myf MyFlags);
+extern void *my_malloc(PSI_memory_key key, size_t size, myf MyFlags);
+extern void *my_multi_malloc(PSI_memory_key key, myf MyFlags, ...);
+extern void *my_multi_malloc_large(PSI_memory_key key, myf MyFlags, ...);
+extern void *my_realloc(PSI_memory_key key, void *ptr, size_t size, myf MyFlags);
 extern void my_free(void *ptr);
-extern void *my_memdup(const void *from,size_t length,myf MyFlags);
-extern char *my_strdup(const char *from,myf MyFlags);
-extern char *my_strndup(const char *from, size_t length, myf MyFlags);
+extern void *my_memdup(PSI_memory_key key, const void *from,size_t length,myf MyFlags);
+extern char *my_strdup(PSI_memory_key key, const char *from,myf MyFlags);
+extern char *my_strndup(PSI_memory_key key, const char *from, size_t length, myf MyFlags);
 
-#ifdef HAVE_LINUX_LARGE_PAGES
-extern uint my_get_large_page_size(void);
-extern uchar * my_large_malloc(size_t size, myf my_flags);
-extern void my_large_free(uchar *ptr);
-#else
-#define my_get_large_page_size() (0)
-#define my_large_malloc(A,B) my_malloc_lock((A),(B))
-#define my_large_free(A) my_free_lock((A))
-#endif /* HAVE_LINUX_LARGE_PAGES */
+int my_init_large_pages(my_bool super_large_pages);
+uchar *my_large_malloc(size_t *size, myf my_flags);
+void my_large_free(void *ptr, size_t size);
+
+#ifdef _WIN32
+extern BOOL my_obtain_privilege(LPCSTR lpPrivilege);
+#endif
 
 void my_init_atomic_write(void);
 #ifdef __linux__
@@ -211,11 +208,11 @@ extern my_bool my_may_have_atomic_write;
 #define MAX_ALLOCA_SZ 4096
 #define my_safe_alloca(size) (((size) <= MAX_ALLOCA_SZ) ? \
                                my_alloca(size) : \
-                               my_malloc((size), MYF(MY_THREAD_SPECIFIC|MY_WME)))
+                               my_malloc(PSI_NOT_INSTRUMENTED, (size), MYF(MY_THREAD_SPECIFIC|MY_WME)))
 #define my_safe_afree(ptr, size) \
                   do { if ((size) > MAX_ALLOCA_SZ) my_free(ptr); } while(0)
 #else
-#define my_alloca(SZ) my_malloc(SZ,MYF(MY_FAE))
+#define my_alloca(SZ) my_malloc(PSI_NOT_INSTRUMENTED, SZ,MYF(MY_FAE))
 #define my_afree(PTR) my_free(PTR)
 #define my_safe_alloca(size) my_alloca(size)
 #define my_safe_afree(ptr, size) my_afree(ptr)
@@ -242,11 +239,6 @@ extern int sf_leaking_memory; /* set to 1 to disable memleak detection */
 
 extern void (*proc_info_hook)(void *, const PSI_stage_info *, PSI_stage_info *,
                               const char *, const char *, const unsigned int);
-
-#ifdef HAVE_LINUX_LARGE_PAGES
-extern my_bool my_use_large_pages;
-extern uint    my_large_page_size;
-#endif
 
 /* charsets */
 #define MY_ALL_CHARSETS_SIZE 2048
@@ -287,7 +279,6 @@ extern my_bool  my_disable_locking, my_disable_async_io,
 extern my_bool my_disable_sync, my_disable_copystat_in_redel;
 extern char	wild_many,wild_one,wild_prefix;
 extern const char *charsets_dir;
-extern my_bool timed_mutexes;
 
 enum cache_type
 {
@@ -354,6 +345,7 @@ typedef struct st_dynamic_array
   uint elements,max_element;
   uint alloc_increment;
   uint size_of_element;
+  PSI_memory_key m_psi_key;
   myf malloc_flags;
 } DYNAMIC_ARRAY;
 
@@ -508,6 +500,8 @@ typedef void (*my_error_reporter)(enum loglevel level, const char *format, ...)
   ATTRIBUTE_FORMAT_FPTR(printf, 2, 3);
 
 extern my_error_reporter my_charset_error_reporter;
+
+extern PSI_file_key key_file_io_cache;
 
 /* inline functions for mf_iocache */
 
@@ -801,6 +795,10 @@ my_off_t my_get_ptr(uchar *ptr, size_t pack_length);
 extern int init_io_cache(IO_CACHE *info,File file,size_t cachesize,
 			 enum cache_type type,my_off_t seek_offset,
 			 my_bool use_async_io, myf cache_myflags);
+extern int init_io_cache_ext(IO_CACHE *info, File file, size_t cachesize,
+                              enum cache_type type, my_off_t seek_offset,
+                              pbool use_async_io, myf cache_myflags,
+                              PSI_file_key file_key);
 extern my_bool reinit_io_cache(IO_CACHE *info,enum cache_type type,
 			       my_off_t seek_offset, my_bool use_async_io,
 			       my_bool clear_cache);
@@ -836,11 +834,12 @@ extern my_bool real_open_cached_file(IO_CACHE *cache);
 extern void close_cached_file(IO_CACHE *cache);
 File create_temp_file(char *to, const char *dir, const char *pfx,
 		      int mode, myf MyFlags);
-#define my_init_dynamic_array(A,B,C,D,E) init_dynamic_array2(A,B,NULL,C,D,E)
-#define my_init_dynamic_array2(A,B,C,D,E,F) init_dynamic_array2(A,B,C,D,E,F)
-extern my_bool init_dynamic_array2(DYNAMIC_ARRAY *array, uint element_size,
-                                   void *init_buffer, uint init_alloc,
-                                   uint alloc_increment, myf my_flags);
+#define my_init_dynamic_array(A,B,C,D,E,F) init_dynamic_array2(A,B,C,NULL,D,E,F)
+#define my_init_dynamic_array2(A,B,C,D,E,F,G) init_dynamic_array2(A,B,C,D,E,F,G)
+extern my_bool init_dynamic_array2(PSI_memory_key psi_key, DYNAMIC_ARRAY *array,
+                                   uint element_size, void *init_buffer,
+                                   uint init_alloc, uint alloc_increment,
+                                   myf my_flags);
 extern my_bool insert_dynamic(DYNAMIC_ARRAY *array, const void* element);
 extern void *alloc_dynamic(DYNAMIC_ARRAY *array);
 extern void *pop_dynamic(DYNAMIC_ARRAY*);
@@ -887,13 +886,14 @@ extern uint32 copy_and_convert_extended(char *to, uint32 to_length,
 extern void *my_malloc_lock(size_t length,myf flags);
 extern void my_free_lock(void *ptr);
 #else
-#define my_malloc_lock(A,B) my_malloc((A),(B))
+#define my_malloc_lock(A,B) my_malloc(PSI_INSTRUMENT_ME, (A),(B))
 #define my_free_lock(A) my_free((A))
 #endif
+#define root_name(A) ""
 #define alloc_root_inited(A) ((A)->min_malloc != 0)
 #define ALLOC_ROOT_MIN_BLOCK_SIZE (MALLOC_OVERHEAD + sizeof(USED_MEM) + 8)
 #define clear_alloc_root(A) do { (A)->free= (A)->used= (A)->pre_alloc= 0; (A)->min_malloc=0;} while(0)
-extern void init_alloc_root(MEM_ROOT *mem_root, const char *name,
+extern void init_alloc_root(PSI_memory_key key, MEM_ROOT *mem_root,
                             size_t block_size, size_t pre_alloc_size,
                             myf my_flags);
 extern void *alloc_root(MEM_ROOT *mem_root, size_t Size);
@@ -952,7 +952,7 @@ extern ulonglong my_interval_timer(void);
 extern ulonglong my_getcputime(void);
 
 #define microsecond_interval_timer()    (my_interval_timer()/1000)
-#define hrtime_to_time(X)               ((X).val/HRTIME_RESOLUTION)
+#define hrtime_to_time(X)               ((time_t)((X).val/HRTIME_RESOLUTION))
 #define hrtime_from_time(X)             ((ulonglong)((X)*HRTIME_RESOLUTION))
 #define hrtime_to_double(X)             ((X).val/(double)HRTIME_RESOLUTION)
 #define hrtime_sec_part(X)              ((ulong)((X).val % HRTIME_RESOLUTION))
@@ -977,6 +977,12 @@ extern ulonglong my_getcputime(void);
 #endif
 #ifndef MAP_NORESERVE
 #define MAP_NORESERVE 0         /* For irix and AIX */
+#endif
+
+/* Compatibility with pre linux 3.8 distributions */
+#ifdef __linux__
+#define MAP_HUGE_SHIFT 26
+#define MAP_HUGETLB 0x40000
 #endif
 
 #ifdef HAVE_MMAP64
@@ -1076,13 +1082,6 @@ extern void thd_increment_bytes_received(void *thd, size_t length);
 extern void thd_increment_net_big_packet_count(void *thd, size_t length);
 
 #ifdef _WIN32
-
-/* implemented in my_windac.c */
-
-int my_security_attr_create(SECURITY_ATTRIBUTES **psa, const char **perror,
-                            DWORD owner_rights, DWORD everybody_rights);
-
-void my_security_attr_free(SECURITY_ATTRIBUTES *sa);
 
 /* implemented in my_conio.c */
 char* my_cgets(char *string, size_t clen, size_t* plen);

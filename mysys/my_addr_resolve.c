@@ -56,6 +56,18 @@ static ElfW(Addr) offset= 0;
 #define offset 0
 #endif
 
+#ifndef bfd_get_section_flags
+#define bfd_get_section_flags(H, S) bfd_section_flags(S)
+#endif /* bfd_get_section_flags */
+
+#ifndef bfd_get_section_size
+#define bfd_get_section_size(S) bfd_section_size(S)
+#endif /* bfd_get_section_size */
+
+#ifndef bfd_get_section_vma
+#define bfd_get_section_vma(H, S) bfd_section_vma(S)
+#endif /* bfd_get_section_vma */
+
 /**
   finds a file name, a line number, and a function name corresponding to addr.
 
@@ -298,12 +310,8 @@ int my_addr_resolve(void *ptr, my_addr_loc *loc)
     /* Save result for future comparisons. */
     strnmov(addr2line_binary, info.dli_fname, sizeof(addr2line_binary));
   }
-  if (!(error= addr_resolve(ptr, loc)))
-    return 0;
-#ifdef EXTRA_RESOLVE
   if (!(error= addr_resolve((void*) (ptr - info.dli_fbase), loc)))
     return 0;
-#endif
   return error;
 }
 

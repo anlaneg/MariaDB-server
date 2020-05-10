@@ -46,10 +46,6 @@ savepoint. */
 #define mtr_release_s_latch_at_savepoint(m, s, l)			\
 				(m)->release_s_latch_at_savepoint((s), (l))
 
-/** Get the logging mode of a mini-transaction.
-@return	logging mode: MTR_LOG_NONE, ... */
-#define mtr_get_log_mode(m)	(m)->get_log_mode()
-
 /** Change the logging mode of a mini-transaction.
 @return	old mode */
 #define mtr_set_log_mode(m, d)	(m)->set_log_mode((d))
@@ -108,12 +104,6 @@ savepoint. */
 @return true if the mtr is dirtying a clean page. */
 #define mtr_block_dirtied(b)	mtr_t::is_block_dirtied((b))
 
-/** Append records to the system-wide redo log buffer.
-@param[in]	log	redo log records */
-void
-mtr_write_log(
-	const mtr_buf_t*	log);
-
 /** Mini-transaction memo stack slot. */
 struct mtr_memo_slot_t {
 	/** pointer to the object */
@@ -133,7 +123,7 @@ struct mtr_t {
 
   /** Commit a mini-transaction that did not modify any pages,
   but generated some redo log on a higher level, such as
-  MLOG_FILE_NAME records and an optional MLOG_CHECKPOINT marker.
+  FILE_MODIFY records and an optional FILE_CHECKPOINT marker.
   The caller must invoke log_mutex_enter() and log_mutex_exit().
   This is to be used at log_checkpoint().
   @param checkpoint_lsn   the log sequence number of a checkpoint, or 0 */
@@ -165,6 +155,7 @@ struct mtr_t {
   mtr_log_t get_log_mode() const
   {
     static_assert(MTR_LOG_ALL == 0, "efficiency");
+    ut_ad(m_log_mode <= MTR_LOG_NO_REDO);
     return static_cast<mtr_log_t>(m_log_mode);
   }
 
@@ -174,7 +165,7 @@ struct mtr_t {
 	inline mtr_log_t set_log_mode(mtr_log_t mode);
 
 	/** Copy the tablespaces associated with the mini-transaction
-	(needed for generating MLOG_FILE_NAME records)
+	(needed for generating FILE_MODIFY records)
 	@param[in]	mtr	mini-transaction that may modify
 	the same set of tablespaces as this one */
 	void set_spaces(const mtr_t& mtr)
@@ -187,7 +178,7 @@ struct mtr_t {
 	}
 
 	/** Set the tablespace associated with the mini-transaction
-	(needed for generating a MLOG_FILE_NAME record)
+	(needed for generating a FILE_MODIFY record)
 	@param[in]	space_id	user or system tablespace ID
 	@return	the tablespace */
 	fil_space_t* set_named_space_id(ulint space_id)
@@ -206,7 +197,7 @@ struct mtr_t {
 	}
 
 	/** Set the tablespace associated with the mini-transaction
-	(needed for generating a MLOG_FILE_NAME record)
+	(needed for generating a FILE_MODIFY record)
 	@param[in]	space	user or system tablespace */
 	void set_named_space(fil_space_t* space)
 	{
@@ -219,12 +210,12 @@ struct mtr_t {
 
 #ifdef UNIV_DEBUG
 	/** Check the tablespace associated with the mini-transaction
-	(needed for generating a MLOG_FILE_NAME record)
+	(needed for generating a FILE_MODIFY record)
 	@param[in]	space	tablespace
 	@return whether the mini-transaction is associated with the space */
 	bool is_named_space(ulint space) const;
 	/** Check the tablespace associated with the mini-transaction
-	(needed for generating a MLOG_FILE_NAME record)
+	(needed for generating a FILE_MODIFY record)
 	@param[in]	space	tablespace
 	@return whether the mini-transaction is associated with the space */
 	bool is_named_space(const fil_space_t* space) const;
@@ -304,8 +295,22 @@ struct mtr_t {
 	@param[in]	type	object type: MTR_MEMO_PAGE_X_FIX, ... */
 	void release_page(const void* ptr, mtr_memo_type_t type);
 
-  /** Note that the mini-transaction has modified data. */
-  void set_modified() { m_modifications = true; }
+private:
+  /** Note that the mini-transaction will modify data. */
+  void flag_modified() { m_modifications = true; }
+#ifdef UNIV_DEBUG
+  /** Mark the given latched page as modified.
+  @param block   page that will be modified */
+  void modify(const buf_block_t& block);
+public:
+  /** Note that the mini-transaction will modify a block. */
+  void set_modified(const buf_block_t &block)
+  { flag_modified(); if (m_log_mode == MTR_LOG_ALL) modify(block); }
+#else /* UNIV_DEBUG */
+public:
+  /** Note that the mini-transaction will modify a block. */
+  void set_modified(const buf_block_t &) { flag_modified(); }
+#endif /* UNIV_DEBUG */
 
   /** Set the state to not-modified. This will not log the changes.
   This is only used during redo log apply, to avoid logging the changes. */
@@ -324,18 +329,6 @@ struct mtr_t {
 
   /** @return true if we are inside the change buffer code */
   bool is_inside_ibuf() const { return m_inside_ibuf; }
-
-	/** Get flush observer
-	@return flush observer */
-	FlushObserver* get_flush_observer() const { return m_flush_observer; }
-
-	/** Set flush observer
-	@param[in]	observer	flush observer */
-	void set_flush_observer(FlushObserver*	observer)
-	{
-		ut_ad(observer == NULL || m_log_mode == MTR_LOG_NO_REDO);
-		m_flush_observer = observer;
-	}
 
 #ifdef UNIV_DEBUG
 	/** Check if memo contains the given item.
@@ -366,10 +359,6 @@ struct mtr_t {
 		const byte*	ptr,
 		ulint		flags) const;
 
-	/** Mark the given latched page as modified.
-	@param[in]	ptr	pointer to within buffer frame */
-	void memo_modify_page(const byte* ptr);
-
 	/** Print info of an mtr handle. */
 	void print() const;
 
@@ -385,9 +374,6 @@ struct mtr_t {
 
 	/** @return true if a record was added to the mini-transaction */
 	bool is_dirty() const { return m_made_dirty; }
-
-	/** Note that a record has been added to the log */
-	void added_rec() { ++m_n_log_recs; }
 
 	/** Get the buffered redo log of this mini-transaction.
 	@return	redo log */
@@ -414,7 +400,7 @@ struct mtr_t {
     /** the page is guaranteed to always change */
     NORMAL= 0,
     /** optional: the page contents might not change */
-    OPT,
+    MAYBE_NOP,
     /** force a write, even if the page contents is not changing */
     FORCED
   };
@@ -425,52 +411,193 @@ struct mtr_t {
   @param[in]      val     value to write
   @tparam l       number of bytes to write
   @tparam w       write request type
-  @tparam V       type of val */
+  @tparam V       type of val
+  @return whether any log was written */
   template<unsigned l,write_type w= NORMAL,typename V>
-  inline void write(const buf_block_t &block, byte *ptr, V val)
+  inline bool write(const buf_block_t &block, void *ptr, V val)
     MY_ATTRIBUTE((nonnull));
 
   /** Log a write of a byte string to a page.
   @param[in]      b       buffer page
   @param[in]      ofs     byte offset from b->frame
   @param[in]      len     length of the data to write */
-  void memcpy(const buf_block_t &b, ulint ofs, ulint len);
+  inline void memcpy(const buf_block_t &b, ulint ofs, ulint len);
 
   /** Write a byte string to a page.
   @param[in,out]  b       buffer page
-  @param[in]      offset  byte offset from b->frame
+  @param[in]      dest    destination within b.frame
   @param[in]      str     the data to write
+  @param[in]      len     length of the data to write
+  @tparam w       write request type */
+  template<write_type w= NORMAL>
+  inline void memcpy(const buf_block_t &b, void *dest, const void *str,
+                     ulint len);
+
+  /** Log a write of a byte string to a ROW_FORMAT=COMPRESSED page.
+  @param[in]      b       ROW_FORMAT=COMPRESSED index page
+  @param[in]      offset  byte offset from b.zip.data
   @param[in]      len     length of the data to write */
-  inline void memcpy(buf_block_t *b, ulint offset, const void *str, ulint len);
+  inline void zmemcpy(const buf_block_t &b, ulint offset, ulint len);
+
+  /** Write a byte string to a ROW_FORMAT=COMPRESSED page.
+  @param[in]      b       ROW_FORMAT=COMPRESSED index page
+  @param[in]      dest    destination within b.zip.data
+  @param[in]      str     the data to write
+  @param[in]      len     length of the data to write
+  @tparam w       write request type */
+  template<write_type w= NORMAL>
+  inline void zmemcpy(const buf_block_t &b, void *dest, const void *str,
+                      ulint len);
+
+  /** Log an initialization of a string of bytes.
+  @param[in]      b       buffer page
+  @param[in]      ofs     byte offset from b->frame
+  @param[in]      len     length of the data to write
+  @param[in]      val     the data byte to write */
+  inline void memset(const buf_block_t &b, ulint ofs, ulint len, byte val);
 
   /** Initialize a string of bytes.
   @param[in,out]        b       buffer page
   @param[in]            ofs     byte offset from b->frame
   @param[in]            len     length of the data to write
   @param[in]            val     the data byte to write */
-  void memset(const buf_block_t* b, ulint ofs, ulint len, byte val);
+  inline void memset(const buf_block_t *b, ulint ofs, ulint len, byte val);
+
+  /** Log an initialization of a repeating string of bytes.
+  @param[in]      b       buffer page
+  @param[in]      ofs     byte offset from b->frame
+  @param[in]      len     length of the data to write, in bytes
+  @param[in]      str     the string to write
+  @param[in]      size    size of str, in bytes */
+  inline void memset(const buf_block_t &b, ulint ofs, size_t len,
+                     const void *str, size_t size);
+
+  /** Initialize a repeating string of bytes.
+  @param[in,out]  b       buffer page
+  @param[in]      ofs     byte offset from b->frame
+  @param[in]      len     length of the data to write, in bytes
+  @param[in]      str     the string to write
+  @param[in]      size    size of str, in bytes */
+  inline void memset(const buf_block_t *b, ulint ofs, size_t len,
+                     const void *str, size_t size);
+
+  /** Log that a string of bytes was copied from the same page.
+  @param[in]      b       buffer page
+  @param[in]      d       destination offset within the page
+  @param[in]      s       source offset within the page
+  @param[in]      len     length of the data to copy */
+  inline void memmove(const buf_block_t &b, ulint d, ulint s, ulint len);
+
+  /** Initialize an entire page.
+  @param[in,out]        b       buffer page */
+  void init(buf_block_t *b);
+  /** Free a page.
+  @param id      page identifier */
+  inline void free(const page_id_t id);
+  /** Write log for partly initializing a B-tree or R-tree page.
+  @param block    B-tree or R-tree page
+  @param comp     false=ROW_FORMAT=REDUNDANT, true=COMPACT or DYNAMIC */
+  inline void page_create(const buf_block_t &block, bool comp);
+
+  /** Write log for inserting a B-tree or R-tree record in
+  ROW_FORMAT=REDUNDANT.
+  @param block      B-tree or R-tree page
+  @param reuse      false=allocate from PAGE_HEAP_TOP; true=reuse PAGE_FREE
+  @param prev_rec   byte offset of the predecessor of the record to insert,
+                    starting from PAGE_OLD_INFIMUM
+  @param info_bits  info_bits of the record
+  @param n_fields_s number of fields << 1 | rec_get_1byte_offs_flag()
+  @param hdr_c      number of common record header bytes with prev_rec
+  @param data_c     number of common data bytes with prev_rec
+  @param hdr        record header bytes to copy to the log
+  @param hdr_l      number of copied record header bytes
+  @param data       record payload bytes to copy to the log
+  @param data_l     number of copied record data bytes */
+  inline void page_insert(const buf_block_t &block, bool reuse,
+                          ulint prev_rec, byte info_bits,
+                          ulint n_fields_s, size_t hdr_c, size_t data_c,
+                          const byte *hdr, size_t hdr_l,
+                          const byte *data, size_t data_l);
+  /** Write log for inserting a B-tree or R-tree record in
+  ROW_FORMAT=COMPACT or ROW_FORMAT=DYNAMIC.
+  @param block       B-tree or R-tree page
+  @param reuse       false=allocate from PAGE_HEAP_TOP; true=reuse PAGE_FREE
+  @param prev_rec    byte offset of the predecessor of the record to insert,
+                     starting from PAGE_NEW_INFIMUM
+  @param info_status rec_get_info_and_status_bits()
+  @param shift       unless !reuse: number of bytes the PAGE_FREE is moving
+  @param hdr_c       number of common record header bytes with prev_rec
+  @param data_c      number of common data bytes with prev_rec
+  @param hdr         record header bytes to copy to the log
+  @param hdr_l       number of copied record header bytes
+  @param data        record payload bytes to copy to the log
+  @param data_l      number of copied record data bytes */
+  inline void page_insert(const buf_block_t &block, bool reuse,
+                          ulint prev_rec, byte info_status,
+                          ssize_t shift, size_t hdr_c, size_t data_c,
+                          const byte *hdr, size_t hdr_l,
+                          const byte *data, size_t data_l);
+  /** Write log for deleting a B-tree or R-tree record in ROW_FORMAT=REDUNDANT.
+  @param block      B-tree or R-tree page
+  @param prev_rec   byte offset of the predecessor of the record to delete,
+                    starting from PAGE_OLD_INFIMUM */
+  inline void page_delete(const buf_block_t &block, ulint prev_rec);
+  /** Write log for deleting a COMPACT or DYNAMIC B-tree or R-tree record.
+  @param block      B-tree or R-tree page
+  @param prev_rec   byte offset of the predecessor of the record to delete,
+                    starting from PAGE_NEW_INFIMUM
+  @param hdr_size   record header size, excluding REC_N_NEW_EXTRA_BYTES
+  @param data_size  data payload size, in bytes */
+  inline void page_delete(const buf_block_t &block, ulint prev_rec,
+                          size_t hdr_size, size_t data_size);
+
+  /** Write log for initializing an undo log page.
+  @param block    undo page */
+  inline void undo_create(const buf_block_t &block);
+  /** Write log for appending an undo log record.
+  @param block    undo page
+  @param data     record within the undo page
+  @param len      length of the undo record, in bytes */
+  inline void undo_append(const buf_block_t &block,
+                          const void *data, size_t len);
+  /** Trim the end of a tablespace.
+  @param id       first page identifier that will not be in the file */
+  inline void trim_pages(const page_id_t id);
+
+  /** Write a log record about a file operation.
+  @param type           file operation
+  @param space_id       tablespace identifier
+  @param path           file path
+  @param new_path       new file path for type=FILE_RENAME */
+  inline void log_file_op(mfile_type_t type, ulint space_id,
+                          const char *path,
+                          const char *new_path= nullptr);
 
 private:
+  /** Log a write of a byte string to a page.
+  @param block   buffer page
+  @param offset  byte offset within page
+  @param data    data to be written
+  @param len     length of the data, in bytes */
+  inline void memcpy_low(const buf_block_t &block, uint16_t offset,
+                         const void *data, size_t len);
   /**
-  Write a log record for writing 1, 2, or 4 bytes.
-  @param[in]      block   file page
-  @param[in,out]  ptr     pointer in file page
-  @param[in]      l       number of bytes to write
-  @param[in,out]  log_ptr log record buffer
-  @param[in]      val     value to write */
-  void log_write(const buf_block_t &block, byte *ptr, mlog_id_t l,
-                 byte *log_ptr, uint32_t val)
-    MY_ATTRIBUTE((nonnull));
-  /**
-  Write a log record for writing 8 bytes.
-  @param[in]      block   file page
-  @param[in,out]  ptr     pointer in file page
-  @param[in]      l       number of bytes to write (8)
-  @param[in,out]  log_ptr log record buffer
-  @param[in]      val     value to write */
-  void log_write(const buf_block_t &block, byte *ptr, mlog_id_t l,
-                 byte *log_ptr, uint64_t val)
-    MY_ATTRIBUTE((nonnull));
+  Write a log record.
+  @tparam type  redo log record type
+  @param id     persistent page identifier
+  @param bpage  buffer pool page, or nullptr
+  @param len    number of additional bytes to write
+  @param alloc  whether to allocate the additional bytes
+  @param offset byte offset, or 0 if the record type does not allow one
+  @return end of mini-transaction log, minus len */
+  template<byte type>
+  inline byte *log_write(const page_id_t id, const buf_page_t *bpage,
+                         size_t len= 0, bool alloc= false, size_t offset= 0);
+
+  /** Write an EXTENDED log record.
+  @param block  buffer pool page
+  @param type   extended record subtype; @see mrec_ext_t */
+  inline void log_write_extended(const buf_block_t &block, byte type);
 
   /** Prepare to write the mini-transaction log to the redo log buffer.
   @return number of bytes to write in finish_write() */
@@ -487,7 +614,8 @@ private:
 #ifdef UNIV_DEBUG
 public:
   /** @return whether the mini-transaction is active */
-  bool is_active() const { ut_ad(!m_commit || m_start); return m_start; }
+  bool is_active() const
+  { ut_ad(!m_commit || m_start); return m_start && !m_commit; }
   /** @return whether the mini-transaction has been committed */
   bool has_committed() const { ut_ad(!m_commit || m_start); return m_commit; }
 private:
@@ -496,6 +624,11 @@ private:
   /** whether commit() has been called */
   bool m_commit= false;
 #endif
+
+  /** The page of the most recent m_log record written, or NULL */
+  const buf_page_t* m_last;
+  /** The current byte offset in m_last, or 0 */
+  uint16_t m_last_offset;
 
   /** specifies which operations should be logged; default MTR_LOG_ALL */
   uint16_t m_log_mode:2;
@@ -510,8 +643,6 @@ private:
   to suppress some read-ahead operations, @see ibuf_inside() */
   uint16_t m_inside_ibuf:1;
 
-  /** number of m_log records */
-  uint16_t m_n_log_recs:11;
 #ifdef UNIV_DEBUG
   /** Persistent user tablespace associated with the
   mini-transaction, or 0 (TRX_SYS_SPACE) if none yet */
@@ -526,9 +657,6 @@ private:
 
   /** user tablespace that is being modified by the mini-transaction */
   fil_space_t* m_user_space;
-
-  /** page flush observer for innodb_log_optimize_ddl=ON */
-  FlushObserver *m_flush_observer;
 
   /** LSN at commit time */
   lsn_t m_commit_lsn;

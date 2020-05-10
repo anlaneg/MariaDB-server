@@ -1,5 +1,5 @@
 /* Copyright (C) 2008-2019 Kentoku Shiba
-   Copyright (C) 2019 MariaDB corp
+   Copyright (C) 2019, 2020, MariaDB Corporation.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License as published by
@@ -2519,7 +2519,7 @@ void *spider_bg_conn_action(
     pthread_cond_signal(&conn->bg_conn_sync_cond);
     pthread_mutex_unlock(&conn->bg_conn_sync_mutex);
 #if !defined(MYSQL_DYNAMIC_PLUGIN) || !defined(_WIN32)
-    my_pthread_setspecific_ptr(THR_THD, NULL);
+    set_current_thd(nullptr);
 #endif
     my_thread_end();
     DBUG_RETURN(NULL);
@@ -2583,7 +2583,7 @@ void *spider_bg_conn_action(
       pthread_mutex_unlock(&conn->bg_conn_mutex);
       pthread_mutex_unlock(&conn->bg_conn_sync_mutex);
 #if !defined(MYSQL_DYNAMIC_PLUGIN) || !defined(_WIN32)
-      my_pthread_setspecific_ptr(THR_THD, NULL);
+      set_current_thd(nullptr);
 #endif
       my_thread_end();
       DBUG_RETURN(NULL);
@@ -3035,7 +3035,7 @@ void *spider_bg_sts_action(
     share->bg_sts_init = FALSE;
     pthread_mutex_unlock(&share->sts_mutex);
 #if !defined(MYSQL_DYNAMIC_PLUGIN) || !defined(_WIN32)
-    my_pthread_setspecific_ptr(THR_THD, NULL);
+    set_current_thd(nullptr);
 #endif
     my_thread_end();
     my_afree(need_mons);
@@ -3095,7 +3095,7 @@ void *spider_bg_sts_action(
     share->bg_sts_init = FALSE;
     pthread_mutex_unlock(&share->sts_mutex);
 #if !defined(MYSQL_DYNAMIC_PLUGIN) || !defined(_WIN32)
-    my_pthread_setspecific_ptr(THR_THD, NULL);
+    set_current_thd(nullptr);
 #endif
     my_thread_end();
     my_afree(need_mons);
@@ -3124,7 +3124,7 @@ void *spider_bg_sts_action(
       pthread_cond_signal(&share->bg_sts_sync_cond);
       pthread_mutex_unlock(&share->sts_mutex);
 #if !defined(MYSQL_DYNAMIC_PLUGIN) || !defined(_WIN32)
-      my_pthread_setspecific_ptr(THR_THD, NULL);
+      set_current_thd(nullptr);
 #endif
       my_thread_end();
       my_afree(need_mons);
@@ -3401,7 +3401,7 @@ void *spider_bg_crd_action(
     share->bg_crd_init = FALSE;
     pthread_mutex_unlock(&share->crd_mutex);
 #if !defined(MYSQL_DYNAMIC_PLUGIN) || !defined(_WIN32)
-    my_pthread_setspecific_ptr(THR_THD, NULL);
+    set_current_thd(nullptr);
 #endif
     my_thread_end();
     my_afree(need_mons);
@@ -3465,7 +3465,7 @@ void *spider_bg_crd_action(
     share->bg_crd_init = FALSE;
     pthread_mutex_unlock(&share->crd_mutex);
 #if !defined(MYSQL_DYNAMIC_PLUGIN) || !defined(_WIN32)
-    my_pthread_setspecific_ptr(THR_THD, NULL);
+    set_current_thd(nullptr);
 #endif
     my_thread_end();
     my_afree(need_mons);
@@ -3494,7 +3494,7 @@ void *spider_bg_crd_action(
       pthread_cond_signal(&share->bg_crd_sync_cond);
       pthread_mutex_unlock(&share->crd_mutex);
 #if !defined(MYSQL_DYNAMIC_PLUGIN) || !defined(_WIN32)
-      my_pthread_setspecific_ptr(THR_THD, NULL);
+      set_current_thd(nullptr);
 #endif
       my_thread_end();
       my_afree(need_mons);
@@ -3893,7 +3893,7 @@ void *spider_bg_mon_action(
     pthread_cond_signal(&share->bg_mon_conds[link_idx]);
     pthread_mutex_unlock(&share->bg_mon_mutexes[link_idx]);
 #if !defined(MYSQL_DYNAMIC_PLUGIN) || !defined(_WIN32)
-    my_pthread_setspecific_ptr(THR_THD, NULL);
+    set_current_thd(nullptr);
 #endif
     my_thread_end();
     DBUG_RETURN(NULL);
@@ -3932,7 +3932,7 @@ void *spider_bg_mon_action(
       spider_free_trx(trx, TRUE);
       delete thd;
 #if !defined(MYSQL_DYNAMIC_PLUGIN) || !defined(_WIN32)
-      my_pthread_setspecific_ptr(THR_THD, NULL);
+      set_current_thd(nullptr);
 #endif
       my_thread_end();
       DBUG_RETURN(NULL);
@@ -4534,7 +4534,8 @@ SPIDER_IP_PORT_CONN* spider_create_ipport_conn(SPIDER_CONN *conn)
   DBUG_ENTER("spider_create_ipport_conn");
   if (conn)
   {
-    SPIDER_IP_PORT_CONN *ret = (SPIDER_IP_PORT_CONN *) my_malloc(sizeof(*ret), MY_ZEROFILL | MY_WME);
+    SPIDER_IP_PORT_CONN *ret = (SPIDER_IP_PORT_CONN *)
+      my_malloc(PSI_INSTRUMENT_ME, sizeof(*ret), MY_ZEROFILL | MY_WME);
     if (!ret)
     {
       goto err_return_direct;
@@ -4568,8 +4569,8 @@ SPIDER_IP_PORT_CONN* spider_create_ipport_conn(SPIDER_CONN *conn)
       goto err_malloc_key;
     }
 
-    ret->key = (char *) my_malloc(ret->key_len + conn->tgt_host_length + 1,
-      MY_ZEROFILL | MY_WME);
+    ret->key = (char *) my_malloc(PSI_INSTRUMENT_ME, ret->key_len +
+                             conn->tgt_host_length + 1, MY_ZEROFILL | MY_WME);
     if (!ret->key) {
       pthread_cond_destroy(&ret->cond);
       pthread_mutex_destroy(&ret->mutex);

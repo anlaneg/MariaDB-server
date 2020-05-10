@@ -52,13 +52,14 @@ extern "C" const char* wsrep_thd_transaction_state_str(const THD *thd)
   return wsrep::to_c_string(thd->wsrep_cs().transaction().state());
 }
 
-
 extern "C" const char *wsrep_thd_query(const THD *thd)
 {
-  if (thd)
+  if (!thd)
+    return "NULL";
+
+  switch(thd->lex->sql_command)
   {
-    switch(thd->lex->sql_command)
-    {
+    // Mask away some security related details from error log
     case SQLCOM_CREATE_USER:
       return "CREATE USER";
     case SQLCOM_GRANT:
@@ -67,12 +68,10 @@ extern "C" const char *wsrep_thd_query(const THD *thd)
       return "REVOKE";
     case SQLCOM_SET_OPTION:
       if (thd->lex->definer)
-	return "SET PASSWORD";
+        return "SET PASSWORD";
       /* fallthrough */
     default:
-      if (thd->query())
-        return thd->query();
-    }
+      return (thd->query() ? thd->query() : "NULL");
   }
   return "NULL";
 }
@@ -168,6 +167,7 @@ extern "C" void wsrep_handle_SR_rollback(THD *bf_thd,
                                          THD *victim_thd)
 {
   DBUG_ASSERT(victim_thd);
+  DBUG_ASSERT(wsrep_thd_is_SR(victim_thd));
   if (!victim_thd || !wsrep_on(bf_thd)) return;
 
   WSREP_DEBUG("handle rollback, for deadlock: thd %llu trx_id %" PRIu64 " frags %zu conf %s",
@@ -320,4 +320,12 @@ extern "C" my_bool wsrep_thd_has_ignored_error(const THD *thd)
 extern "C" void wsrep_thd_set_ignored_error(THD *thd, my_bool val)
 {
   thd->wsrep_has_ignored_error= val;
+}
+
+extern "C" ulong wsrep_OSU_method_get(const MYSQL_THD thd)
+{
+  if (thd)
+    return(thd->variables.wsrep_OSU_method);
+  else
+    return(global_system_variables.wsrep_OSU_method);
 }

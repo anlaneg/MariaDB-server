@@ -26,7 +26,6 @@
 #include "sql_view.h"                        // view_checksum
 #include "sql_table.h"                       // mysql_recreate_table
 #include "debug_sync.h"                      // DEBUG_SYNC
-#include "sql_acl.h"                         // *_ACL
 #include "sp.h"                              // Sroutine_hash_entry
 #include "sql_parse.h"                       // check_table_access
 #include "strfunc.h"
@@ -122,9 +121,9 @@ static int prepare_for_repair(THD *thd, TABLE_LIST *table_list,
       Let us try to open at least a .FRM for this table.
     */
 
-    table_list->mdl_request.init(MDL_key::TABLE,
-                                 table_list->db.str, table_list->table_name.str,
-                                 MDL_EXCLUSIVE, MDL_TRANSACTION);
+    MDL_REQUEST_INIT(&table_list->mdl_request, MDL_key::TABLE,
+                     table_list->db.str, table_list->table_name.str,
+                     MDL_EXCLUSIVE, MDL_TRANSACTION);
 
     if (lock_table_names(thd, table_list, table_list->next_global,
                          thd->variables.lock_wait_timeout, 0))
@@ -547,8 +546,9 @@ static bool mysql_admin_table(THD* thd, TABLE_LIST* tables,
       close_thread_tables(thd);
       table->table= NULL;
       thd->mdl_context.release_transactional_locks();
-      table->mdl_request.init(MDL_key::TABLE, table->db.str, table->table_name.str,
-                              MDL_SHARED_NO_READ_WRITE, MDL_TRANSACTION);
+      MDL_REQUEST_INIT(&table->mdl_request, MDL_key::TABLE, table->db.str,
+                       table->table_name.str, MDL_SHARED_NO_READ_WRITE,
+                       MDL_TRANSACTION);
     }
 
 #ifdef WITH_PARTITION_STORAGE_ENGINE
@@ -822,8 +822,9 @@ static bool mysql_admin_table(THD* thd, TABLE_LIST* tables,
       close_thread_tables(thd);
       table->table= NULL;
       thd->mdl_context.release_transactional_locks();
-      table->mdl_request.init(MDL_key::TABLE, table->db.str, table->table_name.str,
-                              MDL_SHARED_NO_READ_WRITE, MDL_TRANSACTION);
+      MDL_REQUEST_INIT(&table->mdl_request, MDL_key::TABLE, table->db.str,
+                       table->table_name.str, MDL_SHARED_NO_READ_WRITE,
+                       MDL_TRANSACTION);
       table->mdl_request.set_type(MDL_SHARED_READ);
 
       table->lock_type= TL_READ;
@@ -1026,9 +1027,7 @@ send_result_message:
                  *save_next_global= table->next_global;
       table->next_local= table->next_global= 0;
 
-      tmp_disable_binlog(thd); // binlogging is done by caller if wanted
       result_code= admin_recreate_table(thd, table);
-      reenable_binlog(thd);
       trans_commit_stmt(thd);
       trans_commit(thd);
       close_thread_tables(thd);
@@ -1157,8 +1156,7 @@ send_result_message:
       }
       else if (open_for_modify || fatal_error)
       {
-        tdc_remove_table(thd, TDC_RT_REMOVE_UNUSED,
-                         table->db.str, table->table_name.str);
+        table->table->s->tdc->flush_unused(true);
         /*
           May be something modified. Consequently, we have to
           invalidate the query cache.

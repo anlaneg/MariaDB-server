@@ -212,39 +212,12 @@ public:
 		PUNCH_HOLE = 64,
 	};
 
-	/** Default constructor */
-	IORequest()
-		:
-		m_bpage(NULL),
-		m_fil_node(NULL),
-		m_type(READ)
-	{
-		/* No op */
-	}
-
-	/**
-	@param[in]	type		Request type, can be a value that is
-					ORed from the above enum */
-	explicit IORequest(ulint type)
-		:
-		m_bpage(NULL),
-		m_fil_node(NULL),
-		m_type(static_cast<uint16_t>(type))
-	{
-		if (!is_punch_hole_supported()) {
-			clear_punch_hole();
-		}
-	}
-
 	/**
 	@param[in]	type		Request type, can be a value that is
 					ORed from the above enum
 	@param[in]	bpage		Page to be written */
-	IORequest(ulint type, buf_page_t* bpage)
-		:
-		m_bpage(bpage),
-		m_fil_node(NULL),
-		m_type(static_cast<uint16_t>(type))
+	IORequest(ulint type= READ, buf_page_t *bpage= nullptr)
+		: m_bpage(bpage), m_type(static_cast<uint16_t>(type))
 	{
 		if (bpage && buf_page_should_punch_hole(bpage)) {
 			set_punch_hole();
@@ -275,15 +248,14 @@ public:
 	/** Clear the punch hole flag */
 	void clear_punch_hole()
 	{
-		m_type &= ~PUNCH_HOLE;
+		m_type &= uint16_t(~PUNCH_HOLE);
 	}
 
 	/** @return true if partial read warning disabled */
 	bool is_partial_io_warning_disabled() const
 		MY_ATTRIBUTE((warn_unused_result))
 	{
-		return((m_type & DISABLE_PARTIAL_IO_WARNINGS)
-		       == DISABLE_PARTIAL_IO_WARNINGS);
+		return !!(m_type & DISABLE_PARTIAL_IO_WARNINGS);
 	}
 
 	/** Disable partial read warnings */
@@ -372,13 +344,13 @@ public:
 
 private:
 	/** Page to be written on write operation. */
-	buf_page_t*		m_bpage;
+	buf_page_t* const	m_bpage= nullptr;
 
 	/** File node */
-	fil_node_t*		m_fil_node;
+	fil_node_t*		m_fil_node= nullptr;
 
 	/** Request type bit flags */
-	uint16_t		m_type;
+	uint16_t		m_type= READ;
 };
 
 /* @} */
@@ -671,10 +643,12 @@ do {									\
 	register_pfs_file_open_begin(state, locker, key, op, name,	\
 					src_file, src_line)		\
 
-# define register_pfs_file_rename_end(locker, result)			\
+# define register_pfs_file_rename_end(locker, from, to, result)		\
 do {									\
-	if (locker != NULL) {				\
-		PSI_FILE_CALL(end_file_open_wait)(locker, result);	\
+	if (locker != NULL) {						\
+		 PSI_FILE_CALL(						\
+			end_file_rename_wait)(				\
+			locker, from, to, result);			\
 	}								\
 } while (0)
 
@@ -769,9 +743,6 @@ The wrapper functions have the prefix of "innodb_". */
 
 # define os_file_flush(file)					\
 	pfs_os_file_flush_func(file, __FILE__, __LINE__)
-
-#define os_file_flush_data(file)                                              \
-  pfs_os_file_flush_data_func(file, __FILE__, __LINE__)
 
 # define os_file_rename(key, oldpath, newpath)				\
 	pfs_os_file_rename_func(key, oldpath, newpath, __FILE__, __LINE__)
@@ -1018,17 +989,6 @@ pfs_os_file_flush_func(
 	const char*	src_file,
 	uint		src_line);
 
-/** NOTE! Please use the corresponding macro os_file_flush_data(), not directly
-this function!
-This is the performance schema instrumented wrapper function for
-os_file_flush_data() which flushes only(!) data (excluding metadata) from OS
-page cache of a given file to the disk.
-@param[in]	file		Open file handle
-@param[in]	src_file	file name where func invoked
-@param[in]	src_line	line where the func invoked
-@return true if success */
-bool pfs_os_file_flush_data_func(pfs_os_file_t file, const char *src_file,
-                                 uint src_line);
 
 /** NOTE! Please use the corresponding macro os_file_rename(), not directly
 this function!
@@ -1124,8 +1084,6 @@ to original un-instrumented file I/O APIs */
 
 # define os_file_flush(file)	os_file_flush_func(file)
 
-#define os_file_flush_data(file) os_file_flush_data_func(file)
-
 # define os_file_rename(key, oldpath, newpath)				\
 	os_file_rename_func(oldpath, newpath)
 
@@ -1204,14 +1162,6 @@ Flushes the write buffers of a given file to the disk.
 bool
 os_file_flush_func(
 	os_file_t	file);
-
-/** NOTE! Use the corresponding macro os_file_flush_data(), not directly this
-function!
-Flushes only(!) data (excluding metadata) from OS page cache of a given file to
-the disk.
-@param[in]	file		handle to a file
-@return true if success */
-bool os_file_flush_data_func(os_file_t file);
 
 /** Retrieves the last error number if an error occurs in a file io function.
 The number should be retrieved before any other OS calls (because they may
@@ -1375,6 +1325,12 @@ struct os_aio_userdata_t
   fil_node_t* node;
   IORequest type;
   void* message;
+
+  os_aio_userdata_t(fil_node_t*node, IORequest type, void*message) :
+    node(node), type(type), message(message) {}
+
+  /** Construct from tpool::aiocb::m_userdata[] */
+  os_aio_userdata_t(const char *buf) { memcpy((void*)this, buf, sizeof*this); }
 };
 /**
 NOTE! Use the corresponding macro os_aio(), not directly this function!

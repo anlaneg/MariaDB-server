@@ -1,5 +1,5 @@
 /* Copyright (c) 2006, 2017, Oracle and/or its affiliates.
-   Copyright (c) 2010, 2017, MariaDB Corporation
+   Copyright (c) 2010, 2020, MariaDB Corporation.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -35,7 +35,7 @@
 #include "sql_table.h"
 
 static int count_relay_log_space(Relay_log_info* rli);
-
+bool xa_trans_force_rollback(THD *thd);
 /**
    Current replication state (hash of last GTID executed, per replication
    domain).
@@ -73,7 +73,9 @@ Relay_log_info::Relay_log_info(bool is_slave_recovery)
                          key_RELAYLOG_COND_relay_log_updated,
                          key_RELAYLOG_COND_bin_log_updated,
                          key_file_relaylog,
+                         key_file_relaylog_cache,
                          key_file_relaylog_index,
+                         key_file_relaylog_index_cache,
                          key_RELAYLOG_COND_queue_busy,
                          key_LOCK_relaylog_end_pos);
 #endif
@@ -1435,31 +1437,27 @@ Relay_log_info::alloc_inuse_relaylog(const char *name)
   uint32 gtid_count;
   rpl_gtid *gtid_list;
 
-  if (!(ir= (inuse_relaylog *)my_malloc(sizeof(*ir), MYF(MY_WME|MY_ZEROFILL))))
+  gtid_count= relay_log_state.count();
+  if (!(gtid_list= (rpl_gtid *)my_malloc(PSI_INSTRUMENT_ME,
+                                 sizeof(*gtid_list)*gtid_count, MYF(MY_WME))))
   {
-    my_error(ER_OUTOFMEMORY, MYF(0), (int)sizeof(*ir));
+    my_error(ER_OUTOFMEMORY, MYF(0), (int)sizeof(*gtid_list)*gtid_count);
     return 1;
   }
-  gtid_count= relay_log_state.count();
-  if (!(gtid_list= (rpl_gtid *)my_malloc(sizeof(*gtid_list)*gtid_count,
-                                         MYF(MY_WME))))
+  if (!(ir= new inuse_relaylog(this, gtid_list, gtid_count, name)))
   {
-    my_free(ir);
-    my_error(ER_OUTOFMEMORY, MYF(0), (int)sizeof(*gtid_list)*gtid_count);
+    my_free(gtid_list);
+    my_error(ER_OUTOFMEMORY, MYF(0), (int) sizeof(*ir));
     return 1;
   }
   if (relay_log_state.get_gtid_list(gtid_list, gtid_count))
   {
     my_free(gtid_list);
-    my_free(ir);
+    delete ir;
     DBUG_ASSERT(0 /* Should not be possible as we allocated correct length */);
     my_error(ER_OUT_OF_RESOURCES, MYF(0));
     return 1;
   }
-  ir->rli= this;
-  strmake_buf(ir->name, name);
-  ir->relay_log_state= gtid_list;
-  ir->relay_log_state_count= gtid_count;
 
   if (!inuse_relaylog_list)
     inuse_relaylog_list= ir;
@@ -1478,7 +1476,7 @@ void
 Relay_log_info::free_inuse_relaylog(inuse_relaylog *ir)
 {
   my_free(ir->relay_log_state);
-  my_free(ir);
+  delete ir;
 }
 
 
@@ -1589,8 +1587,8 @@ scan_one_gtid_slave_pos_table(THD *thd, HASH *hash, DYNAMIC_ARRAY *array,
     }
     else
     {
-      if (!(entry= (struct gtid_pos_element *)my_malloc(sizeof(*entry),
-                                                        MYF(MY_WME))))
+      if (!(entry= (struct gtid_pos_element *)my_malloc(PSI_INSTRUMENT_ME,
+                                                sizeof(*entry), MYF(MY_WME))))
       {
         my_error(ER_OUTOFMEMORY, MYF(0), (int)sizeof(*entry));
         err= 1;
@@ -1831,10 +1829,11 @@ rpl_load_gtid_slave_state(THD *thd)
 
   cb_data.table_list= NULL;
   cb_data.default_entry= NULL;
-  my_hash_init(&hash, &my_charset_bin, 32,
+  my_hash_init(PSI_INSTRUMENT_ME, &hash, &my_charset_bin, 32,
                offsetof(gtid_pos_element, gtid) + offsetof(rpl_gtid, domain_id),
                sizeof(uint32), NULL, my_free, HASH_UNIQUE);
-  if ((err= my_init_dynamic_array(&array, sizeof(gtid_pos_element), 0, 0, MYF(0))))
+  if ((err= my_init_dynamic_array(PSI_INSTRUMENT_ME, &array,
+                                  sizeof(gtid_pos_element), 0, 0, MYF(0))))
     goto end;
   array_inited= true;
 
@@ -2019,10 +2018,9 @@ find_gtid_slave_pos_tables(THD *thd)
       However we can add new entries, and warn about any tables that
       disappeared, but may still be visible to running SQL threads.
     */
-    rpl_slave_state::gtid_pos_table *old_entry, *new_entry, **next_ptr_ptr;
-
-    old_entry= (rpl_slave_state::gtid_pos_table *)
-      rpl_global_gtid_slave_state->gtid_pos_tables;
+    rpl_slave_state::gtid_pos_table *new_entry, **next_ptr_ptr;
+    auto old_entry= rpl_global_gtid_slave_state->
+                    gtid_pos_tables.load(std::memory_order_relaxed);
     while (old_entry)
     {
       new_entry= cb_data.table_list;
@@ -2044,8 +2042,8 @@ find_gtid_slave_pos_tables(THD *thd)
     while (new_entry)
     {
       /* Check if we already have a table with this storage engine. */
-      old_entry= (rpl_slave_state::gtid_pos_table *)
-        rpl_global_gtid_slave_state->gtid_pos_tables;
+      old_entry= rpl_global_gtid_slave_state->
+                 gtid_pos_tables.load(std::memory_order_relaxed);
       while (old_entry)
       {
         if (new_entry->table_hton == old_entry->table_hton)
@@ -2230,6 +2228,13 @@ void rpl_group_info::cleanup_context(THD *thd, bool error)
 
   if (unlikely(error))
   {
+    /*
+      trans_rollback above does not rollback XA transactions
+      (todo/fixme consider to do so.
+    */
+    if (thd->transaction.xid_state.is_explicit_XA())
+      xa_trans_force_rollback(thd);
+
     thd->mdl_context.release_transactional_locks();
 
     if (thd == rli->sql_driver_thd)

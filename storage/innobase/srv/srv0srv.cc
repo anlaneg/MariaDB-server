@@ -43,8 +43,8 @@ Created 10/8/1995 Heikki Tuuri
 // JAN: TODO: MySQL 5.7 missing header
 //#include "my_thread.h"
 //
-// #include "mysql/psi/mysql_stage.h"
-// #include "mysql/psi/psi.h"
+#include "mysql/psi/mysql_stage.h"
+#include "mysql/psi/psi.h"
 
 #include "btr0sea.h"
 #include "buf0flu.h"
@@ -72,7 +72,6 @@ Created 10/8/1995 Heikki Tuuri
 #include "fil0fil.h"
 #include "fil0crypt.h"
 #include "fil0pagecompress.h"
-#include "btr0scrub.h"
 
 
 #include <my_service_manager.h>
@@ -83,8 +82,6 @@ UNIV_INTERN ulong	srv_fatal_semaphore_wait_threshold =  DEFAULT_SRV_FATAL_SEMAPH
 /* How much data manipulation language (DML) statements need to be delayed,
 in microseconds, in order to reduce the lagging of the purge thread. */
 ulint	srv_dml_needed_delay;
-
-my_bool	srv_scrub_log;
 
 const char*	srv_main_thread_op_info = "";
 
@@ -162,7 +159,6 @@ static os_event_t	srv_master_thread_disabled_event;
 /*------------------------- LOG FILES ------------------------ */
 char*	srv_log_group_home_dir;
 
-ulong	srv_n_log_files;
 /** The InnoDB redo log file size, or 0 when changing the redo log format
 at startup (while disallowing writes to the redo log). */
 ulonglong	srv_log_file_size;
@@ -208,15 +204,10 @@ ulint	srv_buf_pool_size;
 const ulint	srv_buf_pool_min_size	= 5 * 1024 * 1024;
 /** Default pool size in bytes */
 const ulint	srv_buf_pool_def_size	= 128 * 1024 * 1024;
-/** Requested buffer pool chunk size. Each buffer pool instance consists
-of one or more chunks. */
+/** Requested buffer pool chunk size */
 ulong	srv_buf_pool_chunk_unit;
-/** innodb_buffer_pool_instances (0 is interpreted as 1) */
-ulong	srv_buf_pool_instances;
-/** Default value of innodb_buffer_pool_instances */
-const ulong	srv_buf_pool_instances_default = 0;
 /** innodb_page_hash_locks (a debug-only parameter);
-number of locks to protect buf_pool->page_hash */
+number of locks to protect buf_pool.page_hash */
 ulong	srv_n_page_hash_locks = 16;
 /** innodb_lru_scan_depth; number of blocks scanned in LRU flush batch */
 ulong	srv_LRU_scan_depth;
@@ -267,9 +258,6 @@ ulong	srv_io_capacity;
 /** innodb_io_capacity_max */
 ulong	srv_max_io_capacity;
 
-/** innodb_page_cleaners; the number of page cleaner threads */
-ulong	srv_n_page_cleaners;
-
 /* The InnoDB main thread tries to keep the ratio of modified pages
 in the buffer pool to all database pages in the buffer pool smaller than
 the following number. But it is not guaranteed that the value stays below
@@ -288,8 +276,8 @@ double	srv_adaptive_flushing_lwm;
 adaptive flushing is averaged */
 ulong	srv_flushing_avg_loops;
 
-/** innodb_purge_threads; the number of purge threads to use */
-ulong	srv_n_purge_threads;
+/** innodb_purge_threads; the number of purge tasks to use */
+uint srv_n_purge_threads;
 
 /** innodb_purge_batch_size, in pages */
 ulong	srv_purge_batch_size;
@@ -318,10 +306,10 @@ my_bool	srv_print_all_deadlocks;
 INFORMATION_SCHEMA.innodb_cmp_per_index */
 my_bool	srv_cmp_per_index_enabled;
 
-/** innodb_fast_shutdown; if 1 then we do not run purge and insert buffer
-merge to completion before shutdown. If it is set to 2, do not even flush the
-buffer pool to data files at the shutdown: we effectively 'crash'
-InnoDB (but lose no committed transactions). */
+/** innodb_fast_shutdown=1 skips purge and change buffer merge.
+innodb_fast_shutdown=2 effectively crashes the server (no log checkpoint).
+innodb_fast_shutdown=3 is a clean shutdown that skips the rollback
+of active transaction (to be done on restart). */
 uint	srv_fast_shutdown;
 
 /** copy of innodb_status_file; generate a innodb_status.<pid> file */
@@ -414,6 +402,8 @@ my_bool	srv_force_primary_key;
 /** Key version to encrypt the temporary tablespace */
 my_bool innodb_encrypt_temporary_tables;
 
+my_bool srv_immediate_scrub_data_uncompressed;
+
 /* Array of English strings describing the current state of an
 i/o handler thread */
 
@@ -468,7 +458,9 @@ current_time % 60 == 0 and no tasks will be performed when
 current_time % 5 != 0. */
 
 # define	SRV_MASTER_CHECKPOINT_INTERVAL		(7)
-# define	SRV_MASTER_PURGE_INTERVAL		(10)
+#ifdef MEM_PERIODIC_CHECK
+# define	SRV_MASTER_MEM_VALIDATE_INTERVAL	(13)
+#endif /* MEM_PERIODIC_CHECK */
 # define	SRV_MASTER_DICT_LRU_INTERVAL		(47)
 
 /** Simulate compression failures. */
@@ -620,11 +612,6 @@ PSI_stage_info	srv_stage_alter_table_end
 	= {0, "alter table (end)", PSI_FLAG_STAGE_PROGRESS};
 
 /** Performance schema stage event for monitoring ALTER TABLE progress
-log_make_checkpoint(). */
-PSI_stage_info	srv_stage_alter_table_flush
-	= {0, "alter table (flush)", PSI_FLAG_STAGE_PROGRESS};
-
-/** Performance schema stage event for monitoring ALTER TABLE progress
 row_merge_insert_index_tuples(). */
 PSI_stage_info	srv_stage_alter_table_insert
 	= {0, "alter table (insert)", PSI_FLAG_STAGE_PROGRESS};
@@ -773,10 +760,6 @@ static void srv_init()
 	mutex_create(LATCH_ID_PAGE_ZIP_STAT_PER_INDEX,
 		     &page_zip_stat_per_index_mutex);
 
-	/* Create dummy indexes for infimum and supremum records */
-
-	dict_ind_init();
-
 #ifdef WITH_INNODB_DISALLOW_WRITES
 	/* Writes have to be enabled on init or else we hang. Thus, we
 	always set the event here regardless of innobase_disallow_writes.
@@ -813,8 +796,6 @@ srv_free(void)
 
 	ut_d(os_event_destroy(srv_master_thread_disabled_event));
 
-	dict_ind_free();
-
 	trx_i_s_cache_free(trx_i_s_cache);
 	srv_thread_pool_end();
 }
@@ -826,7 +807,6 @@ srv_boot(void)
 /*==========*/
 {
 	sync_check_init();
-	recv_sys_var_init();
 	trx_pool_init();
 	row_mysql_init();
 	srv_init();
@@ -861,7 +841,7 @@ srv_refresh_innodb_monitor_stats(void)
 
 	log_refresh_stats();
 
-	buf_refresh_io_stats_all();
+	buf_refresh_io_stats();
 
 	srv_n_rows_inserted_old = srv_stats.n_rows_inserted;
 	srv_n_rows_updated_old = srv_stats.n_rows_updated;
@@ -991,7 +971,7 @@ srv_printf_innodb_monitor(
 		const hash_table_t* table = btr_search_sys->hash_tables[i];
 
 		ut_ad(table->magic_n == HASH_TABLE_MAGIC_N);
-		/* this is only used for buf_pool->page_hash */
+		/* this is only used for buf_pool.page_hash */
 		ut_ad(!table->heaps);
 		/* this is used for the adaptive hash index */
 		ut_ad(table->heap);
@@ -1014,15 +994,15 @@ srv_printf_innodb_monitor(
 
 	fprintf(file,
 		"%.2f hash searches/s, %.2f non-hash searches/s\n",
-		(btr_cur_n_sea - btr_cur_n_sea_old)
+		static_cast<double>(btr_cur_n_sea - btr_cur_n_sea_old)
 		/ time_elapsed,
-		(btr_cur_n_non_sea - btr_cur_n_non_sea_old)
+		static_cast<double>(btr_cur_n_non_sea - btr_cur_n_non_sea_old)
 		/ time_elapsed);
 	btr_cur_n_sea_old = btr_cur_n_sea;
 #else /* BTR_CUR_HASH_ADAPT */
 	fprintf(file,
 		"%.2f non-hash searches/s\n",
-		(btr_cur_n_non_sea - btr_cur_n_non_sea_old)
+		static_cast<double>(btr_cur_n_non_sea - btr_cur_n_non_sea_old)
 		/ time_elapsed);
 #endif /* BTR_CUR_HASH_ADAPT */
 	btr_cur_n_non_sea_old = btr_cur_n_non_sea;
@@ -1081,13 +1061,17 @@ srv_printf_innodb_monitor(
 	fprintf(file,
 		"%.2f inserts/s, %.2f updates/s,"
 		" %.2f deletes/s, %.2f reads/s\n",
-		((ulint) srv_stats.n_rows_inserted - srv_n_rows_inserted_old)
+		static_cast<double>(srv_stats.n_rows_inserted
+				    - srv_n_rows_inserted_old)
 		/ time_elapsed,
-		((ulint) srv_stats.n_rows_updated - srv_n_rows_updated_old)
+		static_cast<double>(srv_stats.n_rows_updated
+				    - srv_n_rows_updated_old)
 		/ time_elapsed,
-		((ulint) srv_stats.n_rows_deleted - srv_n_rows_deleted_old)
+		static_cast<double>(srv_stats.n_rows_deleted
+				    - srv_n_rows_deleted_old)
 		/ time_elapsed,
-		((ulint) srv_stats.n_rows_read - srv_n_rows_read_old)
+		static_cast<double>(srv_stats.n_rows_read
+				    - srv_n_rows_read_old)
 		/ time_elapsed);
 	fprintf(file,
 		"Number of system rows inserted " ULINTPF
@@ -1100,14 +1084,18 @@ srv_printf_innodb_monitor(
 	fprintf(file,
 		"%.2f inserts/s, %.2f updates/s,"
 		" %.2f deletes/s, %.2f reads/s\n",
-		((ulint) srv_stats.n_system_rows_inserted
-		 - srv_n_system_rows_inserted_old) / time_elapsed,
-		((ulint) srv_stats.n_system_rows_updated
-		 - srv_n_system_rows_updated_old) / time_elapsed,
-		((ulint) srv_stats.n_system_rows_deleted
-		 - srv_n_system_rows_deleted_old) / time_elapsed,
-		((ulint) srv_stats.n_system_rows_read
-		 - srv_n_system_rows_read_old) / time_elapsed);
+		static_cast<double>(srv_stats.n_system_rows_inserted
+				    - srv_n_system_rows_inserted_old)
+		/ time_elapsed,
+		static_cast<double>(srv_stats.n_system_rows_updated
+				    - srv_n_system_rows_updated_old)
+		/ time_elapsed,
+		static_cast<double>(srv_stats.n_system_rows_deleted
+				    - srv_n_system_rows_deleted_old)
+		/ time_elapsed,
+		static_cast<double>(srv_stats.n_system_rows_read
+				    - srv_n_system_rows_read_old)
+		/ time_elapsed);
 	srv_n_rows_inserted_old = srv_stats.n_rows_inserted;
 	srv_n_rows_updated_old = srv_stats.n_rows_updated;
 	srv_n_rows_deleted_old = srv_stats.n_rows_deleted;
@@ -1132,20 +1120,10 @@ void
 srv_export_innodb_status(void)
 /*==========================*/
 {
-	buf_pool_stat_t		stat;
-	buf_pools_list_size_t	buf_pools_list_size;
-	ulint			LRU_len;
-	ulint			free_len;
-	ulint			flush_list_len;
 	fil_crypt_stat_t	crypt_stat;
-	btr_scrub_stat_t	scrub_stat;
 
-	buf_get_total_stat(&stat);
-	buf_get_total_list_len(&LRU_len, &free_len, &flush_list_len);
-	buf_get_total_list_size_in_bytes(&buf_pools_list_size);
 	if (!srv_read_only_mode) {
 		fil_crypt_total_stat(&crypt_stat);
-		btr_scrub_total_stat(&scrub_stat);
 	}
 
 #ifdef BTR_CUR_HASH_ADAPT
@@ -1193,7 +1171,8 @@ srv_export_innodb_status(void)
 
 	export_vars.innodb_data_written = srv_stats.data_written;
 
-	export_vars.innodb_buffer_pool_read_requests = stat.n_page_gets;
+	export_vars.innodb_buffer_pool_read_requests
+		= buf_pool.stat.n_page_gets;
 
 	export_vars.innodb_buffer_pool_write_requests =
 		srv_stats.buf_pool_write_requests;
@@ -1207,47 +1186,48 @@ srv_export_innodb_status(void)
 	export_vars.innodb_buffer_pool_reads = srv_stats.buf_pool_reads;
 
 	export_vars.innodb_buffer_pool_read_ahead_rnd =
-		stat.n_ra_pages_read_rnd;
+		buf_pool.stat.n_ra_pages_read_rnd;
 
 	export_vars.innodb_buffer_pool_read_ahead =
-		stat.n_ra_pages_read;
+		buf_pool.stat.n_ra_pages_read;
 
 	export_vars.innodb_buffer_pool_read_ahead_evicted =
-		stat.n_ra_pages_evicted;
+		buf_pool.stat.n_ra_pages_evicted;
 
-	export_vars.innodb_buffer_pool_pages_data = LRU_len;
+	export_vars.innodb_buffer_pool_pages_data =
+		UT_LIST_GET_LEN(buf_pool.LRU);
 
 	export_vars.innodb_buffer_pool_bytes_data =
-		buf_pools_list_size.LRU_bytes
-		+ buf_pools_list_size.unzip_LRU_bytes;
+		buf_pool.stat.LRU_bytes
+		+ (UT_LIST_GET_LEN(buf_pool.unzip_LRU)
+		   << srv_page_size_shift);
 
-	export_vars.innodb_buffer_pool_pages_dirty = flush_list_len;
+	export_vars.innodb_buffer_pool_pages_dirty =
+		UT_LIST_GET_LEN(buf_pool.flush_list);
 
 	export_vars.innodb_buffer_pool_pages_made_young
-		= stat.n_pages_made_young;
+		= buf_pool.stat.n_pages_made_young;
 	export_vars.innodb_buffer_pool_pages_made_not_young
-		= stat.n_pages_not_made_young;
+		= buf_pool.stat.n_pages_not_made_young;
 
-	export_vars.innodb_buffer_pool_pages_old = 0;
-
-	for (ulong i = 0; i < srv_buf_pool_instances; i++) {
-		export_vars.innodb_buffer_pool_pages_old +=
-			buf_pool_from_array(i)->LRU_old_len;
-	}
+	export_vars.innodb_buffer_pool_pages_old = buf_pool.LRU_old_len;
 
 	export_vars.innodb_buffer_pool_bytes_dirty =
-		buf_pools_list_size.flush_list_bytes;
+		buf_pool.stat.flush_list_bytes;
 
-	export_vars.innodb_buffer_pool_pages_free = free_len;
+	export_vars.innodb_buffer_pool_pages_free =
+		UT_LIST_GET_LEN(buf_pool.free);
 
 #ifdef UNIV_DEBUG
 	export_vars.innodb_buffer_pool_pages_latched =
 		buf_get_latched_pages_number();
 #endif /* UNIV_DEBUG */
-	export_vars.innodb_buffer_pool_pages_total = buf_pool_get_n_pages();
+	export_vars.innodb_buffer_pool_pages_total = buf_pool.get_n_pages();
 
 	export_vars.innodb_buffer_pool_pages_misc =
-		buf_pool_get_n_pages() - LRU_len - free_len;
+		buf_pool.get_n_pages()
+		- UT_LIST_GET_LEN(buf_pool.LRU)
+		- UT_LIST_GET_LEN(buf_pool.free);
 
 	export_vars.innodb_max_trx_id = trx_sys.get_max_trx_id();
 	export_vars.innodb_history_list_length = trx_sys.rseg_history_len;
@@ -1273,11 +1253,11 @@ srv_export_innodb_status(void)
 
 	export_vars.innodb_dblwr_writes = srv_stats.dblwr_writes;
 
-	export_vars.innodb_pages_created = stat.n_pages_created;
+	export_vars.innodb_pages_created = buf_pool.stat.n_pages_created;
 
-	export_vars.innodb_pages_read = stat.n_pages_read;
+	export_vars.innodb_pages_read = buf_pool.stat.n_pages_read;
 
-	export_vars.innodb_pages_written = stat.n_pages_written;
+	export_vars.innodb_pages_written = buf_pool.stat.n_pages_written;
 
 	export_vars.innodb_row_lock_waits = srv_stats.n_lock_wait_count;
 
@@ -1372,35 +1352,21 @@ srv_export_innodb_status(void)
 			srv_stats.n_key_requests;
 		export_vars.innodb_key_rotation_list_length =
 			srv_stats.key_rotation_list_length;
-
-		export_vars.innodb_scrub_page_reorganizations =
-			scrub_stat.page_reorganizations;
-		export_vars.innodb_scrub_page_splits =
-			scrub_stat.page_splits;
-		export_vars.innodb_scrub_page_split_failures_underflow =
-			scrub_stat.page_split_failures_underflow;
-		export_vars.innodb_scrub_page_split_failures_out_of_filespace =
-			scrub_stat.page_split_failures_out_of_filespace;
-		export_vars.innodb_scrub_page_split_failures_missing_index =
-			scrub_stat.page_split_failures_missing_index;
-		export_vars.innodb_scrub_page_split_failures_unknown =
-			scrub_stat.page_split_failures_unknown;
-		export_vars.innodb_scrub_log = srv_stats.n_log_scrubs;
 	}
 
 	mutex_exit(&srv_innodb_monitor_mutex);
 
 	log_mutex_enter();
-
-	export_vars.innodb_lsn_current = log_sys.lsn;
-	export_vars.innodb_lsn_flushed = log_sys.flushed_to_disk_lsn;
+	export_vars.innodb_lsn_current = log_sys.get_lsn();
+	export_vars.innodb_lsn_flushed = log_sys.get_flushed_lsn();
 	export_vars.innodb_lsn_last_checkpoint = log_sys.last_checkpoint_lsn;
-	export_vars.innodb_checkpoint_age = static_cast<ulint>(
-		log_sys.lsn - log_sys.last_checkpoint_lsn);
 	export_vars.innodb_checkpoint_max_age = static_cast<ulint>(
 		log_sys.max_checkpoint_age);
-
 	log_mutex_exit();
+
+	export_vars.innodb_checkpoint_age = static_cast<ulint>(
+		export_vars.innodb_lsn_current
+		- export_vars.innodb_lsn_last_checkpoint);
 }
 
 struct srv_monitor_state_t
@@ -1486,8 +1452,7 @@ void srv_error_monitor_task(void*)
 {
 	/* number of successive fatal timeouts observed */
 	static ulint		fatal_cnt;
-	static lsn_t		old_lsn = srv_start_lsn;
-	lsn_t		new_lsn;
+	static lsn_t		old_lsn = recv_sys.recovered_lsn;
 	/* longest waiting thread for a semaphore */
 	os_thread_id_t	waiter;
 	static os_thread_id_t	old_waiter = os_thread_get_curr_id();
@@ -1500,17 +1465,16 @@ void srv_error_monitor_task(void*)
 	/* Try to track a strange bug reported by Harald Fuchs and others,
 	where the lsn seems to decrease at times */
 
-	if (log_peek_lsn(&new_lsn)) {
-		if (new_lsn < old_lsn) {
+	lsn_t new_lsn = log_sys.get_lsn();
+	if (new_lsn < old_lsn) {
 		ib::error() << "Old log sequence number " << old_lsn << " was"
 			<< " greater than the new log sequence number "
 			<< new_lsn << ". Please submit a bug report to"
 			" https://jira.mariadb.org/";
 			ut_ad(0);
-		}
-
-		old_lsn = new_lsn;
 	}
+
+	old_lsn = new_lsn;
 
 	/* Update the statistics collected for deciding LRU
 	eviction policy. */
@@ -1710,7 +1674,7 @@ srv_sync_log_buffer_in_background(void)
 	srv_main_thread_op_info = "flushing log";
 	if (difftime(current_time, srv_last_log_flush_time)
 	    >= srv_flush_log_at_timeout) {
-		log_buffer_sync_in_background(true);
+		log_sys.initiate_write(true);
 		srv_last_log_flush_time = current_time;
 		srv_log_writes_and_flush++;
 	}
@@ -1985,10 +1949,10 @@ srv_master_do_idle_tasks(void)
 				       counter_time);
 }
 
-/** Perform shutdown tasks.
-@param[in]	ibuf_merge	whether to complete the change buffer merge */
-void
-srv_shutdown(bool ibuf_merge)
+/**
+Complete the shutdown tasks such as background DROP TABLE,
+and optionally change buffer merge (on innodb_fast_shutdown=0). */
+void srv_shutdown(bool ibuf_merge)
 {
 	ulint		n_bytes_merged	= 0;
 	ulint		n_tables_to_drop;

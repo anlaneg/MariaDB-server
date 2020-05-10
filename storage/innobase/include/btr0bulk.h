@@ -1,7 +1,7 @@
 /*****************************************************************************
 
 Copyright (c) 2014, 2015, Oracle and/or its affiliates. All Rights Reserved.
-Copyright (c) 2019, MariaDB Corporation.
+Copyright (c) 2019, 2020, MariaDB Corporation.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License as published by the Free Software
@@ -53,14 +53,12 @@ public:
 	@param[in]	index		B-tree index
 	@param[in]	page_no		page number
 	@param[in]	level		page level
-	@param[in]	trx_id		transaction id
-	@param[in]	observer	flush observer */
+	@param[in]	trx_id		transaction id */
 	PageBulk(
 		dict_index_t*	index,
 		trx_id_t	trx_id,
 		ulint		page_no,
-		ulint		level,
-		FlushObserver*	observer)
+		ulint		level)
 		:
 		m_heap(NULL),
 		m_index(index),
@@ -81,7 +79,6 @@ public:
 		m_total_data(0),
 #endif /* UNIV_DEBUG */
 		m_modify_clock(0),
-		m_flush_observer(observer),
 		m_err(DB_SUCCESS)
 	{
 		ut_ad(!dict_index_is_spatial(m_index));
@@ -102,7 +99,7 @@ public:
 	/** Insert a record in the page.
 	@param[in]	rec		record
 	@param[in]	offsets		record offsets */
-	inline void insert(const rec_t* rec, offset_t* offsets);
+	inline void insert(const rec_t* rec, rec_offs* offsets);
 private:
 	/** Page format */
 	enum format { REDUNDANT, DYNAMIC, COMPRESSED };
@@ -112,10 +109,9 @@ private:
 	template<format> inline void finishPage();
 	/** Insert a record in the page.
 	@tparam format  the page format
-	@param[in]	rec		record
+	@param[in,out]	rec		record
 	@param[in]	offsets		record offsets */
-	template<format> inline void insertPage(const rec_t* rec,
-						offset_t* offsets);
+	template<format> inline void insertPage(rec_t* rec, rec_offs* offsets);
 
 public:
 	/** Mark end of insertion to the page. Scan all records to set page
@@ -140,7 +136,7 @@ public:
 	@param[in]	big_rec		external recrod
 	@param[in]	offsets		record offsets
 	@return	error code */
-	dberr_t storeExt(const big_rec_t* big_rec, offset_t* offsets);
+	dberr_t storeExt(const big_rec_t* big_rec, rec_offs* offsets);
 
 	/** Get node pointer
 	@return node pointer */
@@ -214,7 +210,7 @@ public:
 		return(m_err);
 	}
 
-	void set_modified() { m_mtr.set_modified(); }
+	void set_modified() { m_mtr.set_modified(*m_block); }
 
 	/* Memory heap for internal allocation */
 	mem_heap_t*	m_heap;
@@ -274,9 +270,6 @@ private:
 	when the block is re-pinned */
 	ib_uint64_t     m_modify_clock;
 
-	/** Flush observer, or NULL if redo logging is enabled */
-	FlushObserver*	m_flush_observer;
-
 	/** Operation result DB_SUCCESS or error code */
 	dberr_t		m_err;
 };
@@ -289,31 +282,15 @@ class BtrBulk
 public:
 	/** Constructor
 	@param[in]	index		B-tree index
-	@param[in]	trx		transaction
-	@param[in]	observer	flush observer */
+	@param[in]	trx		transaction */
 	BtrBulk(
 		dict_index_t*	index,
-		const trx_t*	trx,
-		FlushObserver*	observer)
+		const trx_t*	trx)
 		:
 		m_index(index),
-		m_trx(trx),
-		m_flush_observer(observer)
+		m_trx(trx)
 	{
 		ut_ad(!dict_index_is_spatial(index));
-#ifdef UNIV_DEBUG
-		if (m_flush_observer)
-			m_index->table->space->redo_skipped_count++;
-#endif /* UNIV_DEBUG */
-	}
-
-	/** Destructor */
-	~BtrBulk()
-	{
-#ifdef UNIV_DEBUG
-		if (m_flush_observer)
-			m_index->table->space->redo_skipped_count--;
-#endif /* UNIV_DEBUG */
 	}
 
 	/** Insert a tuple
@@ -384,9 +361,6 @@ private:
 
 	/** Root page level */
 	ulint			m_root_level;
-
-	/** Flush observer, or NULL if redo logging is enabled */
-	FlushObserver*const	m_flush_observer;
 
 	/** Page cursor vector for all level */
 	page_bulk_vector	m_page_bulks;

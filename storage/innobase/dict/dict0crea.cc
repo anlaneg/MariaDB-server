@@ -1,7 +1,7 @@
 /*****************************************************************************
 
 Copyright (c) 1996, 2016, Oracle and/or its affiliates. All Rights Reserved.
-Copyright (c) 2017, 2019, MariaDB Corporation.
+Copyright (c) 2017, 2020, MariaDB Corporation.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License as published by the Free Software
@@ -377,11 +377,11 @@ dict_build_table_def_step(
 				page_id_t(trx->rsegs.m_redo.rseg->space->id,
 					  undo->hdr_page_no),
 				&mtr);
-			mtr.write<1,mtr_t::OPT>(
+			mtr.write<1,mtr_t::MAYBE_NOP>(
 				*block,
 				block->frame + undo->hdr_offset
 				+ TRX_UNDO_DICT_TRANS, 1U);
-			mtr.write<8,mtr_t::OPT>(
+			mtr.write<8,mtr_t::MAYBE_NOP>(
 				*block,
 				block->frame + undo->hdr_offset
 				+ TRX_UNDO_TABLE_ID, trx->table_id);
@@ -858,8 +858,8 @@ dict_create_index_tree_step(
 					     DICT_FLD__SYS_INDEXES__PAGE_NO,
 					     &len);
 	ut_ad(len == 4);
-	mtr.write<4,mtr_t::OPT>(*btr_pcur_get_block(&pcur), data,
-				node->page_no);
+	mtr.write<4,mtr_t::MAYBE_NOP>(*btr_pcur_get_block(&pcur), data,
+				      node->page_no);
 
 	mtr.commit();
 
@@ -1260,8 +1260,8 @@ dict_create_index_step(
 			  ? dict_index_t::NO_CORE_NULL_BYTES
 			  : UT_BITS_IN_BYTES(
 				  unsigned(node->index->n_nullable))));
-		node->index->n_core_null_bytes = UT_BITS_IN_BYTES(
-			unsigned(node->index->n_nullable));
+		node->index->n_core_null_bytes = static_cast<uint8_t>(
+			UT_BITS_IN_BYTES(unsigned(node->index->n_nullable)));
 		node->state = INDEX_CREATE_INDEX_TREE;
 	}
 

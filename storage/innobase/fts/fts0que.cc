@@ -606,7 +606,8 @@ fts_ranking_words_add(
 	/* Set ranking words */
 	ut_ad(byte_offset < ranking->words_len);
 	bit_offset = pos % CHAR_BIT;
-	ranking->words[byte_offset] |= 1 << bit_offset;
+	ranking->words[byte_offset] = static_cast<byte>(
+		ranking->words[byte_offset] | 1 << bit_offset);
 }
 
 /*******************************************************************//**
@@ -3497,8 +3498,9 @@ fts_query_calculate_idf(
 				word_freq->idf = log10(1.0001);
 			} else {
 				word_freq->idf = log10(
-					total_docs
-					/ (double) word_freq->doc_count);
+					static_cast<double>(total_docs)
+					/ static_cast<double>(
+						word_freq->doc_count));
 			}
 		}
 

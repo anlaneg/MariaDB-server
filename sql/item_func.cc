@@ -1614,11 +1614,9 @@ longlong Item_func_int_div::val_int()
       raise_integer_overflow();
     return res;
   }
-  
-  longlong val0=args[0]->val_int();
-  longlong val1=args[1]->val_int();
-  bool val0_negative, val1_negative, res_negative;
-  ulonglong uval0, uval1, res;
+
+  Longlong_hybrid val0= args[0]->to_longlong_hybrid();
+  Longlong_hybrid val1= args[1]->to_longlong_hybrid();
   if ((null_value= (args[0]->null_value || args[1]->null_value)))
     return 0;
   if (val1 == 0)
@@ -1627,12 +1625,8 @@ longlong Item_func_int_div::val_int()
     return 0;
   }
 
-  val0_negative= !args[0]->unsigned_flag && val0 < 0;
-  val1_negative= !args[1]->unsigned_flag && val1 < 0;
-  res_negative= val0_negative != val1_negative;
-  uval0= (ulonglong) (val0_negative ? -val0 : val0);
-  uval1= (ulonglong) (val1_negative ? -val1 : val1);
-  res= uval0 / uval1;
+  bool res_negative= val0.neg() != val1.neg();
+  ulonglong res= val0.abs() / val1.abs();
   if (res_negative)
   {
     if (res > (ulonglong) LONGLONG_MAX)
@@ -1657,11 +1651,8 @@ bool Item_func_int_div::fix_length_and_dec()
 longlong Item_func_mod::int_op()
 {
   DBUG_ASSERT(fixed == 1);
-  longlong val0= args[0]->val_int();
-  longlong val1= args[1]->val_int();
-  bool val0_negative, val1_negative;
-  ulonglong uval0, uval1;
-  ulonglong res;
+  Longlong_hybrid val0= args[0]->to_longlong_hybrid();
+  Longlong_hybrid val1= args[1]->to_longlong_hybrid();
 
   if ((null_value= args[0]->null_value || args[1]->null_value))
     return 0; /* purecov: inspected */
@@ -1676,13 +1667,9 @@ longlong Item_func_mod::int_op()
     LONGLONG_MIN by -1 generates SIGFPE, we calculate using unsigned values and
     then adjust the sign appropriately.
   */
-  val0_negative= !args[0]->unsigned_flag && val0 < 0;
-  val1_negative= !args[1]->unsigned_flag && val1 < 0;
-  uval0= (ulonglong) (val0_negative ? -val0 : val0);
-  uval1= (ulonglong) (val1_negative ? -val1 : val1);
-  res= uval0 % uval1;
-  return check_integer_overflow(val0_negative ? -(longlong) res : res,
-                                !val0_negative);
+  ulonglong res= val0.abs() % val1.abs();
+  return check_integer_overflow(val0.neg() ? -(longlong) res : res,
+                                !val0.neg());
 }
 
 double Item_func_mod::real_op()
@@ -2585,19 +2572,20 @@ void Item_func_rand::seed_random(Item *arg)
     TODO: do not do reinit 'rand' for every execute of PS/SP if
     args[0] is a constant.
   */
-  uint32 tmp;
+  uint32 tmp= (uint32) arg->val_int();
 #ifdef WITH_WSREP
-  THD *thd= current_thd;
-  if (WSREP(thd))
+  if (WSREP_ON)
   {
-    if (wsrep_thd_is_applying(thd))
-      tmp= thd->wsrep_rand;
-    else
-      tmp= thd->wsrep_rand= (uint32) arg->val_int();
-   }
-  else
+    THD *thd= current_thd;
+    if (WSREP(thd))
+    {
+      if (wsrep_thd_is_applying(thd))
+        tmp= thd->wsrep_rand;
+      else
+        thd->wsrep_rand= tmp;
+    }
+  }
 #endif /* WITH_WSREP */
-    tmp= (uint32) arg->val_int();
 
   my_rnd_init(rand, (uint32) (tmp*0x10001L+55555555L),
              (uint32) (tmp*0x10000001L));
@@ -4019,16 +4007,17 @@ longlong Item_func_get_lock::val_int()
   DBUG_PRINT("enter", ("lock: %.*s", res->length(), res->ptr()));
   /* HASH entries are of type User_level_lock. */
   if (! my_hash_inited(&thd->ull_hash) &&
-        my_hash_init(&thd->ull_hash, &my_charset_bin,
-                     16 /* small hash */, 0, 0, ull_get_key, NULL, 0))
+        my_hash_init(key_memory_User_level_lock, &thd->ull_hash,
+                     &my_charset_bin, 16 /* small hash */, 0, 0, ull_get_key,
+                     NULL, 0))
   {
     DBUG_RETURN(0);
   }
 
   MDL_request ull_request;
-  ull_request.init(MDL_key::USER_LOCK, res->c_ptr_safe(), "",
+  MDL_REQUEST_INIT(&ull_request, MDL_key::USER_LOCK, res->c_ptr_safe(), "",
                    MDL_SHARED_NO_WRITE, MDL_EXPLICIT);
-  MDL_key *ull_key = &ull_request.key;
+  MDL_key *ull_key= &ull_request.key;
 
 
   if ((ull= (User_level_lock*)
@@ -4036,7 +4025,7 @@ longlong Item_func_get_lock::val_int()
   {
     /* Recursive lock */
     ull->refs++;
-    null_value = 0;
+    null_value= 0;
     DBUG_PRINT("info", ("recursive lock, ref-count: %d", (int) ull->refs));
     DBUG_RETURN(1);
   }
@@ -4052,7 +4041,8 @@ longlong Item_func_get_lock::val_int()
     DBUG_RETURN(0);
   }
 
-  ull= (User_level_lock*) my_malloc(sizeof(User_level_lock),
+  ull= (User_level_lock*) my_malloc(key_memory_User_level_lock,
+                                    sizeof(User_level_lock),
                                     MYF(MY_WME|MY_THREAD_SPECIFIC));
   if (ull == NULL)
   {
@@ -4072,6 +4062,30 @@ longlong Item_func_get_lock::val_int()
   null_value= 0;
 
   DBUG_RETURN(1);
+}
+
+
+/**
+  Release all user level locks.
+  @return
+    - N if N-lock released
+    - 0 if lock wasn't held
+*/
+longlong Item_func_release_all_locks::val_int()
+{
+  DBUG_ASSERT(fixed == 1);
+  THD *thd= current_thd;
+  ulong num_unlocked= 0;
+  DBUG_ENTER("Item_func_release_all_locks::val_int");
+  for (size_t i= 0; i < thd->ull_hash.records; i++)
+  {
+    auto ull= (User_level_lock *) my_hash_element(&thd->ull_hash, i);
+    thd->mdl_context.release_lock(ull->lock);
+    num_unlocked+= ull->refs;
+    my_free(ull);
+  }
+  my_hash_free(&thd->ull_hash);
+  DBUG_RETURN(num_unlocked);
 }
 
 
@@ -4275,7 +4289,7 @@ static PSI_mutex_key key_LOCK_item_func_sleep;
 
 static PSI_mutex_info item_func_sleep_mutexes[]=
 {
-  { &key_LOCK_item_func_sleep, "LOCK_user_locks", PSI_FLAG_GLOBAL}
+  { &key_LOCK_item_func_sleep, "LOCK_item_func_sleep", PSI_FLAG_GLOBAL}
 };
 
 
@@ -4396,7 +4410,7 @@ user_var_entry *get_variable(HASH *hash, LEX_CSTRING *name,
     size_t size=ALIGN_SIZE(sizeof(user_var_entry))+name->length+1+extra_size;
     if (!my_hash_inited(hash))
       return 0;
-    if (!(entry = (user_var_entry*) my_malloc(size,
+    if (!(entry = (user_var_entry*) my_malloc(key_memory_user_var_entry, size,
                                               MYF(MY_WME | ME_FATAL |
                                                   MY_THREAD_SPECIFIC))))
       return 0;
@@ -4656,10 +4670,10 @@ update_hash(user_var_entry *entry, bool set_null, void *ptr, size_t length,
 	char *pos= (char*) entry+ ALIGN_SIZE(sizeof(user_var_entry));
 	if (entry->value == pos)
 	  entry->value=0;
-        entry->value= (char*) my_realloc(entry->value, length,
+        entry->value= (char*) my_realloc(key_memory_user_var_entry_value,
+                                         entry->value, length,
                                          MYF(MY_ALLOW_ZERO_PTR | MY_WME |
-                                             ME_FATAL |
-                                             MY_THREAD_SPECIFIC));
+                                             ME_FATAL | MY_THREAD_SPECIFIC));
         if (!entry->value)
 	  return 1;
       }
@@ -5888,7 +5902,7 @@ bool Item_func_match::init_search(THD *thd, bool no_order)
 {
   DBUG_ENTER("Item_func_match::init_search");
 
-  if (!table->file->get_table()) // the handler isn't opened yet
+  if (!table->file->is_open())
     DBUG_RETURN(0);
 
   /* Check if init_search() has been called before */
@@ -6770,7 +6784,7 @@ longlong Item_func_nextval::val_int()
   if (!(entry= ((SEQUENCE_LAST_VALUE*)
                 my_hash_search(&thd->sequences, (uchar*) key, length))))
   {
-    if (!(key= (char*) my_memdup(key, length, MYF(MY_WME))) ||
+    if (!(key= (char*) my_memdup(PSI_INSTRUMENT_ME, key, length, MYF(MY_WME))) ||
         !(entry= new SEQUENCE_LAST_VALUE((uchar*) key, length)))
     {
       /* EOM, error given */

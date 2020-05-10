@@ -2740,14 +2740,34 @@ bool partition_key_modified(TABLE *table, const MY_BITMAP *fields)
 
 static inline int part_val_int(Item *item_expr, longlong *result)
 {
-  *result= item_expr->val_int();
+  switch (item_expr->cmp_type())
+  {
+  case DECIMAL_RESULT:
+  {
+    my_decimal buf;
+    my_decimal *val= item_expr->val_decimal(&buf);
+    if (val && my_decimal2int(E_DEC_FATAL_ERROR, val, item_expr->unsigned_flag,
+                              result, FLOOR) != E_DEC_OK)
+      return true;
+    break;
+  }
+  case INT_RESULT:
+    *result= item_expr->val_int();
+    break;
+  case STRING_RESULT:
+  case REAL_RESULT:
+  case ROW_RESULT:
+  case TIME_RESULT:
+    DBUG_ASSERT(0);
+    break;
+  }
   if (item_expr->null_value)
   {
     if (unlikely(current_thd->is_error()))
-      return TRUE;
+      return true;
     *result= LONGLONG_MIN;
   }
-  return FALSE;
+  return false;
 }
 
 
@@ -4785,7 +4805,6 @@ static void check_datadir_altered_for_innodb(THD *thd,
 
 uint prep_alter_part_table(THD *thd, TABLE *table, Alter_info *alter_info,
                            HA_CREATE_INFO *create_info,
-                           Alter_table_ctx *alter_ctx,
                            bool *partition_changed,
                            bool *fast_alter_table)
 {
@@ -4795,7 +4814,7 @@ uint prep_alter_part_table(THD *thd, TABLE *table, Alter_info *alter_info,
   if (table->part_info && (alter_info->flags & (ALTER_ADD_FOREIGN_KEY |
                                                 ALTER_DROP_FOREIGN_KEY)))
   {
-    my_error(ER_FOREIGN_KEY_ON_PARTITIONED, MYF(0));
+    my_error(ER_FEATURE_NOT_SUPPORTED_WITH_PARTITIONING, MYF(0), "FOREIGN KEY");
     DBUG_RETURN(TRUE);
   }
   /* Remove partitioning on a not partitioned table is not possible */
@@ -4880,8 +4899,8 @@ uint prep_alter_part_table(THD *thd, TABLE *table, Alter_info *alter_info,
       object to allow fast_alter_partition_table to perform the changes.
     */
     DBUG_ASSERT(thd->mdl_context.is_lock_owner(MDL_key::TABLE,
-                                               alter_ctx->db.str,
-                                               alter_ctx->table_name.str,
+                                               table->s->db.str,
+                                               table->s->table_name.str,
                                                MDL_INTENTION_EXCLUSIVE));
 
     tab_part_info= table->part_info;
@@ -5116,7 +5135,7 @@ uint prep_alter_part_table(THD *thd, TABLE *table, Alter_info *alter_info,
       alt_part_info->part_type= tab_part_info->part_type;
       alt_part_info->subpart_type= tab_part_info->subpart_type;
       if (alt_part_info->set_up_defaults_for_partitioning(thd, table->file, 0,
-                                                    tab_part_info->num_parts))
+                              tab_part_info->next_part_no(num_new_partitions)))
       {
         goto err;
       }
@@ -5360,6 +5379,7 @@ that are reorganised.
           my_error(ER_VERS_WRONG_PARTS, MYF(0), table->s->table_name.str);
           goto err;
         }
+        tab_part_info->use_default_partitions= false;
       }
       else
       {
@@ -5888,12 +5908,30 @@ the generated partition syntax in a correct manner.
         */
         if (alter_info->partition_flags != ALTER_PARTITION_INFO ||
             !table->part_info ||
-            alter_info->requested_algorithm !=
+            alter_info->algorithm(thd) !=
               Alter_info::ALTER_TABLE_ALGORITHM_INPLACE ||
             !table->part_info->has_same_partitioning(part_info))
         {
           DBUG_PRINT("info", ("partition changed"));
           *partition_changed= true;
+        }
+      }
+
+      // In case of PARTITION BY KEY(), check if primary key has changed
+      // System versioning also implicitly adds/removes primary key parts
+      if (alter_info->partition_flags == 0 && part_info->list_of_part_fields
+          && part_info->part_field_list.elements == 0)
+      {
+        if (alter_info->flags & (ALTER_DROP_SYSTEM_VERSIONING |
+                                 ALTER_ADD_SYSTEM_VERSIONING))
+          *partition_changed= true;
+
+        List_iterator<Key> it(alter_info->key_list);
+        Key *key;
+        while((key= it++) && !*partition_changed)
+        {
+          if (key->type == Key::PRIMARY)
+            *partition_changed= true;
         }
       }
       /*
@@ -6732,9 +6770,9 @@ static void release_log_entries(partition_info *part_info)
     alter_partition_lock_handling()
     lpt                        Struct carrying parameters
   RETURN VALUES
-    NONE
+    true on error
 */
-static void alter_partition_lock_handling(ALTER_PARTITION_PARAM_TYPE *lpt)
+static bool alter_partition_lock_handling(ALTER_PARTITION_PARAM_TYPE *lpt)
 {
   THD *thd= lpt->thd;
 
@@ -6748,23 +6786,9 @@ static void alter_partition_lock_handling(ALTER_PARTITION_PARAM_TYPE *lpt)
   lpt->table= 0;
   lpt->table_list->table= 0;
   if (thd->locked_tables_mode)
-  {
-    Diagnostics_area *stmt_da= NULL;
-    Diagnostics_area tmp_stmt_da(true);
+    return thd->locked_tables_list.reopen_tables(thd, false);
 
-    if (unlikely(thd->is_error()))
-    {
-      /* reopen might fail if we have a previous error, use a temporary da. */
-      stmt_da= thd->get_stmt_da();
-      thd->set_stmt_da(&tmp_stmt_da);
-    }
-
-    if (unlikely(thd->locked_tables_list.reopen_tables(thd, false)))
-      sql_print_warning("We failed to reacquire LOCKs in ALTER TABLE");
-
-    if (stmt_da)
-      thd->set_stmt_da(stmt_da);
-  }
+  return false;
 }
 
 
@@ -6773,20 +6797,21 @@ static void alter_partition_lock_handling(ALTER_PARTITION_PARAM_TYPE *lpt)
 
   @param lpt  Struct carrying parameters
 
-  @return Always 0.
+  @return error code if external_unlock fails
 */
 
 static int alter_close_table(ALTER_PARTITION_PARAM_TYPE *lpt)
 {
+  int error= 0;
   DBUG_ENTER("alter_close_table");
 
   if (lpt->table->db_stat)
   {
-    mysql_lock_remove(lpt->thd, lpt->thd->lock, lpt->table);
-    lpt->table->file->ha_close();
+    error= mysql_lock_remove(lpt->thd, lpt->thd->lock, lpt->table);
+    error= lpt->table->file->ha_close();
     lpt->table->db_stat= 0;                        // Mark file closed
   }
-  DBUG_RETURN(0);
+  DBUG_RETURN(error);
 }
 
 
@@ -6800,44 +6825,33 @@ static int alter_close_table(ALTER_PARTITION_PARAM_TYPE *lpt)
   @param close_table        Table is still open, close it before reverting
 */
 
-void handle_alter_part_error(ALTER_PARTITION_PARAM_TYPE *lpt,
-                             bool action_completed,
-                             bool drop_partition,
-                             bool frm_install,
-                             bool close_table)
+static void handle_alter_part_error(ALTER_PARTITION_PARAM_TYPE *lpt,
+                                    bool action_completed,
+                                    bool drop_partition,
+                                    bool frm_install)
 {
-  partition_info *part_info= lpt->part_info;
   THD *thd= lpt->thd;
+  partition_info *part_info= lpt->part_info->get_clone(thd);
   TABLE *table= lpt->table;
   DBUG_ENTER("handle_alter_part_error");
   DBUG_ASSERT(table->m_needs_reopen);
 
-  if (close_table)
+  /*
+    All instances of this table needs to be closed.
+    Better to do that here, than leave the cleaning up to others.
+    Acquire EXCLUSIVE mdl lock if not already acquired.
+  */
+  if (!thd->mdl_context.is_lock_owner(MDL_key::TABLE, lpt->db.str,
+                                      lpt->table_name.str,
+                                      MDL_EXCLUSIVE) &&
+      wait_while_table_is_used(thd, table, HA_EXTRA_FORCE_REOPEN))
   {
     /*
-      All instances of this table needs to be closed.
-      Better to do that here, than leave the cleaning up to others.
-      Aquire EXCLUSIVE mdl lock if not already aquired.
-    */
-    if (!thd->mdl_context.is_lock_owner(MDL_key::TABLE, lpt->db.str,
-                                        lpt->table_name.str,
-                                        MDL_EXCLUSIVE))
-    {
-      if (wait_while_table_is_used(thd, table, HA_EXTRA_FORCE_REOPEN))
-      {
-        /* At least remove this instance on failure */
-        goto err_exclusive_lock;
-      }
-    }
-    /* Ensure the share is destroyed and reopened. */
-    if (part_info)
-      part_info= part_info->get_clone(thd);
-    close_all_tables_for_name(thd, table->s, HA_EXTRA_NOT_USED, NULL);
-  }
-  else
-  {
-err_exclusive_lock:
-    /*
+      Did not succeed in getting exclusive access to the table.
+
+      Since we have altered a cached table object (and its part_info) we need
+      at least to remove this instance so it will not be reused.
+
       Temporarily remove it from the locked table list, so that it will get
       reopened.
     */
@@ -6849,10 +6863,13 @@ err_exclusive_lock:
       the table cache.
     */
     mysql_lock_remove(thd, thd->lock, table);
-    if (part_info)
-      part_info= part_info->get_clone(thd);
     close_thread_table(thd, &thd->open_tables);
     lpt->table_list->table= NULL;
+  }
+  else
+  {
+    /* Ensure the share is destroyed and reopened. */
+    close_all_tables_for_name(thd, table->s, HA_EXTRA_NOT_USED, NULL);
   }
 
   if (part_info->first_log_entry &&
@@ -6869,19 +6886,20 @@ err_exclusive_lock:
       if (drop_partition)
       {
         /* Table is still ok, but we left a shadow frm file behind. */
-        push_warning_printf(thd, Sql_condition::WARN_LEVEL_WARN, 1,
-                            "%s %s",
-           "Operation was unsuccessful, table is still intact,",
-           "but it is possible that a shadow frm file was left behind");
+        push_warning(thd, Sql_condition::WARN_LEVEL_WARN, 1,
+                     "Operation was unsuccessful, table is still "
+                     "intact, but it is possible that a shadow frm "
+                     "file was left behind");
       }
       else
       {
-        push_warning_printf(thd, Sql_condition::WARN_LEVEL_WARN, 1,
-                            "%s %s %s %s",
-           "Operation was unsuccessful, table is still intact,",
-           "but it is possible that a shadow frm file was left behind.",
-           "It is also possible that temporary partitions are left behind,",
-           "these could be empty or more or less filled with records");
+        push_warning(thd, Sql_condition::WARN_LEVEL_WARN, 1,
+                     "Operation was unsuccessful, table is still "
+                     "intact, but it is possible that a shadow frm "
+                     "file was left behind. "
+                     "It is also possible that temporary partitions "
+                     "are left behind, these could be empty or more "
+                     "or less filled with records");
       }
     }
     else
@@ -6889,14 +6907,14 @@ err_exclusive_lock:
       if (frm_install)
       {
         /*
-           Failed during install of shadow frm file, table isn't intact
-           and dropped partitions are still there
+          Failed during install of shadow frm file, table isn't intact
+          and dropped partitions are still there
         */
-        push_warning_printf(thd, Sql_condition::WARN_LEVEL_WARN, 1,
-                            "%s %s %s",
-          "Failed during alter of partitions, table is no longer intact.",
-          "The frm file is in an unknown state, and a backup",
-          "is required.");
+        push_warning(thd, Sql_condition::WARN_LEVEL_WARN, 1,
+                     "Failed during alter of partitions, table is no "
+                     "longer intact. "
+                     "The frm file is in an unknown state, and a "
+                     "backup is required.");
       }
       else if (drop_partition)
       {
@@ -6906,10 +6924,10 @@ err_exclusive_lock:
           ask the user to perform the action manually. We remove the log
           records and ask the user to perform the action manually.
         */
-        push_warning_printf(thd, Sql_condition::WARN_LEVEL_WARN, 1,
-                            "%s %s",
-              "Failed during drop of partitions, table is intact.",
-              "Manual drop of remaining partitions is required");
+        push_warning(thd, Sql_condition::WARN_LEVEL_WARN, 1,
+                     "Failed during drop of partitions, table is "
+                     "intact. "
+                     "Manual drop of remaining partitions is required");
       }
       else
       {
@@ -6918,11 +6936,11 @@ err_exclusive_lock:
           certainly in a very bad state so we give user warning and disable
           the table by writing an ancient frm version into it.
         */
-        push_warning_printf(thd, Sql_condition::WARN_LEVEL_WARN, 1,
-                            "%s %s %s",
-           "Failed during renaming of partitions. We are now in a position",
-           "where table is not reusable",
-           "Table is disabled by writing ancient frm file version into it");
+        push_warning(thd, Sql_condition::WARN_LEVEL_WARN, 1,
+                     "Failed during renaming of partitions. We are now "
+                     "in a position where table is not reusable "
+                     "Table is disabled by writing ancient frm file "
+                     "version into it");
       }
     }
   }
@@ -6947,9 +6965,9 @@ err_exclusive_lock:
         even though we reported an error the operation was successfully
         completed.
       */
-      push_warning_printf(thd, Sql_condition::WARN_LEVEL_WARN, 1,"%s %s",
-         "Operation was successfully completed by failure handling,",
-         "after failure of normal operation");
+      push_warning(thd, Sql_condition::WARN_LEVEL_WARN, 1,
+                   "Operation was successfully completed by failure "
+                   "handling, after failure of normal operation");
     }
   }
 
@@ -6965,6 +6983,8 @@ err_exclusive_lock:
       thd->set_stmt_da(&tmp_stmt_da);
     }
 
+    /* NB: error status is not needed here, the statement fails with
+       the original error. */
     if (unlikely(thd->locked_tables_list.reopen_tables(thd, false)))
       sql_print_warning("We failed to reacquire LOCKs in ALTER TABLE");
 
@@ -7025,9 +7045,10 @@ uint fast_alter_partition_table(THD *thd, TABLE *table,
   ALTER_PARTITION_PARAM_TYPE lpt_obj;
   ALTER_PARTITION_PARAM_TYPE *lpt= &lpt_obj;
   bool action_completed= FALSE;
-  bool close_table_on_failure= FALSE;
   bool frm_install= FALSE;
   MDL_ticket *mdl_ticket= table->mdl_ticket;
+  /* option_bits is used to mark if we should log the query with IF EXISTS */
+  ulonglong save_option_bits= thd->variables.option_bits;
   DBUG_ENTER("fast_alter_partition_table");
   DBUG_ASSERT(table->m_needs_reopen);
 
@@ -7047,6 +7068,10 @@ uint fast_alter_partition_table(THD *thd, TABLE *table,
   lpt->deleted= 0;
   lpt->pack_frm_data= NULL;
   lpt->pack_frm_len= 0;
+
+  /* Add IF EXISTS to binlog if shared table */
+  if (table->file->partition_ht()->flags & HTON_TABLE_MAY_NOT_EXIST_ON_SLAVE)
+    thd->variables.option_bits|= OPTION_IF_EXISTS;
 
   if (table->file->alter_table_flags(alter_info->flags) &
         HA_PARTITION_ONE_PHASE)
@@ -7164,13 +7189,11 @@ uint fast_alter_partition_table(THD *thd, TABLE *table,
         wait_while_table_is_used(thd, table, HA_EXTRA_NOT_USED) ||
         ERROR_INJECT_CRASH("crash_drop_partition_3") ||
         ERROR_INJECT_ERROR("fail_drop_partition_3") ||
-        (close_table_on_failure= TRUE, FALSE) ||
         write_log_drop_partition(lpt) ||
         (action_completed= TRUE, FALSE) ||
         ERROR_INJECT_CRASH("crash_drop_partition_4") ||
         ERROR_INJECT_ERROR("fail_drop_partition_4") ||
         alter_close_table(lpt) ||
-        (close_table_on_failure= FALSE, FALSE) ||
         ERROR_INJECT_CRASH("crash_drop_partition_5") ||
         ERROR_INJECT_ERROR("fail_drop_partition_5") ||
         ((!thd->lex->no_write_to_binlog) &&
@@ -7188,13 +7211,13 @@ uint fast_alter_partition_table(THD *thd, TABLE *table,
         ERROR_INJECT_ERROR("fail_drop_partition_8") ||
         (write_log_completed(lpt, FALSE), FALSE) ||
         ERROR_INJECT_CRASH("crash_drop_partition_9") ||
-        ERROR_INJECT_ERROR("fail_drop_partition_9") ||
-        (alter_partition_lock_handling(lpt), FALSE)) 
+        ERROR_INJECT_ERROR("fail_drop_partition_9"))
     {
-      handle_alter_part_error(lpt, action_completed, TRUE, frm_install,
-                              close_table_on_failure);
+      handle_alter_part_error(lpt, action_completed, TRUE, frm_install);
       goto err;
     }
+    if (alter_partition_lock_handling(lpt))
+      goto err;
   }
   else if ((alter_info->partition_flags & ALTER_PARTITION_ADD) &&
            (part_info->part_type == RANGE_PARTITION ||
@@ -7238,14 +7261,12 @@ uint fast_alter_partition_table(THD *thd, TABLE *table,
         wait_while_table_is_used(thd, table, HA_EXTRA_NOT_USED) ||
         ERROR_INJECT_CRASH("crash_add_partition_3") ||
         ERROR_INJECT_ERROR("fail_add_partition_3") ||
-        (close_table_on_failure= TRUE, FALSE) ||
         write_log_add_change_partition(lpt) ||
         ERROR_INJECT_CRASH("crash_add_partition_4") ||
         ERROR_INJECT_ERROR("fail_add_partition_4") ||
         mysql_change_partitions(lpt) ||
         ERROR_INJECT_CRASH("crash_add_partition_5") ||
         ERROR_INJECT_ERROR("fail_add_partition_5") ||
-        (close_table_on_failure= FALSE, FALSE) ||
         alter_close_table(lpt) ||
         ERROR_INJECT_CRASH("crash_add_partition_6") ||
         ERROR_INJECT_ERROR("fail_add_partition_6") ||
@@ -7265,13 +7286,13 @@ uint fast_alter_partition_table(THD *thd, TABLE *table,
         ERROR_INJECT_ERROR("fail_add_partition_9") ||
         (write_log_completed(lpt, FALSE), FALSE) ||
         ERROR_INJECT_CRASH("crash_add_partition_10") ||
-        ERROR_INJECT_ERROR("fail_add_partition_10") ||
-        (alter_partition_lock_handling(lpt), FALSE))
+        ERROR_INJECT_ERROR("fail_add_partition_10"))
     {
-      handle_alter_part_error(lpt, action_completed, FALSE, frm_install,
-                              close_table_on_failure);
+      handle_alter_part_error(lpt, action_completed, FALSE, frm_install);
       goto err;
     }
+    if (alter_partition_lock_handling(lpt))
+      goto err;
   }
   else
   {
@@ -7334,7 +7355,6 @@ uint fast_alter_partition_table(THD *thd, TABLE *table,
         mysql_write_frm(lpt, WFRM_WRITE_SHADOW) ||
         ERROR_INJECT_CRASH("crash_change_partition_2") ||
         ERROR_INJECT_ERROR("fail_change_partition_2") ||
-        (close_table_on_failure= TRUE, FALSE) ||
         write_log_add_change_partition(lpt) ||
         ERROR_INJECT_CRASH("crash_change_partition_3") ||
         ERROR_INJECT_ERROR("fail_change_partition_3") ||
@@ -7345,7 +7365,6 @@ uint fast_alter_partition_table(THD *thd, TABLE *table,
         ERROR_INJECT_CRASH("crash_change_partition_5") ||
         ERROR_INJECT_ERROR("fail_change_partition_5") ||
         alter_close_table(lpt) ||
-        (close_table_on_failure= FALSE, FALSE) ||
         ERROR_INJECT_CRASH("crash_change_partition_6") ||
         ERROR_INJECT_ERROR("fail_change_partition_6") ||
         write_log_final_change_partition(lpt) ||
@@ -7370,14 +7389,15 @@ uint fast_alter_partition_table(THD *thd, TABLE *table,
         ERROR_INJECT_ERROR("fail_change_partition_11") ||
         (write_log_completed(lpt, FALSE), FALSE) ||
         ERROR_INJECT_CRASH("crash_change_partition_12") ||
-        ERROR_INJECT_ERROR("fail_change_partition_12") ||
-        (alter_partition_lock_handling(lpt), FALSE))
+        ERROR_INJECT_ERROR("fail_change_partition_12"))
     {
-      handle_alter_part_error(lpt, action_completed, FALSE, frm_install,
-                              close_table_on_failure);
+      handle_alter_part_error(lpt, action_completed, FALSE, frm_install);
       goto err;
     }
+    if (alter_partition_lock_handling(lpt))
+      goto err;
   }
+  thd->variables.option_bits= save_option_bits;
   downgrade_mdl_if_lock_tables_mode(thd, mdl_ticket, MDL_SHARED_NO_READ_WRITE);
   /*
     A final step is to write the query to the binlog and send ok to the
@@ -7385,6 +7405,7 @@ uint fast_alter_partition_table(THD *thd, TABLE *table,
   */
   DBUG_RETURN(fast_end_partition(thd, lpt->copied, lpt->deleted, table_list));
 err:
+  thd->variables.option_bits= save_option_bits;
   downgrade_mdl_if_lock_tables_mode(thd, mdl_ticket, MDL_SHARED_NO_READ_WRITE);
   DBUG_RETURN(TRUE);
 }
@@ -7481,7 +7502,7 @@ void append_row_to_str(String &str, const uchar *row, TABLE *table)
     rec= row;
 
   /* Create a new array of all read fields. */
-  fields= (Field**) my_malloc(sizeof(void*) * (num_fields + 1),
+  fields= (Field**) my_malloc(PSI_INSTRUMENT_ME, sizeof(void*) * (num_fields + 1),
                               MYF(0));
   if (!fields)
     return;

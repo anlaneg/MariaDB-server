@@ -43,6 +43,9 @@ SYM_GROUP sym_group_rtree= {"RTree keys", "HAVE_RTREE_KEYS"};
   NOTE! The symbol tables should be the same regardless of what features
   are compiled into the server. Don't add ifdef'ed symbols to the
   lists
+  NOTE!!
+  If you add or delete symbols from this file, you must also update results for
+  the perfschema.start_server_low_digest_sql_length test!
 */
 
 static SYMBOL symbols[] = {
@@ -174,7 +177,7 @@ static SYMBOL symbols[] = {
   { "DAY_MICROSECOND",	SYM(DAY_MICROSECOND_SYM)},
   { "DAY_MINUTE",	SYM(DAY_MINUTE_SYM)},
   { "DAY_SECOND",	SYM(DAY_SECOND_SYM)},
-  { "DEALLOCATE",       SYM(DEALLOCATE_SYM)},     
+  { "DEALLOCATE",       SYM(DEALLOCATE_SYM)},
   { "DEC",		SYM(DECIMAL_SYM)},
   { "DECIMAL",		SYM(DECIMAL_SYM)},
   { "DECLARE",          SYM(DECLARE_MARIADB_SYM)},
@@ -239,6 +242,7 @@ static SYMBOL symbols[] = {
   { "FALSE",		SYM(FALSE_SYM)},
   { "FAST",		SYM(FAST_SYM)},
   { "FAULTS",  SYM(FAULTS_SYM)},
+  { "FEDERATED", SYM(FEDERATED_SYM)},
   { "FETCH",            SYM(FETCH_SYM)},
   { "FIELDS",		SYM(COLUMNS)},
   { "FILE",		SYM(FILE_SYM)},
@@ -405,6 +409,7 @@ static SYMBOL symbols[] = {
   { "MODE",		SYM(MODE_SYM)},
   { "MODIFIES",		SYM(MODIFIES_SYM)},
   { "MODIFY",		SYM(MODIFY_SYM)},
+  { "MONITOR",          SYM(MONITOR_SYM)},
   { "MONTH",		SYM(MONTH_SYM)},
   { "MUTEX",  SYM(MUTEX_SYM)},
   { "MYSQL",            SYM(MYSQL_SYM)},
@@ -453,6 +458,7 @@ static SYMBOL symbols[] = {
   { "OUTER",		SYM(OUTER)},
   { "OUTFILE",		SYM(OUTFILE)},
   { "OVER",             SYM(OVER_SYM)},
+  { "OVERLAPS",         SYM(OVERLAPS_SYM)},
   { "OWNER",		SYM(OWNER_SYM)},
   { "PACKAGE",          SYM(PACKAGE_MARIADB_SYM)},
   { "PACK_KEYS",	SYM(PACK_KEYS_SYM)},
@@ -520,6 +526,7 @@ static SYMBOL symbols[] = {
   { "REPAIR",		SYM(REPAIR)},
   { "REPEATABLE",	SYM(REPEATABLE_SYM)},
   { "REPLACE",		SYM(REPLACE)},
+  { "REPLAY",           SYM(REPLAY_SYM)},
   { "REPLICA",      SYM(SLAVE)},
   { "REPLICAS",     SYM(SLAVES)},
   { "REPLICA_POS",  SYM(SLAVE_POS_SYM)},
@@ -658,6 +665,7 @@ static SYMBOL symbols[] = {
   { "TRAILING",		SYM(TRAILING)},
   { "TRANSACTION",	SYM(TRANSACTION_SYM)},
   { "TRANSACTIONAL",	SYM(TRANSACTIONAL_SYM)},
+  { "THREADS",          SYM(THREADS_SYM)},
   { "TRIGGER",          SYM(TRIGGER_SYM)},
   { "TRIGGERS",         SYM(TRIGGERS_SYM)},
   { "TRUE",		SYM(TRUE_SYM)},
@@ -700,6 +708,7 @@ static SYMBOL symbols[] = {
   { "VIA",              SYM(VIA_SYM)},
   { "VIEW",		SYM(VIEW_SYM)},
   { "VIRTUAL",          SYM(VIRTUAL_SYM)},
+  { "VISIBLE",          SYM(VISIBLE_SYM)},
   { "VERSIONING",       SYM(VERSIONING_SYM)},
   { "WAIT",		SYM(WAIT_SYM)},
   { "WARNINGS",		SYM(WARNINGS)},
@@ -708,7 +717,7 @@ static SYMBOL symbols[] = {
   { "WHEN",		SYM(WHEN_SYM)},
   { "WHERE",		SYM(WHERE)},
   { "WHILE",            SYM(WHILE_SYM)},
-  { "WINDOW",           SYM(WINDOW_SYM)}, 
+  { "WINDOW",           SYM(WINDOW_SYM)},
   { "WITH",		SYM(WITH)},
   { "WITHIN",   SYM(WITHIN)},
   { "WITHOUT",          SYM(WITHOUT)},

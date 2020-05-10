@@ -1,7 +1,7 @@
 /*****************************************************************************
 
 Copyright (c) 1995, 2016, Oracle and/or its affiliates. All Rights Reserved.
-Copyright (c) 2013, 2019, MariaDB Corporation.
+Copyright (c) 2013, 2020, MariaDB Corporation.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License as published by the Free Software
@@ -27,6 +27,7 @@ Created 12/18/1995 Heikki Tuuri
 #ifndef fsp0fsp_h
 #define fsp0fsp_h
 
+#include "assume_aligned.h"
 #include "fsp0types.h"
 #include "fut0lst.h"
 #include "ut0byte.h"
@@ -306,11 +307,10 @@ inline bool xdes_is_free(const xdes_t *descr, ulint offset)
 @param[in]	page	first page of a tablespace
 @param[in]	field	the header field
 @return the contents of the header field */
-inline
-ulint
-fsp_header_get_field(const page_t* page, ulint field)
+inline uint32_t fsp_header_get_field(const page_t* page, ulint field)
 {
-	return(mach_read_from_4(FSP_HEADER_OFFSET + field + page));
+  return mach_read_from_4(FSP_HEADER_OFFSET + field +
+			  my_assume_aligned<UNIV_ZIP_SIZE_MIN>(page));
 }
 
 /** Read the flags from the tablespace header page.
@@ -409,15 +409,12 @@ file space fragmentation.
 @return X-latched block, or NULL if no page could be allocated */
 #define fseg_alloc_free_page(seg_header, hint, direction, mtr)		\
 	fseg_alloc_free_page_general(seg_header, hint, direction,	\
-				     FALSE, mtr, mtr)
+				     false, mtr, mtr)
 /**********************************************************************//**
 Allocates a single free page from a segment. This function implements
 the intelligent allocation strategy which tries to minimize file space
 fragmentation.
-@retval NULL if no page could be allocated
-@retval block, rw_lock_x_lock_count(&block->lock) == 1 if allocation succeeded
-(init_mtr == mtr, or the page was not previously freed in mtr)
-@retval block (not allocated or initialized) otherwise */
+@retval NULL if no page could be allocated */
 buf_block_t*
 fseg_alloc_free_page_general(
 /*=========================*/
@@ -429,16 +426,14 @@ fseg_alloc_free_page_general(
 				inserted there in order, into which
 				direction they go alphabetically: FSP_DOWN,
 				FSP_UP, FSP_NO_DIR */
-	ibool		has_done_reservation, /*!< in: TRUE if the caller has
+	bool		has_done_reservation, /*!< in: true if the caller has
 				already done the reservation for the page
 				with fsp_reserve_free_extents, then there
 				is no need to do the check for this individual
 				page */
 	mtr_t*		mtr,	/*!< in/out: mini-transaction */
 	mtr_t*		init_mtr)/*!< in/out: mtr or another mini-transaction
-				in which the page should be initialized.
-				If init_mtr!=mtr, but the page is already
-				latched in mtr, do not initialize the page. */
+				in which the page should be initialized. */
 	MY_ATTRIBUTE((warn_unused_result, nonnull));
 
 /** Reserves free pages from a tablespace. All mini-transactions which may
@@ -494,7 +489,6 @@ fsp_reserve_free_extents(
 @param[in]	offset		page number
 @param[in]	ahi		whether we may need to drop the adaptive
 hash index
-@param[in]	log		whether to write MLOG_INIT_FREE_PAGE record
 @param[in,out]	mtr		mini-transaction */
 void
 fseg_free_page_func(
@@ -504,14 +498,13 @@ fseg_free_page_func(
 #ifdef BTR_CUR_HASH_ADAPT
 	bool		ahi,
 #endif /* BTR_CUR_HASH_ADAPT */
-	bool		log,
 	mtr_t*		mtr);
 #ifdef BTR_CUR_HASH_ADAPT
-# define fseg_free_page(header, space, offset, ahi, log, mtr)	\
-	fseg_free_page_func(header, space, offset, ahi, log, mtr)
+# define fseg_free_page(header, space, offset, ahi, mtr)	\
+	fseg_free_page_func(header, space, offset, ahi, mtr)
 #else /* BTR_CUR_HASH_ADAPT */
-# define fseg_free_page(header, space, offset, ahi, log, mtr)	\
-	fseg_free_page_func(header, space, offset, log, mtr)
+# define fseg_free_page(header, space, offset, ahi, mtr)	\
+	fseg_free_page_func(header, space, offset, mtr)
 #endif /* BTR_CUR_HASH_ADAPT */
 /** Determine whether a page is free.
 @param[in,out]	space	tablespace
@@ -575,14 +568,6 @@ Any other pages were written with uninitialized bytes in FIL_PAGE_TYPE.
 ATTRIBUTE_COLD
 void fil_block_reset_type(const buf_block_t& block, ulint type, mtr_t* mtr);
 
-/** Get the file page type.
-@param[in]	page	file page
-@return page type */
-inline uint16_t fil_page_get_type(const byte* page)
-{
-  return mach_read_from_2(my_assume_aligned<2>(page + FIL_PAGE_TYPE));
-}
-
 /** Check (and if needed, reset) the page type.
 Data files created before MySQL 5.1.48 may contain
 garbage in the FIL_PAGE_TYPE field.
@@ -614,7 +599,7 @@ inline bool fsp_descr_page(const page_id_t page_id, ulint physical_size)
 
 /** Initialize a file page whose prior contents should be ignored.
 @param[in,out]	block	buffer pool block */
-void fsp_apply_init_file_page(buf_block_t* block);
+void fsp_apply_init_file_page(buf_block_t *block);
 
 /** Initialize a file page.
 @param[in]	space	tablespace
@@ -629,17 +614,7 @@ inline void fsp_init_file_page(
 	ut_d(space->modify_check(*mtr));
 	ut_ad(space->id == block->page.id.space());
 	fsp_apply_init_file_page(block);
-
-	if (byte* log_ptr = mlog_open(mtr, 11)) {
-		log_ptr = mlog_write_initial_log_record_low(
-			MLOG_INIT_FILE_PAGE2,
-			block->page.id.space(), block->page.id.page_no(),
-			log_ptr, mtr);
-		mlog_close(mtr, log_ptr);
-		if (!innodb_log_optimize_ddl) {
-			block->page.init_on_flush = true;
-		}
-	}
+	mtr->init(block);
 }
 
 #ifndef UNIV_DEBUG

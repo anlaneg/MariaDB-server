@@ -1,7 +1,7 @@
 /*****************************************************************************
 
 Copyright (c) 1997, 2017, Oracle and/or its affiliates. All Rights Reserved.
-Copyright (c) 2017, 2019, MariaDB Corporation.
+Copyright (c) 2017, 2020, MariaDB Corporation.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License as published by the Free Software
@@ -118,10 +118,10 @@ row_purge_remove_clust_if_poss_low(
 	}
 
 	rec_t* rec = btr_pcur_get_rec(&node->pcur);
-	offset_t offsets_[REC_OFFS_NORMAL_SIZE];
+	rec_offs offsets_[REC_OFFS_NORMAL_SIZE];
 	rec_offs_init(offsets_);
 	mem_heap_t* heap = NULL;
-	offset_t* offsets = rec_get_offsets(
+	rec_offs* offsets = rec_get_offsets(
 		rec, index, offsets_, true, ULINT_UNDEFINED, &heap);
 	bool success = true;
 
@@ -665,9 +665,9 @@ static void row_purge_reset_trx_id(purge_node_t* node, mtr_t* mtr)
 		mem_heap_t*	heap = NULL;
 		/* Reserve enough offsets for the PRIMARY KEY and 2 columns
 		so that we can access DB_TRX_ID, DB_ROLL_PTR. */
-		offset_t offsets_[REC_OFFS_HEADER_SIZE + MAX_REF_PARTS + 2];
+		rec_offs offsets_[REC_OFFS_HEADER_SIZE + MAX_REF_PARTS + 2];
 		rec_offs_init(offsets_);
-		offset_t*	offsets = rec_get_offsets(
+		rec_offs*	offsets = rec_get_offsets(
 			rec, index, offsets_, true, trx_id_pos + 2, &heap);
 		ut_ad(heap == NULL);
 
@@ -693,11 +693,10 @@ static void row_purge_reset_trx_id(purge_node_t* node, mtr_t* mtr)
 						    rec, index, offsets)));
 
 			index->set_modified(*mtr);
-			if (page_zip_des_t* page_zip
-			    = buf_block_get_page_zip(
-				    btr_pcur_get_block(&node->pcur))) {
+			buf_block_t* block = btr_pcur_get_block(&node->pcur);
+			if (UNIV_LIKELY_NULL(block->page.zip.data)) {
 				page_zip_write_trx_id_and_roll_ptr(
-					page_zip, rec, offsets, trx_id_pos,
+					block, rec, offsets, trx_id_pos,
 					0, 1ULL << ROLL_PTR_INSERT_FLAG_POS,
 					mtr);
 			} else {
@@ -705,13 +704,12 @@ static void row_purge_reset_trx_id(purge_node_t* node, mtr_t* mtr)
 				byte*	ptr = rec_get_nth_field(
 					rec, offsets, trx_id_pos, &len);
 				ut_ad(len == DATA_TRX_ID_LEN);
-				buf_block_t* block = btr_pcur_get_block(
-					&node->pcur);
-				uint16_t offs = page_offset(ptr);
+				size_t offs = page_offset(ptr);
 				mtr->memset(block, offs, DATA_TRX_ID_LEN, 0);
 				offs += DATA_TRX_ID_LEN;
-				mtr->write<1,mtr_t::OPT>(*block, block->frame
-							 + offs, 0x80U);
+				mtr->write<1,mtr_t::MAYBE_NOP>(*block,
+							       block->frame
+							       + offs, 0x80U);
 				mtr->memset(block, offs + 1,
 					    DATA_ROLL_PTR_LEN - 1, 0);
 			}
@@ -885,7 +883,7 @@ row_purge_parse_undo_rec(
 	undo_no_t	undo_no;
 	table_id_t	table_id;
 	roll_ptr_t	roll_ptr;
-	ulint		info_bits;
+	byte		info_bits;
 	ulint		type;
 
 	ut_ad(node != NULL);
@@ -910,7 +908,7 @@ row_purge_parse_undo_rec(
 		break;
 	default:
 #ifdef UNIV_DEBUG
-		ut_ad(!"unknown undo log record type");
+		ut_ad("unknown undo log record type" == 0);
 		return false;
 	case TRX_UNDO_UPD_DEL_REC:
 	case TRX_UNDO_UPD_EXIST_REC:
@@ -1053,8 +1051,7 @@ row_purge_record_func(
 			if (node->table->stat_initialized
 			    && srv_stats_include_delete_marked) {
 				dict_stats_update_if_needed(
-					node->table,
-					thr->graph->trx->mysql_thd);
+					node->table, *thr->graph->trx);
 			}
 			MONITOR_INC(MONITOR_N_DEL_ROW_PURGE);
 		}
@@ -1202,7 +1199,7 @@ purge_node_t::validate_pcur()
 
 	dict_index_t*	clust_index = pcur.btr_cur.index;
 
-	offset_t* offsets = rec_get_offsets(
+	rec_offs* offsets = rec_get_offsets(
 		pcur.old_rec, clust_index, NULL, true,
 		pcur.old_n_fields, &heap);
 

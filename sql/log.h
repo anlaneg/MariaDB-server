@@ -1,5 +1,5 @@
 /* Copyright (c) 2005, 2016, Oracle and/or its affiliates.
-   Copyright (c) 2009, 2017, MariaDB Corporation.
+   Copyright (c) 2009, 2020, MariaDB Corporation.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -61,6 +61,7 @@ class TC_LOG
                             bool need_prepare_ordered,
                             bool need_commit_ordered) = 0;
   virtual int unlog(ulong cookie, my_xid xid)=0;
+  virtual int unlog_xa_prepare(THD *thd, bool all)= 0;
   virtual void commit_checkpoint_notify(void *cookie)= 0;
 
 protected:
@@ -115,6 +116,10 @@ public:
     return 1;
   }
   int unlog(ulong cookie, my_xid xid)  { return 0; }
+  int unlog_xa_prepare(THD *thd, bool all)
+  {
+    return 0;
+  }
   void commit_checkpoint_notify(void *cookie) { DBUG_ASSERT(0); };
 };
 
@@ -198,6 +203,10 @@ class TC_LOG_MMAP: public TC_LOG
   int log_and_order(THD *thd, my_xid xid, bool all,
                     bool need_prepare_ordered, bool need_commit_ordered);
   int unlog(ulong cookie, my_xid xid);
+  int unlog_xa_prepare(THD *thd, bool all)
+  {
+    return 0;
+  }
   void commit_checkpoint_notify(void *cookie);
   int recover();
 
@@ -412,7 +421,6 @@ struct wait_for_commit;
 
 class MYSQL_BIN_LOG: public TC_LOG, private MYSQL_LOG
 {
-#ifdef HAVE_PSI_INTERFACE
   /** The instrumentation key to use for @ LOCK_index. */
   PSI_mutex_key m_key_LOCK_index;
   /** The instrumentation key to use for @ COND_relay_log_updated */
@@ -420,14 +428,13 @@ class MYSQL_BIN_LOG: public TC_LOG, private MYSQL_LOG
   /** The instrumentation key to use for @ COND_bin_log_updated */
   PSI_cond_key m_key_bin_log_update;
   /** The instrumentation key to use for opening the log file. */
-  PSI_file_key m_key_file_log;
+  PSI_file_key m_key_file_log, m_key_file_log_cache;
   /** The instrumentation key to use for opening the log index file. */
-  PSI_file_key m_key_file_log_index;
+  PSI_file_key m_key_file_log_index, m_key_file_log_index_cache;
 
-  PSI_file_key m_key_COND_queue_busy;
+  PSI_cond_key m_key_COND_queue_busy;
   /** The instrumentation key to use for LOCK_binlog_end_pos. */
   PSI_mutex_key m_key_LOCK_binlog_end_pos;
-#endif
 
   struct group_commit_entry
   {
@@ -583,7 +590,18 @@ public:
     long notify_count;
     /* For linking in requests to the binlog background thread. */
     xid_count_per_binlog *next_in_queue;
-    xid_count_per_binlog();   /* Give link error if constructor used. */
+    xid_count_per_binlog(char *log_file_name, uint log_file_name_len)
+      :binlog_id(0), xid_count(0), notify_count(0)
+    {
+      binlog_name_len= log_file_name_len;
+      binlog_name= (char *) my_malloc(PSI_INSTRUMENT_ME, binlog_name_len, MYF(MY_ZEROFILL));
+      if (binlog_name)
+        memcpy(binlog_name, log_file_name, binlog_name_len);
+    }
+    ~xid_count_per_binlog()
+    {
+      my_free(binlog_name);
+    }
   };
   I_List<xid_count_per_binlog> binlog_xid_count_list;
   mysql_mutex_t LOCK_binlog_background_thread;
@@ -663,15 +681,19 @@ public:
                     PSI_cond_key key_relay_log_update,
                     PSI_cond_key key_bin_log_update,
                     PSI_file_key key_file_log,
+                    PSI_file_key key_file_log_cache,
                     PSI_file_key key_file_log_index,
-                    PSI_file_key key_COND_queue_busy,
+                    PSI_file_key key_file_log_index_cache,
+                    PSI_cond_key key_COND_queue_busy,
                     PSI_mutex_key key_LOCK_binlog_end_pos)
   {
     m_key_LOCK_index= key_LOCK_index;
     m_key_relay_log_update=  key_relay_log_update;
     m_key_bin_log_update=    key_bin_log_update;
     m_key_file_log= key_file_log;
+    m_key_file_log_cache= key_file_log_cache;
     m_key_file_log_index= key_file_log_index;
+    m_key_file_log_index_cache= key_file_log_index_cache;
     m_key_COND_queue_busy= key_COND_queue_busy;
     m_key_LOCK_binlog_end_pos= key_LOCK_binlog_end_pos;
   }
@@ -684,6 +706,7 @@ public:
   int log_and_order(THD *thd, my_xid xid, bool all,
                     bool need_prepare_ordered, bool need_commit_ordered);
   int unlog(ulong cookie, my_xid xid);
+  int unlog_xa_prepare(THD *thd, bool all);
   void commit_checkpoint_notify(void *cookie);
   int recover(LOG_INFO *linfo, const char *last_log_name, IO_CACHE *first_log,
               Format_description_log_event *fdle, bool do_xa);
@@ -1121,6 +1144,7 @@ File open_binlog(IO_CACHE *log, const char *log_file_name,
 
 void make_default_log_name(char **out, const char* log_ext, bool once);
 void binlog_reset_cache(THD *thd);
+bool write_annotated_row(THD *thd);
 
 extern MYSQL_PLUGIN_IMPORT MYSQL_BIN_LOG mysql_bin_log;
 extern handlerton *binlog_hton;
@@ -1200,6 +1224,7 @@ static inline TC_LOG *get_tc_log_implementation()
 #ifdef WITH_WSREP
 IO_CACHE* wsrep_get_trans_cache(THD *);
 void wsrep_thd_binlog_trx_reset(THD * thd);
+void wsrep_thd_binlog_stmt_rollback(THD * thd);
 #endif /* WITH_WSREP */
 
 class Gtid_list_log_event;

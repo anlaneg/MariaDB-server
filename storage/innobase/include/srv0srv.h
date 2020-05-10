@@ -3,7 +3,7 @@
 Copyright (c) 1995, 2017, Oracle and/or its affiliates. All rights reserved.
 Copyright (c) 2008, 2009, Google Inc.
 Copyright (c) 2009, Percona Inc.
-Copyright (c) 2013, 2019, MariaDB Corporation.
+Copyright (c) 2013, 2020, MariaDB Corporation.
 
 Portions of this file contain modifications contributed and copyrighted by
 Google, Inc. Those modifications are gratefully acknowledged and are described
@@ -185,9 +185,6 @@ struct srv_stats_t
 	/** Number of encryption_get_latest_key_version calls */
 	ulint_ctr_64_t		n_key_requests;
 
-	/** Number of log scrub operations */
-	ulint_ctr_64_t		n_log_scrubs;
-
 	/** Number of spaces in keyrotation list */
 	ulint_ctr_64_t		key_rotation_list_length;
 
@@ -327,7 +324,6 @@ constexpr ulint SRV_UNDO_TABLESPACE_SIZE_IN_PAGES= (10U << 20) /
 
 extern char*	srv_log_group_home_dir;
 
-extern ulong	srv_n_log_files;
 /** The InnoDB redo log file size, or 0 when changing the redo log format
 at startup (while disallowing writes to the redo log). */
 extern ulonglong	srv_log_file_size;
@@ -354,14 +350,9 @@ extern ulint		srv_buf_pool_size;
 extern const ulint	srv_buf_pool_min_size;
 /** Default pool size in bytes */
 extern const ulint	srv_buf_pool_def_size;
-/** Requested buffer pool chunk size. Each buffer pool instance consists
-of one or more chunks. */
+/** Requested buffer pool chunk size */
 extern ulong		srv_buf_pool_chunk_unit;
-/** Requested number of buffer pool instances */
-extern ulong		srv_buf_pool_instances;
-/** Default number of buffer pool instances */
-extern const ulong	srv_buf_pool_instances_default;
-/** Number of locks to protect buf_pool->page_hash */
+/** Number of locks to protect buf_pool.page_hash */
 extern ulong	srv_n_page_hash_locks;
 /** Scan depth for LRU flush batch i.e.: number of blocks scanned*/
 extern ulong	srv_LRU_scan_depth;
@@ -410,10 +401,6 @@ The real value is set based on the value of io_capacity. */
 #define SRV_MAX_IO_CAPACITY_DUMMY_DEFAULT	(~0UL)
 #define SRV_MAX_IO_CAPACITY_LIMIT		(~0UL)
 extern ulong    srv_max_io_capacity;
-/* Returns the number of IO operations that is X percent of the
-capacity. PCT_IO(5) -> returns the number of IO operations that
-is 5% of the max where max is srv_io_capacity.  */
-#define PCT_IO(p) ((ulong) (srv_io_capacity * ((double) (p) / 100.0)))
 
 /* The "innodb_stats_method" setting, decides how InnoDB is going
 to treat NULL value when collecting statistics. It is not defined
@@ -421,8 +408,6 @@ as enum type because the configure option takes unsigned integer type. */
 extern ulong	srv_innodb_stats_method;
 
 extern ulint	srv_max_n_open_files;
-
-extern ulong	srv_n_page_cleaners;
 
 extern double	srv_max_dirty_pages_pct;
 extern double	srv_max_dirty_pages_pct_lwm;
@@ -432,13 +417,11 @@ extern ulong	srv_flushing_avg_loops;
 
 extern ulong	srv_force_recovery;
 
-extern uint	srv_fast_shutdown;	/*!< If this is 1, do not do a
-					purge and index buffer merge.
-					If this 2, do not even flush the
-					buffer pool to data files at the
-					shutdown: we effectively 'crash'
-					InnoDB (but lose no committed
-					transactions). */
+/** innodb_fast_shutdown=1 skips purge and change buffer merge.
+innodb_fast_shutdown=2 effectively crashes the server (no log checkpoint).
+innodb_fast_shutdown=3 is a clean shutdown that skips the rollback
+of active transaction (to be done on restart). */
+extern uint	srv_fast_shutdown;
 
 extern ibool	srv_innodb_status;
 
@@ -465,6 +448,7 @@ extern ulong	srv_replication_delay;
 
 extern my_bool	innodb_encrypt_temporary_tables;
 
+extern my_bool  srv_immediate_scrub_data_uncompressed;
 /*-------------------------------------------*/
 
 /** Modes of operation */
@@ -491,9 +475,6 @@ extern ibool	srv_print_verbose_log;
 extern bool	srv_monitor_active;
 
 
-/* TRUE if enable log scrubbing */
-extern my_bool	srv_scrub_log;
-
 extern ulong	srv_n_spin_wait_rounds;
 extern ulong	srv_n_free_tickets_to_enter;
 extern ulong	srv_thread_sleep_delay;
@@ -518,8 +499,8 @@ extern my_bool	srv_purge_view_update_only_debug;
 extern my_bool	srv_master_thread_disabled_debug;
 /** InnoDB system tablespace to set during recovery */
 extern uint	srv_sys_space_size_debug;
-/** whether redo log files have been created at startup */
-extern bool	srv_log_files_created;
+/** whether redo log file has been created at startup */
+extern bool	srv_log_file_created;
 #endif /* UNIV_DEBUG */
 
 extern ulint	srv_dml_needed_delay;
@@ -531,8 +512,8 @@ i/o handler thread */
 extern const char* srv_io_thread_op_info[];
 extern const char* srv_io_thread_function[];
 
-/* the number of purge threads to use from the worker pool (currently 0 or 1) */
-extern ulong srv_n_purge_threads;
+/** innodb_purge_threads; the number of purge tasks to use */
+extern uint srv_n_purge_threads;
 
 /* the number of pages to purge in one batch */
 extern ulong srv_purge_batch_size;
@@ -565,8 +546,6 @@ extern ulong	srv_fatal_semaphore_wait_threshold;
 /** Buffer pool dump status frequence in percentages */
 extern ulong srv_buf_dump_status_frequency;
 
-#define srv_max_purge_threads 32
-
 # ifdef UNIV_PFS_THREAD
 extern mysql_pfs_key_t	page_cleaner_thread_key;
 extern mysql_pfs_key_t	recv_writer_thread_key;
@@ -576,10 +555,10 @@ extern mysql_pfs_key_t	thread_pool_thread_key;
 /* This macro register the current thread and its key with performance
 schema */
 #  define pfs_register_thread(key)			\
-do {								\
-	struct PSI_thread* psi = PSI_CALL_new_thread(key, NULL, 0);\
-	/* JAN: TODO: MYSQL 5.7 PSI                             \
-	PSI_CALL_set_thread_os_id(psi);	*/		\
+do {							\
+	struct PSI_thread* psi __attribute__((unused))	\
+		= PSI_CALL_new_thread(key, NULL, 0);	\
+	PSI_CALL_set_thread_os_id(psi);			\
 	PSI_CALL_set_thread(psi);			\
 } while (0)
 
@@ -597,10 +576,6 @@ do {								\
 /** Performance schema stage event for monitoring ALTER TABLE progress
 everything after flush log_make_checkpoint(). */
 extern PSI_stage_info	srv_stage_alter_table_end;
-
-/** Performance schema stage event for monitoring ALTER TABLE progress
-log_make_checkpoint(). */
-extern PSI_stage_info	srv_stage_alter_table_flush;
 
 /** Performance schema stage event for monitoring ALTER TABLE progress
 row_merge_insert_index_tuples(). */
@@ -630,7 +605,7 @@ extern PSI_stage_info	srv_stage_buffer_pool_load;
 /** Alternatives for innodb_flush_method */
 enum srv_flush_t {
 	SRV_FSYNC = 0,	/*!< fsync, the default */
-	SRV_O_DSYNC,	/*!< open log files in O_SYNC mode */
+	SRV_O_DSYNC,	/*!< open log files in O_DSYNC mode */
 	SRV_LITTLESYNC,	/*!< do not call os_file_flush()
 				when writing data files, but do flush
 				after writing to log files */
@@ -799,9 +774,8 @@ void srv_master_callback(void*);
 
 
 /**
-Perform shutdown tasks such as background drop,
-and optionally ibuf merge.
-*/
+Complete the shutdown tasks such as background DROP TABLE,
+and optionally change buffer merge (on innodb_fast_shutdown=0). */
 void srv_shutdown(bool ibuf_merge);
 
 
@@ -852,7 +826,7 @@ struct export_var_t{
 	ulint innodb_buffer_pool_pages_made_not_young;
 	ulint innodb_buffer_pool_pages_made_young;
 	ulint innodb_buffer_pool_pages_old;
-	ulint innodb_buffer_pool_read_requests;	/*!< buf_pool->stat.n_page_gets */
+	ulint innodb_buffer_pool_read_requests;	/*!< buf_pool.stat.n_page_gets */
 	ulint innodb_buffer_pool_reads;		/*!< srv_buf_pool_reads */
 	ulint innodb_buffer_pool_wait_free;	/*!< srv_buf_pool_wait_free */
 	ulint innodb_buffer_pool_pages_flushed;	/*!< srv_buf_pool_flushed */
@@ -889,9 +863,9 @@ struct export_var_t{
 	ulint innodb_os_log_fsyncs;		/*!< n_log_flushes */
 	ulint innodb_os_log_pending_writes;	/*!< srv_os_log_pending_writes */
 	ulint innodb_os_log_pending_fsyncs;	/*!< n_pending_log_flushes */
-	ulint innodb_pages_created;		/*!< buf_pool->stat.n_pages_created */
-	ulint innodb_pages_read;		/*!< buf_pool->stat.n_pages_read*/
-	ulint innodb_pages_written;		/*!< buf_pool->stat.n_pages_written */
+	ulint innodb_pages_created;		/*!< buf_pool.stat.n_pages_created */
+	ulint innodb_pages_read;		/*!< buf_pool.stat.n_pages_read*/
+	ulint innodb_pages_written;		/*!< buf_pool.stat.n_pages_written */
 	ulint innodb_row_lock_waits;		/*!< srv_n_lock_wait_count */
 	ulint innodb_row_lock_current_waits;	/*!< srv_n_lock_wait_current_count */
 	int64_t innodb_row_lock_time;		/*!< srv_n_lock_wait_time
@@ -976,14 +950,6 @@ struct export_var_t{
 	ulint innodb_encryption_rotation_estimated_iops;
 	int64_t innodb_encryption_key_requests;
 	int64_t innodb_key_rotation_list_length;
-
-	ulint innodb_scrub_page_reorganizations;
-	ulint innodb_scrub_page_splits;
-	ulint innodb_scrub_page_split_failures_underflow;
-	ulint innodb_scrub_page_split_failures_out_of_filespace;
-	ulint innodb_scrub_page_split_failures_missing_index;
-	ulint innodb_scrub_page_split_failures_unknown;
-	int64_t innodb_scrub_log;
 };
 
 /** Thread slot in the thread table.  */

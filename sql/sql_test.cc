@@ -27,6 +27,8 @@
 #include "my_json_writer.h"
 #include <hash.h>
 #include <thr_alarm.h>
+#include "sql_connect.h"
+#include "thread_cache.h"
 #if defined(HAVE_MALLINFO) && defined(HAVE_MALLOC_H)
 #include <malloc.h>
 #elif defined(HAVE_MALLINFO) && defined(HAVE_SYS_MALLOC_H)
@@ -466,7 +468,8 @@ static void display_table_locks(void)
   void *saved_base;
   DYNAMIC_ARRAY saved_table_locks;
 
-  (void) my_init_dynamic_array(&saved_table_locks,sizeof(TABLE_LOCK_INFO),
+  (void) my_init_dynamic_array(key_memory_locked_thread_list,
+                               &saved_table_locks, sizeof(TABLE_LOCK_INFO),
                                tc_records() + 20, 50, MYF(0));
   mysql_mutex_lock(&THR_LOCK_lock);
   for (list= thr_lock_thread_list; list; list= list_rest(list))
@@ -567,7 +570,7 @@ void mysql_print_status()
   (void) my_getwd(current_dir, sizeof(current_dir),MYF(0));
   printf("Current dir: %s\n", current_dir);
   printf("Running threads: %d  Cached threads: %lu  Stack size: %ld\n",
-         count, cached_thread_count,
+         count, thread_cache.size(),
 	 (long) my_thread_stack_size);
 #ifdef EXTRA_DEBUG
   thr_print_locks();				// Write some debug info
@@ -640,7 +643,8 @@ Memory allocated by threads:             %s\n",
 	 llstr(info.uordblks, llbuff[4]),
 	 llstr(info.fordblks, llbuff[5]),
 	 llstr(info.keepcost, llbuff[6]),
-	 llstr((count + cached_thread_count)* my_thread_stack_size + info.hblkhd + info.arena, llbuff[7]),
+         llstr((count + thread_cache.size()) * my_thread_stack_size +
+               info.hblkhd + info.arena, llbuff[7]),
          llstr(tmp.global_memory_used, llbuff[8]),
          llstr(tmp.local_memory_used, llbuff[9]));
 
@@ -655,9 +659,12 @@ Memory allocated by threads:             %s\n",
 
 void print_keyuse_array_for_trace(THD *thd, DYNAMIC_ARRAY *keyuse_array)
 {
+  DBUG_ASSERT(thd->trace_started());
+
   Json_writer_object wrapper(thd);
   Json_writer_array trace_key_uses(thd, "ref_optimizer_key_uses");
-  for(uint i=0; i < keyuse_array->elements; i++)
+
+  for (uint i=0; i < keyuse_array->elements; i++)
   {
     KEYUSE *keyuse= (KEYUSE*)dynamic_array_ptr(keyuse_array, i);
     Json_writer_object keyuse_elem(thd);

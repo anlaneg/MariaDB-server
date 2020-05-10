@@ -1,7 +1,7 @@
 /*****************************************************************************
 
 Copyright (c) 1996, 2016, Oracle and/or its affiliates. All Rights Reserved.
-Copyright (c) 2017, 2019, MariaDB Corporation.
+Copyright (c) 2017, 2020, MariaDB Corporation.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License as published by the Free Software
@@ -55,26 +55,31 @@ trx_rseg_write_wsrep_checkpoint(
 	DBUG_ASSERT(xid->bqual_length >= 0);
 	DBUG_ASSERT(xid->gtrid_length + xid->bqual_length < XIDDATASIZE);
 
-	mtr->write<4,mtr_t::OPT>(*rseg_header,
-				 TRX_RSEG + TRX_RSEG_WSREP_XID_FORMAT
-				 + rseg_header->frame,
-				 uint32_t(xid->formatID));
+	mtr->write<4,mtr_t::MAYBE_NOP>(*rseg_header,
+				       TRX_RSEG + TRX_RSEG_WSREP_XID_FORMAT
+				       + rseg_header->frame,
+				       uint32_t(xid->formatID));
 
-	mtr->write<4,mtr_t::OPT>(*rseg_header,
-				 TRX_RSEG + TRX_RSEG_WSREP_XID_GTRID_LEN
-				 + rseg_header->frame,
-				 uint32_t(xid->gtrid_length));
+	mtr->write<4,mtr_t::MAYBE_NOP>(*rseg_header,
+				       TRX_RSEG + TRX_RSEG_WSREP_XID_GTRID_LEN
+				       + rseg_header->frame,
+				       uint32_t(xid->gtrid_length));
 
-	mtr->write<4,mtr_t::OPT>(*rseg_header,
-				 TRX_RSEG + TRX_RSEG_WSREP_XID_BQUAL_LEN
-				 + rseg_header->frame,
-				 uint32_t(xid->bqual_length));
+	mtr->write<4,mtr_t::MAYBE_NOP>(*rseg_header,
+				       TRX_RSEG + TRX_RSEG_WSREP_XID_BQUAL_LEN
+				       + rseg_header->frame,
+				       uint32_t(xid->bqual_length));
 
 	const ulint xid_length = static_cast<ulint>(xid->gtrid_length
 						    + xid->bqual_length);
-	mtr->memcpy(rseg_header, TRX_RSEG + TRX_RSEG_WSREP_XID_DATA,
-		    xid->data, xid_length);
-	if (UNIV_LIKELY(xid_length < XIDDATASIZE)) {
+	mtr->memcpy<mtr_t::MAYBE_NOP>(*rseg_header,
+				      TRX_RSEG + TRX_RSEG_WSREP_XID_DATA
+				      + rseg_header->frame,
+				      xid->data, xid_length);
+	if (xid_length < XIDDATASIZE
+	    && memcmp(TRX_RSEG + TRX_RSEG_WSREP_XID_DATA
+		      + rseg_header->frame, field_ref_zero,
+		      XIDDATASIZE - xid_length)) {
 		mtr->memset(rseg_header,
 			    TRX_RSEG + TRX_RSEG_WSREP_XID_DATA + xid_length,
 			    XIDDATASIZE - xid_length, 0);
@@ -336,12 +341,12 @@ trx_rseg_header_create(
 		/* Add the rollback segment info to the free slot in
 		the trx system header */
 
-		mtr->write<4,mtr_t::OPT>(
+		mtr->write<4,mtr_t::MAYBE_NOP>(
 			*sys_header,
 			TRX_SYS + TRX_SYS_RSEGS + TRX_SYS_RSEG_SPACE
 			+ rseg_id * TRX_SYS_RSEG_SLOT_SIZE
 			+ sys_header->frame, space->id);
-		mtr->write<4,mtr_t::OPT>(
+		mtr->write<4,mtr_t::MAYBE_NOP>(
 			*sys_header,
 			TRX_SYS + TRX_SYS_RSEGS + TRX_SYS_RSEG_PAGE_NO
 			+ rseg_id * TRX_SYS_RSEG_SLOT_SIZE
@@ -506,9 +511,11 @@ trx_rseg_mem_restore(trx_rseg_t* rseg, trx_id_t& max_trx_id, mtr_t* mtr)
 				    + rseg_hdr->frame)) {
 		trx_sys.rseg_history_len += len;
 
-		fil_addr_t	node_addr = trx_purge_get_log_from_hist(
-			flst_get_last(TRX_RSEG + TRX_RSEG_HISTORY
-				      + rseg_hdr->frame));
+		fil_addr_t node_addr = flst_get_last(TRX_RSEG
+						     + TRX_RSEG_HISTORY
+						     + rseg_hdr->frame);
+		node_addr.boffset = static_cast<uint16_t>(
+			node_addr.boffset - TRX_UNDO_HISTORY_NODE);
 
 		rseg->last_page_no = node_addr.page;
 		rseg->last_offset = node_addr.boffset;
@@ -733,14 +740,14 @@ void trx_rseg_update_binlog_offset(buf_block_t *rseg_header, const trx_t *trx,
 		return;
 	}
 
-	mtr->write<8,mtr_t::OPT>(*rseg_header,
-				 TRX_RSEG + TRX_RSEG_BINLOG_OFFSET
-				 + rseg_header->frame,
-				 trx->mysql_log_offset);
+	mtr->write<8,mtr_t::MAYBE_NOP>(*rseg_header,
+				       TRX_RSEG + TRX_RSEG_BINLOG_OFFSET
+				       + rseg_header->frame,
+				       trx->mysql_log_offset);
 
-	if (memcmp(trx->mysql_log_file_name, TRX_RSEG + TRX_RSEG_BINLOG_NAME
-		   + rseg_header->frame, len)) {
-		mtr->memcpy(rseg_header, TRX_RSEG + TRX_RSEG_BINLOG_NAME,
-			    trx->mysql_log_file_name, len);
+	void* name = TRX_RSEG + TRX_RSEG_BINLOG_NAME + rseg_header->frame;
+
+	if (memcmp(trx->mysql_log_file_name, name, len)) {
+		mtr->memcpy(*rseg_header, name, trx->mysql_log_file_name, len);
 	}
 }

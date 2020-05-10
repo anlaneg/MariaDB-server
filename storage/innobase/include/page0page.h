@@ -178,7 +178,7 @@ the first record in the list of records. */
 #define	PAGE_DIR		FIL_PAGE_DATA_END
 
 /* We define a slot in the page directory as two bytes */
-#define	PAGE_DIR_SLOT_SIZE	2
+constexpr uint16_t PAGE_DIR_SLOT_SIZE= 2;
 
 /* The offset of the physically lower end of the directory, counted from
 page end, when the page is empty */
@@ -406,6 +406,38 @@ inline trx_id_t page_get_max_trx_id(const page_t *page)
   return mach_read_from_8(p);
 }
 
+/**
+Set the number of owned records.
+@tparam compressed    whether to update any ROW_FORMAT=COMPRESSED page as well
+@param[in,out]  block   index page
+@param[in,out]  rec     record in block.frame
+@param[in]      n_owned number of records skipped in the sparse page directory
+@param[in]      comp    whether ROW_FORMAT is one of COMPACT,DYNAMIC,COMPRESSED
+@param[in,out]  mtr     mini-transaction */
+template<bool compressed>
+inline void page_rec_set_n_owned(buf_block_t *block, rec_t *rec, ulint n_owned,
+                                 bool comp, mtr_t *mtr)
+{
+  ut_ad(block->frame == page_align(rec));
+  ut_ad(comp == (page_is_comp(block->frame) != 0));
+
+  if (page_zip_des_t *page_zip= compressed
+      ? buf_block_get_page_zip(block) : nullptr)
+  {
+    ut_ad(comp);
+    rec_set_bit_field_1(rec, n_owned, REC_NEW_N_OWNED,
+                        REC_N_OWNED_MASK, REC_N_OWNED_SHIFT);
+    if (rec_get_status(rec) != REC_STATUS_SUPREMUM)
+      page_zip_rec_set_owned(block, rec, n_owned, mtr);
+  }
+  else
+  {
+    rec-= comp ? REC_NEW_N_OWNED : REC_OLD_N_OWNED;
+    mtr->write<1,mtr_t::MAYBE_NOP>(*block, rec, (*rec & ~REC_N_OWNED_MASK) |
+                                   (n_owned << REC_N_OWNED_SHIFT));
+  }
+}
+
 /*************************************************************//**
 Sets the max trx id field value. */
 void
@@ -474,17 +506,6 @@ inline uint16_t page_header_get_field(const page_t *page, ulint field)
 
 #ifndef UNIV_INNOCHECKSUM
 /*************************************************************//**
-Sets the given header field. */
-UNIV_INLINE
-void
-page_header_set_field(
-/*==================*/
-	page_t*		page,	/*!< in/out: page */
-	page_zip_des_t*	page_zip,/*!< in/out: compressed page whose
-				uncompressed part will be updated, or NULL */
-	ulint		field,	/*!< in: PAGE_N_DIR_SLOTS, ... */
-	ulint		val);	/*!< in: value */
-/*************************************************************//**
 Returns the offset stored in the given header field.
 @return offset from the start of the page, or 0 */
 UNIV_INLINE
@@ -500,17 +521,6 @@ Returns the pointer stored in the given header field, or NULL. */
 #define page_header_get_ptr(page, field)			\
 	(page_header_get_offs(page, field)			\
 	 ? page + page_header_get_offs(page, field) : NULL)
-/*************************************************************//**
-Sets the pointer stored in the given header field. */
-UNIV_INLINE
-void
-page_header_set_ptr(
-/*================*/
-	page_t*		page,	/*!< in/out: page */
-	page_zip_des_t*	page_zip,/*!< in/out: compressed page whose
-				uncompressed part will be updated, or NULL */
-	ulint		field,	/*!< in/out: PAGE_FREE, ... */
-	const byte*	ptr);	/*!< in: pointer or NULL*/
 
 /**
 Reset PAGE_LAST_INSERT.
@@ -600,19 +610,6 @@ page_dir_get_n_heap(
 /*================*/
 	const page_t*	page);	/*!< in: index page */
 /*************************************************************//**
-Sets the number of records in the heap. */
-UNIV_INLINE
-void
-page_dir_set_n_heap(
-/*================*/
-	page_t*		page,	/*!< in/out: index page */
-	page_zip_des_t*	page_zip,/*!< in/out: compressed page whose
-				uncompressed part will be updated, or NULL.
-				Note that the size of the dense page directory
-				in the compressed page trailer is
-				n_heap * PAGE_ZIP_DIR_SLOT_SIZE. */
-	ulint		n_heap);/*!< in: number of records */
-/*************************************************************//**
 Gets the number of dir slots in directory.
 @return number of slots */
 UNIV_INLINE
@@ -620,17 +617,6 @@ uint16_t
 page_dir_get_n_slots(
 /*=================*/
 	const page_t*	page);	/*!< in: index page */
-/*************************************************************//**
-Sets the number of dir slots in directory. */
-UNIV_INLINE
-void
-page_dir_set_n_slots(
-/*=================*/
-	page_t*		page,	/*!< in/out: page */
-	page_zip_des_t*	page_zip,/*!< in/out: compressed page whose
-				uncompressed part will be updated, or NULL */
-	ulint		n_slots);/*!< in: number of slots */
-
 /** Gets the pointer to a directory slot.
 @param n  sparse directory slot number
 @return pointer to the sparse directory slot */
@@ -657,20 +643,12 @@ page_rec_check(
 @return pointer to record */
 inline rec_t *page_dir_slot_get_rec(page_dir_slot_t *slot)
 {
-  return page_align(slot) + mach_read_from_2(slot);
+  return page_align(slot) + mach_read_from_2(my_assume_aligned<2>(slot));
 }
 inline const rec_t *page_dir_slot_get_rec(const page_dir_slot_t *slot)
 {
   return page_dir_slot_get_rec(const_cast<rec_t*>(slot));
 }
-/***************************************************************//**
-This is used to set the record offset in a directory slot. */
-UNIV_INLINE
-void
-page_dir_slot_set_rec(
-/*==================*/
-	page_dir_slot_t*slot,	/*!< in: directory slot */
-	const rec_t*	rec);	/*!< in: record on the page */
 /***************************************************************//**
 Gets the number of records owned by a directory slot.
 @return number of records */
@@ -679,15 +657,6 @@ ulint
 page_dir_slot_get_n_owned(
 /*======================*/
 	const page_dir_slot_t*	slot);	/*!< in: page directory slot */
-/***************************************************************//**
-This is used to set the owned records field of a directory slot. */
-UNIV_INLINE
-void
-page_dir_slot_set_n_owned(
-/*======================*/
-	page_dir_slot_t*slot,	/*!< in/out: directory slot */
-	page_zip_des_t*	page_zip,/*!< in/out: compressed page, or NULL */
-	ulint		n);	/*!< in: number of records owned by the slot */
 /************************************************************//**
 Calculates the space reserved for directory slots of a given
 number of records. The exact value is a fraction number
@@ -793,16 +762,6 @@ page_rec_get_next_non_del_marked(
 /*=============================*/
 	const rec_t*	rec);	/*!< in: pointer to record */
 /************************************************************//**
-Sets the pointer to the next record on the page. */
-UNIV_INLINE
-void
-page_rec_set_next(
-/*==============*/
-	rec_t*		rec,	/*!< in: pointer to record,
-				must not be page supremum */
-	const rec_t*	next);	/*!< in: pointer to next record,
-				must not be page infimum */
-/************************************************************//**
 Gets the pointer to the previous record.
 @return pointer to previous record */
 UNIV_INLINE
@@ -881,15 +840,6 @@ page_rec_is_second_last(
 	const page_t*	page)	/*!< in: page */
 	MY_ATTRIBUTE((warn_unused_result));
 
-/***************************************************************//**
-Looks for the record which owns the given record.
-@return the owner record */
-UNIV_INLINE
-rec_t*
-page_rec_find_owner_rec(
-/*====================*/
-	rec_t*	rec);	/*!< in: the physical record */
-
 /************************************************************//**
 Returns the maximum combined size of records which can be inserted on top
 of record heap.
@@ -919,15 +869,6 @@ page_get_free_space_of_empty(
 /*=========================*/
 	ulint	comp)	/*!< in: nonzero=compact page format */
 		MY_ATTRIBUTE((const));
-/**********************************************************//**
-Returns the base extra size of a physical record.  This is the
-size of the fixed header, independent of the record size.
-@return REC_N_NEW_EXTRA_BYTES or REC_N_OLD_EXTRA_BYTES */
-UNIV_INLINE
-ulint
-page_rec_get_base_extra_size(
-/*=========================*/
-	const rec_t*	rec);	/*!< in: physical record */
 /************************************************************//**
 Returns the sum of the sizes of the records in the record list
 excluding the infimum and supremum records.
@@ -937,34 +878,12 @@ uint16_t
 page_get_data_size(
 /*===============*/
 	const page_t*	page);	/*!< in: index page */
-/************************************************************//**
-Allocates a block of memory from the head of the free list
-of an index page. */
-UNIV_INLINE
-void
-page_mem_alloc_free(
-/*================*/
-	page_t*		page,	/*!< in/out: index page */
-	page_zip_des_t*	page_zip,/*!< in/out: compressed page with enough
-				space available for inserting the record,
-				or NULL */
-	rec_t*		next_rec,/*!< in: pointer to the new head of the
-				free record list */
-	ulint		need);	/*!< in: number of bytes allocated */
-
 /** Read the PAGE_DIRECTION field from a byte.
 @param[in]	ptr	pointer to PAGE_DIRECTION_B
 @return	the value of the PAGE_DIRECTION field */
 inline
 byte
 page_ptr_get_direction(const byte* ptr);
-
-/** Set the PAGE_DIRECTION field.
-@param[in]	ptr	pointer to PAGE_DIRECTION_B
-@param[in]	dir	the value of the PAGE_DIRECTION field */
-inline
-void
-page_ptr_set_direction(byte* ptr, byte dir);
 
 /** Read the PAGE_DIRECTION field.
 @param[in]	page	index page
@@ -983,21 +902,14 @@ inline
 uint16_t
 page_get_instant(const page_t* page);
 
+/** Create an uncompressed index page.
+@param[in,out]	block	buffer block
+@param[in,out]	mtr	mini-transaction
+@param[in]	comp	set unless ROW_FORMAT=REDUNDANT */
+void page_create(buf_block_t *block, mtr_t *mtr, bool comp);
 /**********************************************************//**
-Create an uncompressed B-tree index page.
-@return pointer to the page */
-page_t*
-page_create(
-/*========*/
-	buf_block_t*	block,		/*!< in: a buffer block where the
-					page is created */
-	mtr_t*		mtr,		/*!< in: mini-transaction handle */
-	ulint		comp,		/*!< in: nonzero=compact page format */
-	bool		is_rtree);	/*!< in: if creating R-tree page */
-/**********************************************************//**
-Create a compressed B-tree index page.
-@return pointer to the page */
-page_t*
+Create a compressed B-tree index page. */
+void
 page_create_zip(
 /*============*/
 	buf_block_t*		block,		/*!< in/out: a buffer frame
@@ -1142,30 +1054,10 @@ page_move_rec_list_start(
 	dict_index_t*	index,		/*!< in: record descriptor */
 	mtr_t*		mtr)		/*!< in: mtr */
 	MY_ATTRIBUTE((nonnull(1, 2, 4, 5)));
-/**********************************************************//**
-Parses a log record of a record list end or start deletion.
-@return end of log record or NULL */
-const byte*
-page_parse_delete_rec_list(
-/*=======================*/
-	mlog_id_t	type,	/*!< in: MLOG_LIST_END_DELETE,
-				MLOG_LIST_START_DELETE,
-				MLOG_COMP_LIST_END_DELETE or
-				MLOG_COMP_LIST_START_DELETE */
-	const byte*	ptr,	/*!< in: buffer */
-	const byte*	end_ptr,/*!< in: buffer end */
-	buf_block_t*	block,	/*!< in/out: buffer block or NULL */
-	dict_index_t*	index,	/*!< in: record descriptor */
-	mtr_t*		mtr);	/*!< in: mtr or NULL */
-/** Parses a redo log record of creating a page.
-@param[in,out]	block	buffer block, or NULL
-@param[in]	comp	nonzero=compact page format
-@param[in]	is_rtree whether it is rtree page */
-void
-page_parse_create(
-	buf_block_t*	block,
-	ulint		comp,
-	bool		is_rtree);
+/** Create an index page.
+@param[in,out]	block	buffer block
+@param[in]	comp	nonzero=compact page format */
+void page_create_low(const buf_block_t* block, bool comp);
 
 /************************************************************//**
 Prints record contents including the data relevant only in
@@ -1174,7 +1066,7 @@ void
 page_rec_print(
 /*===========*/
 	const rec_t*	rec,	/*!< in: physical record */
-	const offset_t*	offsets);/*!< in: record descriptor */
+	const rec_offs*	offsets);/*!< in: record descriptor */
 # ifdef UNIV_BTR_PRINT
 /***************************************************************//**
 This is used to print the contents of the directory for
@@ -1221,7 +1113,7 @@ ibool
 page_rec_validate(
 /*==============*/
 	const rec_t*	rec,	/*!< in: physical record */
-	const offset_t*	offsets);/*!< in: array returned by rec_get_offsets() */
+	const rec_offs*	offsets);/*!< in: array returned by rec_get_offsets() */
 #ifdef UNIV_DEBUG
 /***************************************************************//**
 Checks that the first directory slot points to the infimum record and

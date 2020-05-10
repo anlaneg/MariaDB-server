@@ -24,7 +24,7 @@
 #include "sql_priv.h"
 #include "sql_plugin.h"
 #include "ha_heap.h"
-#include "sql_base.h"                    // enum_tdc_remove_table_type
+#include "sql_base.h"
 
 static handler *heap_create_handler(handlerton *hton,
                                     TABLE_SHARE *table, 
@@ -579,8 +579,8 @@ int ha_heap::rename_table(const char * from, const char * to)
 }
 
 
-ha_rows ha_heap::records_in_range(uint inx, key_range *min_key,
-                                  key_range *max_key)
+ha_rows ha_heap::records_in_range(uint inx, const key_range *min_key,
+                                  const key_range *max_key, page_range *pages)
 {
   KEY *key=table->key_info+inx;
   if (key->algorithm == HA_KEY_ALG_BTREE)
@@ -619,7 +619,8 @@ heap_prepare_hp_create_info(TABLE *table_arg, bool internal_table,
   for (key= parts= 0; key < keys; key++)
     parts+= table_arg->key_info[key].user_defined_key_parts;
 
-  if (!(keydef= (HP_KEYDEF*) my_malloc(keys * sizeof(HP_KEYDEF) +
+  if (!(keydef= (HP_KEYDEF*) my_malloc(hp_key_memory_HP_KEYDEF,
+                                       keys * sizeof(HP_KEYDEF) +
 				       parts * sizeof(HA_KEYSEG),
 				       MYF(MY_WME | MY_THREAD_SPECIFIC))))
     return my_errno;

@@ -1,7 +1,7 @@
 /*****************************************************************************
 
 Copyright (c) 1996, 2017, Oracle and/or its affiliates. All Rights Reserved.
-Copyright (c) 2016, 2019, MariaDB Corporation.
+Copyright (c) 2016, 2020, MariaDB Corporation.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License as published by the Free Software
@@ -162,7 +162,7 @@ dict_hdr_create(
 	/*--------------------------*/
 	root_page_no = btr_create(DICT_CLUSTERED | DICT_UNIQUE,
 				  fil_system.sys_space, DICT_TABLES_ID,
-				  dict_ind_redundant, mtr);
+				  nullptr, mtr);
 	if (root_page_no == FIL_NULL) {
 
 		return(FALSE);
@@ -172,7 +172,7 @@ dict_hdr_create(
 	/*--------------------------*/
 	root_page_no = btr_create(DICT_UNIQUE,
 				  fil_system.sys_space, DICT_TABLE_IDS_ID,
-				  dict_ind_redundant, mtr);
+				  nullptr, mtr);
 	if (root_page_no == FIL_NULL) {
 
 		return(FALSE);
@@ -183,7 +183,7 @@ dict_hdr_create(
 	/*--------------------------*/
 	root_page_no = btr_create(DICT_CLUSTERED | DICT_UNIQUE,
 				  fil_system.sys_space, DICT_COLUMNS_ID,
-				  dict_ind_redundant, mtr);
+				  nullptr, mtr);
 	if (root_page_no == FIL_NULL) {
 
 		return(FALSE);
@@ -194,7 +194,7 @@ dict_hdr_create(
 	/*--------------------------*/
 	root_page_no = btr_create(DICT_CLUSTERED | DICT_UNIQUE,
 				  fil_system.sys_space, DICT_INDEXES_ID,
-				  dict_ind_redundant, mtr);
+				  nullptr, mtr);
 	if (root_page_no == FIL_NULL) {
 
 		return(FALSE);
@@ -205,7 +205,7 @@ dict_hdr_create(
 	/*--------------------------*/
 	root_page_no = btr_create(DICT_CLUSTERED | DICT_UNIQUE,
 				  fil_system.sys_space, DICT_FIELDS_ID,
-				  dict_ind_redundant, mtr);
+				  nullptr, mtr);
 	if (root_page_no == FIL_NULL) {
 
 		return(FALSE);
@@ -312,8 +312,8 @@ dict_boot(void)
 		index, mach_read_from_4(dict_hdr + DICT_HDR_TABLES));
 	ut_a(error == DB_SUCCESS);
 	ut_ad(!table->is_instant());
-	table->indexes.start->n_core_null_bytes = UT_BITS_IN_BYTES(
-		unsigned(table->indexes.start->n_nullable));
+	table->indexes.start->n_core_null_bytes = static_cast<uint8_t>(
+		UT_BITS_IN_BYTES(unsigned(table->indexes.start->n_nullable)));
 
 	/*-------------------------*/
 	index = dict_mem_index_create(table, "ID_IND", DICT_UNIQUE, 1);
@@ -354,8 +354,8 @@ dict_boot(void)
 		index, mach_read_from_4(dict_hdr + DICT_HDR_COLUMNS));
 	ut_a(error == DB_SUCCESS);
 	ut_ad(!table->is_instant());
-	table->indexes.start->n_core_null_bytes = UT_BITS_IN_BYTES(
-		unsigned(table->indexes.start->n_nullable));
+	table->indexes.start->n_core_null_bytes = static_cast<uint8_t>(
+		UT_BITS_IN_BYTES(unsigned(table->indexes.start->n_nullable)));
 
 	/*-------------------------*/
 	table = dict_mem_table_create("SYS_INDEXES", fil_system.sys_space,
@@ -397,8 +397,8 @@ dict_boot(void)
 		index, mach_read_from_4(dict_hdr + DICT_HDR_INDEXES));
 	ut_a(error == DB_SUCCESS);
 	ut_ad(!table->is_instant());
-	table->indexes.start->n_core_null_bytes = UT_BITS_IN_BYTES(
-		unsigned(table->indexes.start->n_nullable));
+	table->indexes.start->n_core_null_bytes = static_cast<uint8_t>(
+		UT_BITS_IN_BYTES(unsigned(table->indexes.start->n_nullable)));
 
 	/*-------------------------*/
 	table = dict_mem_table_create("SYS_FIELDS", fil_system.sys_space,
@@ -426,8 +426,8 @@ dict_boot(void)
 		index, mach_read_from_4(dict_hdr + DICT_HDR_FIELDS));
 	ut_a(error == DB_SUCCESS);
 	ut_ad(!table->is_instant());
-	table->indexes.start->n_core_null_bytes = UT_BITS_IN_BYTES(
-		unsigned(table->indexes.start->n_nullable));
+	table->indexes.start->n_core_null_bytes = static_cast<uint8_t>(
+		UT_BITS_IN_BYTES(unsigned(table->indexes.start->n_nullable)));
 
 	mtr_commit(&mtr);
 

@@ -581,7 +581,7 @@ fts_zip_read_word(
 		/* Finished decompressing block. */
 		if (zip->zp->avail_in == 0) {
 
-			/* Free the block thats been decompressed. */
+			/* Free the block that's been decompressed. */
 			if (zip->pos > 0) {
 				ulint	prev = zip->pos - 1;
 
@@ -2662,7 +2662,7 @@ fts_optimize_request_sync_table(
 
 	add_msg(msg, true);
 
-	table->fts->in_queue = table->fts->sync_message = true;
+	table->fts->sync_message = true;
 
 	mutex_exit(&fts_optimize_wq->mutex);
 }
@@ -2936,6 +2936,9 @@ static void fts_optimize_callback(void *)
 	ib_vector_free(fts_slots);
 	fts_slots = NULL;
 
+	ib_wqueue_free(fts_optimize_wq);
+	fts_optimize_wq = NULL;
+
 	innobase_destroy_background_thd(fts_opt_thd);
 	ib::info() << "FTS optimize thread exiting.";
 
@@ -3023,8 +3026,6 @@ fts_optimize_shutdown()
 	os_event_wait(fts_opt_shutdown_event);
 
 	os_event_destroy(fts_opt_shutdown_event);
-	ib_wqueue_free(fts_optimize_wq);
-	fts_optimize_wq = NULL;
 	fts_opt_thd = NULL;
 }
 

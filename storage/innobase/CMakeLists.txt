@@ -1,5 +1,5 @@
 # Copyright (c) 2006, 2017, Oracle and/or its affiliates. All rights reserved.
-# Copyright (c) 2014, 2019, MariaDB Corporation.
+# Copyright (c) 2014, 2020, MariaDB Corporation.
 #
 # This program is free software; you can redistribute it and/or modify
 # it under the terms of the GNU General Public License as published by
@@ -26,7 +26,6 @@ SET(INNOBASE_SOURCES
 	btr/btr0bulk.cc
 	btr/btr0cur.cc
 	btr/btr0pcur.cc
-	btr/btr0scrub.cc
 	btr/btr0sea.cc
 	btr/btr0defragment.cc
 	buf/buf0buddy.cc
@@ -84,9 +83,8 @@ SET(INNOBASE_SOURCES
 	log/log0log.cc
 	log/log0recv.cc
 	log/log0crypt.cc
-	mach/mach0data.cc
+	log/log0sync.cc
 	mem/mem0mem.cc
-	mtr/mtr0log.cc
 	mtr/mtr0mtr.cc
 	os/os0file.cc
 	os/os0proc.cc
@@ -155,7 +153,8 @@ MYSQL_ADD_PLUGIN(innobase ${INNOBASE_SOURCES} STORAGE_ENGINE
 	${CRC32_LIBRARY}
 	${NUMA_LIBRARY}
 	${LIBSYSTEMD}
-	${LINKER_SCRIPT})
+	${LINKER_SCRIPT}
+	${LIBPMEM})
 
 IF(NOT TARGET innobase)
   RETURN()

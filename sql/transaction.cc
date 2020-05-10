@@ -25,6 +25,8 @@
 #include "debug_sync.h"         // DEBUG_SYNC
 #include "sql_acl.h"
 #include "semisync_master.h"
+#include <pfs_transaction_provider.h>
+#include <mysql/psi/mysql_transaction.h>
 #ifdef WITH_WSREP
 #include "wsrep_trans_observer.h"
 #endif /* WITH_WSREP */
@@ -101,7 +103,8 @@ bool trans_begin(THD *thd, uint flags)
   if (trans_check(thd))
     DBUG_RETURN(TRUE);
 
-  thd->locked_tables_list.unlock_locked_tables(thd);
+  if (thd->locked_tables_list.unlock_locked_tables(thd))
+    DBUG_RETURN(true);
 
   DBUG_ASSERT(!thd->locked_tables_mode);
 
@@ -161,7 +164,7 @@ bool trans_begin(THD *thd, uint flags)
       compatibility.
     */
     const bool user_is_super=
-      MY_TEST(thd->security_ctx->master_access & SUPER_ACL);
+      MY_TEST(thd->security_ctx->master_access & PRIV_IGNORE_READ_ONLY);
     if (opt_readonly && !user_is_super)
     {
       my_error(ER_OPTION_PREVENTS_STATEMENT, MYF(0), "--read-only");
@@ -209,6 +212,23 @@ bool trans_begin(THD *thd, uint flags)
 #endif //EMBEDDED_LIBRARY
     res= ha_start_consistent_snapshot(thd);
   }
+  /*
+    Register transaction start in performance schema if not done already.
+    We handle explicitly started transactions here, implicitly started
+    transactions (and single-statement transactions in autocommit=1 mode)
+    are handled in trans_register_ha().
+    We can't handle explicit transactions in the same way as implicit
+    because we want to correctly attribute statements which follow
+    BEGIN but do not touch any transactional tables.
+  */
+  if (thd->m_transaction_psi == NULL)
+  {
+    thd->m_transaction_psi= MYSQL_START_TRANSACTION(&thd->m_transaction_state,
+                                                 NULL, 0, thd->tx_isolation,
+                                                 thd->tx_read_only, false);
+    DEBUG_SYNC(thd, "after_set_transaction_psi_before_set_transaction_gtid");
+    //gtid_set_performance_schema_values(thd);
+  }
 
   DBUG_RETURN(MY_TEST(res));
 }
@@ -245,22 +265,18 @@ bool trans_commit(THD *thd)
       if res is non-zero, then ha_commit_trans has rolled back the
       transaction, so the hooks for rollback will be called.
     */
+#ifdef HAVE_REPLICATION
   if (res)
-  {
-#ifdef HAVE_REPLICATION
     repl_semisync_master.wait_after_rollback(thd, FALSE);
-#endif
-  }
   else
-  {
-#ifdef HAVE_REPLICATION
     repl_semisync_master.wait_after_commit(thd, FALSE);
 #endif
-  }
   thd->variables.option_bits&= ~(OPTION_BEGIN | OPTION_KEEP_LOG);
   thd->transaction.all.reset();
   thd->lex->start_transaction_opt= 0;
 
+  /* The transaction should be marked as complete in P_S. */
+  DBUG_ASSERT(thd->m_transaction_psi == NULL);
   trans_track_end_trx(thd);
 
   DBUG_RETURN(MY_TEST(res));
@@ -287,8 +303,10 @@ bool trans_commit_implicit(THD *thd)
     DBUG_RETURN(TRUE);
 
   if (thd->variables.option_bits & OPTION_GTID_BEGIN)
+  {
     DBUG_PRINT("error", ("OPTION_GTID_BEGIN is set. "
                          "Master and slave will have different GTID values"));
+  }
 
   if (thd->in_multi_stmt_transaction_mode() ||
       (thd->variables.option_bits & OPTION_TABLE_LOCK))
@@ -304,6 +322,9 @@ bool trans_commit_implicit(THD *thd)
 
   thd->variables.option_bits&= ~(OPTION_BEGIN | OPTION_KEEP_LOG);
   thd->transaction.all.reset();
+
+  /* The transaction should be marked as complete in P_S. */
+  DBUG_ASSERT(thd->m_transaction_psi == NULL);
 
   /*
     Upon implicit commit, reset the current transaction
@@ -343,11 +364,14 @@ bool trans_rollback(THD *thd)
 #ifdef HAVE_REPLICATION
   repl_semisync_master.wait_after_rollback(thd, FALSE);
 #endif
-  thd->variables.option_bits&= ~(OPTION_BEGIN | OPTION_KEEP_LOG);
   /* Reset the binlog transaction marker */
-  thd->variables.option_bits&= ~OPTION_GTID_BEGIN;
+  thd->variables.option_bits&= ~(OPTION_BEGIN | OPTION_KEEP_LOG |
+                                 OPTION_GTID_BEGIN);
   thd->transaction.all.reset();
   thd->lex->start_transaction_opt= 0;
+
+  /* The transaction should be marked as complete in P_S. */
+  DBUG_ASSERT(thd->m_transaction_psi == NULL);
 
   trans_track_end_trx(thd);
 
@@ -395,7 +419,9 @@ bool trans_rollback_implicit(THD *thd)
   thd->transaction.all.reset();
 
   /* Rollback should clear transaction_rollback_request flag. */
-  DBUG_ASSERT(! thd->transaction_rollback_request);
+  DBUG_ASSERT(!thd->transaction_rollback_request);
+  /* The transaction should be marked as complete in P_S. */
+  DBUG_ASSERT(thd->m_transaction_psi == NULL);
 
   trans_track_end_trx(thd);
 
@@ -463,6 +489,10 @@ bool trans_commit_stmt(THD *thd)
 #endif
   }
 
+  /* In autocommit=1 mode the transaction should be marked as complete in P_S */
+  DBUG_ASSERT(thd->in_active_multi_stmt_transaction() ||
+              thd->m_transaction_psi == NULL);
+
   thd->transaction.stmt.reset();
 
   DBUG_RETURN(MY_TEST(res));
@@ -501,6 +531,10 @@ bool trans_rollback_stmt(THD *thd)
 #ifdef HAVE_REPLICATION
   repl_semisync_master.wait_after_rollback(thd, FALSE);
 #endif
+
+  /* In autocommit=1 mode the transaction should be marked as complete in P_S */
+  DBUG_ASSERT(thd->in_active_multi_stmt_transaction() ||
+              thd->m_transaction_psi == NULL);
 
   thd->transaction.stmt.reset();
 

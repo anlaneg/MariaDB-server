@@ -2,7 +2,7 @@
 
 Copyright (c) 1995, 2017, Oracle and/or its affiliates. All rights reserved.
 Copyright (c) 2009, Google Inc.
-Copyright (c) 2017, 2019, MariaDB Corporation.
+Copyright (c) 2017, 2020, MariaDB Corporation.
 
 Portions of this file contain modifications contributed and copyrighted by
 Google, Inc. Those modifications are gratefully acknowledged and are described
@@ -34,28 +34,40 @@ Created 12/9/1995 Heikki Tuuri
 #ifndef log0log_h
 #define log0log_h
 
-#include "dyn0buf.h"
 #include "log0types.h"
-#include "os0event.h"
+#include "ut0mutex.h"
 #include "os0file.h"
 #include "span.h"
 #include <atomic>
+#include <vector>
+#include <string>
 
 using st_::span;
 
-/** Maximum number of srv_n_log_files, or innodb_log_files_in_group */
-#define SRV_N_LOG_FILES_MAX 100
-
-/** Magic value to use instead of log checksums when they are disabled */
-#define LOG_NO_CHECKSUM_MAGIC 0xDEADBEEFUL
-
-/* Margin for the free space in the smallest log group, before a new query
+/* Margin for the free space in the smallest log, before a new query
 step which modifies the database, is started */
 
 #define LOG_CHECKPOINT_FREE_PER_THREAD	(4U << srv_page_size_shift)
 #define LOG_CHECKPOINT_EXTRA_FREE	(8U << srv_page_size_shift)
 
-typedef ulint (*log_checksum_func_t)(const byte* log_block);
+static const char LOG_FILE_NAME_PREFIX[] = "ib_logfile";
+static const char LOG_FILE_NAME[] = "ib_logfile0";
+
+/** Composes full path for a redo log file
+@param[in]	filename	name of the redo log file
+@return path with log file name*/
+std::string get_log_file_path(const char *filename= LOG_FILE_NAME);
+
+/** Returns paths for all existing log files */
+std::vector<std::string> get_existing_log_files_paths();
+
+/** Delete log file.
+@param[in]	suffix	suffix of the file name */
+static inline void delete_log_file(const char* suffix)
+{
+  auto path = get_log_file_path(LOG_FILE_NAME_PREFIX).append(suffix);
+  os_file_delete_if_exists(innodb_log_file_key, path.c_str(), nullptr);
+}
 
 /** Append a string to the log.
 @param[in]	str		string
@@ -83,7 +95,7 @@ log_free_check(void);
 void log_buffer_extend(ulong len);
 
 /** Check margin not to overwrite transaction log from the last checkpoint.
-If would estimate the log write to exceed the log_group_capacity,
+If would estimate the log write to exceed the log_capacity,
 waits for the checkpoint is done enough.
 @param[in]	len	length of the data to be written */
 
@@ -111,35 +123,12 @@ Closes the log.
 lsn_t
 log_close(void);
 /*===========*/
-/************************************************************//**
-Gets the current lsn.
-@return current lsn */
-UNIV_INLINE
-lsn_t
-log_get_lsn(void);
-/*=============*/
-/************************************************************//**
-Gets the current lsn.
-@return	current lsn */
-UNIV_INLINE
-lsn_t
-log_get_lsn_nowait(void);
-/*=============*/
-/************************************************************//**
-Gets the last lsn that is fully flushed to disk.
-@return	last flushed lsn */
-UNIV_INLINE
-ib_uint64_t
-log_get_flush_lsn(void);
-/*=============*/
-/****************************************************************
-Gets the log group capacity. It is OK to read the value without
-holding log_sys.mutex because it is constant.
-@return log group capacity */
-UNIV_INLINE
-lsn_t
-log_get_capacity(void);
-/*==================*/
+/** Read the current LSN. */
+#define log_get_lsn() log_sys.get_lsn()
+
+/** Read the durable LSN */
+#define log_get_flush_lsn() log_sys.get_flushed_lsn()
+
 /****************************************************************
 Get log_sys::max_modified_age_async. It is OK to read the value without
 holding log_sys::mutex because it is constant.
@@ -153,7 +142,7 @@ log_get_max_modified_age_async(void);
 and lsn - buf_get_oldest_modification().
 @param[in]	file_size	requested innodb_log_file_size
 @retval true on success
-@retval false if the smallest log group is too small to
+@retval false if the smallest log is too small to
 accommodate the number of OS threads in the database server */
 bool
 log_set_capacity(ulonglong file_size)
@@ -175,19 +164,11 @@ also to be flushed to disk. */
 void
 log_buffer_flush_to_disk(
 	bool sync = true);
-/****************************************************************//**
-This functions writes the log buffer to the log file and if 'flush'
-is set it forces a flush of the log file as well. This is meant to be
-called from background master thread only as it does not wait for
-the write (+ possible flush) to finish. */
-void
-log_buffer_sync_in_background(
-/*==========================*/
-	bool	flush);	/*<! in: flush the logs to disk */
+
 /** Make a checkpoint. Note that this function does not flush dirty
 blocks from the buffer pool: it only checks what is lsn of the oldest
 modification in the pool, and writes information about the lsn in
-log files. Use log_make_checkpoint() to flush also the pool.
+log file. Use log_make_checkpoint() to flush also the pool.
 @return true if success, false if a checkpoint write was already running */
 bool log_checkpoint();
 
@@ -198,23 +179,14 @@ void log_make_checkpoint();
 Makes a checkpoint at the latest lsn and writes it to first page of each
 data file in the database, so that we know that the file spaces contain
 all modifications up to that lsn. This can only be called at database
-shutdown. This function also writes all log in log files to the log archive. */
+shutdown. This function also writes all log in log file to the log archive. */
 void
 logs_empty_and_mark_files_at_shutdown(void);
 /*=======================================*/
-/** Read a log group header page to log_sys.checkpoint_buf.
-@param[in]	header	0 or LOG_CHECKPOINT_1 or LOG_CHECKPOINT2 */
-void log_header_read(ulint header);
 /** Write checkpoint info to the log header and invoke log_mutex_exit().
-@param[in]	end_lsn	start LSN of the MLOG_CHECKPOINT mini-transaction */
+@param[in]	end_lsn	start LSN of the FILE_CHECKPOINT mini-transaction */
 void log_write_checkpoint_info(lsn_t end_lsn);
 
-/** Set extra data to be written to the redo log during checkpoint.
-@param[in]	buf	data to be appended on checkpoint, or NULL
-@return pointer to previous data to be appended on checkpoint */
-mtr_buf_t*
-log_append_on_checkpoint(
-	mtr_buf_t*	buf);
 /**
 Checks that there is enough free space in the log to start a new query step.
 Flushes the log buffer or makes a new checkpoint if necessary. NOTE: this
@@ -323,22 +295,11 @@ void
 log_print(
 /*======*/
 	FILE*	file);	/*!< in: file where to print */
-/******************************************************//**
-Peeks the current lsn.
-@return TRUE if success, FALSE if could not get the log system mutex */
-ibool
-log_peek_lsn(
-/*=========*/
-	lsn_t*	lsn);	/*!< out: if returns TRUE, current lsn is here */
 /**********************************************************************//**
 Refreshes the statistics used to print per-second averages. */
 void
 log_refresh_stats(void);
 /*===================*/
-
-/* Values used as flags */
-#define LOG_FLUSH	7652559
-#define LOG_CHECKPOINT	78656949
 
 /* The counting of lsn's starts from this value: this must be non-zero */
 #define LOG_START_LSN		((lsn_t) (16 * OS_FILE_LOG_BLOCK_SIZE))
@@ -376,7 +337,7 @@ log_refresh_stats(void);
 
 #define	LOG_BLOCK_KEY		4	/* encryption key version
 					before LOG_BLOCK_CHECKSUM;
-					in log_t::FORMAT_ENC_10_4 only */
+					after log_t::FORMAT_ENC_10_4 only */
 #define	LOG_BLOCK_CHECKSUM	4	/* 4 byte checksum of the log block
 					contents; in InnoDB versions
 					< 3.23.52 this did not contain the
@@ -414,7 +375,7 @@ because InnoDB never supported more than one copy of the redo log. */
 LOG_FILE_START_LSN started here, 4 bytes earlier than LOG_HEADER_START_LSN,
 which the LOG_FILE_START_LSN was renamed to.
 Subformat 1 is for the fully redo-logged TRUNCATE
-(no MLOG_TRUNCATE records or extra log checkpoints or log files) */
+(no MLOG_TRUNCATE records or extra log checkpoints or log file) */
 #define LOG_HEADER_SUBFORMAT	4
 /** LSN of the start of data in this log file (with format version 1;
 in format version 0, it was called LOG_FILE_START_LSN and at offset 4). */
@@ -439,7 +400,7 @@ or the MySQL version that created the redo log file. */
 					header; we write alternately to the
 					checkpoint fields when we make new
 					checkpoints; this field is only defined
-					in the first log file of a log group */
+					in the first log file of a log */
 #define LOG_CHECKPOINT_2	(3 * OS_FILE_LOG_BLOCK_SIZE)
 					/* second checkpoint field in the log
 					header */
@@ -448,35 +409,91 @@ or the MySQL version that created the redo log file. */
 typedef ib_mutex_t	LogSysMutex;
 typedef ib_mutex_t	FlushOrderMutex;
 
-/** RAII wrapper over path and file descriptor. Supposed to be used for log
-files only */
+/** Memory mapped file */
+class mapped_file_t
+{
+public:
+  mapped_file_t()= default;
+  mapped_file_t(const mapped_file_t &)= delete;
+  mapped_file_t &operator=(const mapped_file_t &)= delete;
+  mapped_file_t(mapped_file_t &&)= delete;
+  mapped_file_t &operator=(mapped_file_t &&)= delete;
+  ~mapped_file_t() noexcept;
+
+  dberr_t map(const char *path, bool read_only= false,
+              bool nvme= false) noexcept;
+  dberr_t unmap() noexcept;
+  byte *data() noexcept { return m_area.data(); }
+
+private:
+  span<byte> m_area;
+};
+
+/** Abstraction for reading, writing and flushing file cache to disk */
+class file_io
+{
+public:
+  file_io(bool durable_writes= false) : m_durable_writes(durable_writes) {}
+  virtual ~file_io() noexcept {};
+  virtual dberr_t open(const char *path, bool read_only) noexcept= 0;
+  virtual dberr_t rename(const char *old_path,
+                         const char *new_path) noexcept= 0;
+  virtual dberr_t close() noexcept= 0;
+  virtual dberr_t read(os_offset_t offset, span<byte> buf) noexcept= 0;
+  virtual dberr_t write(const char *path, os_offset_t offset,
+                        span<const byte> buf) noexcept= 0;
+  virtual dberr_t flush() noexcept= 0;
+
+  /** Durable writes doesn't require calling flush() */
+  bool writes_are_durable() const noexcept { return m_durable_writes; }
+
+protected:
+  bool m_durable_writes;
+};
+
+class file_os_io final: public file_io
+{
+public:
+  file_os_io()= default;
+  file_os_io(const file_os_io &)= delete;
+  file_os_io &operator=(const file_os_io &)= delete;
+  file_os_io(file_os_io &&rhs);
+  file_os_io &operator=(file_os_io &&rhs);
+  ~file_os_io() noexcept;
+
+  dberr_t open(const char *path, bool read_only) noexcept final;
+  bool is_opened() const noexcept { return m_fd != OS_FILE_CLOSED; }
+  dberr_t rename(const char *old_path, const char *new_path) noexcept final;
+  dberr_t close() noexcept final;
+  dberr_t read(os_offset_t offset, span<byte> buf) noexcept final;
+  dberr_t write(const char *path, os_offset_t offset,
+                span<const byte> buf) noexcept final;
+  dberr_t flush() noexcept final;
+
+private:
+  pfs_os_file_t m_fd{OS_FILE_CLOSED};
+};
+
+/** File abstraction + path */
 class log_file_t
 {
 public:
-  log_file_t()= default;
-  log_file_t(std::string path) : m_path{std::move(path)} {}
+  log_file_t(std::string path= "") noexcept : m_path{std::move(path)} {}
 
-  log_file_t(const log_file_t &)= delete;
-  log_file_t &operator=(const log_file_t &)= delete;
+  dberr_t open(bool read_only) noexcept;
+  bool is_opened() const noexcept;
 
-  log_file_t(log_file_t &&rhs);
-  log_file_t &operator=(log_file_t &&rhs);
+  const std::string &get_path() const noexcept { return m_path; }
 
-  ~log_file_t();
-
-  bool open();
-
-  bool is_opened() const { return m_fd != OS_FILE_CLOSED; }
-  const std::string get_path() const { return m_path; }
-
-  dberr_t rename(std::string new_path);
-  bool close();
-  dberr_t read(os_offset_t offset, span<byte> buf);
-  dberr_t write(os_offset_t offset, span<const byte> buf);
-  bool flush_data_only();
+  dberr_t rename(std::string new_path) noexcept;
+  dberr_t close() noexcept;
+  dberr_t read(os_offset_t offset, span<byte> buf) noexcept;
+  bool writes_are_durable() const noexcept;
+  dberr_t write(os_offset_t offset, span<const byte> buf) noexcept;
+  dberr_t flush() noexcept;
 
 private:
-  pfs_os_file_t m_fd;
+  std::unique_ptr<file_io> m_file;
   std::string m_path;
 };
 
@@ -499,56 +516,46 @@ struct log_t{
   static constexpr uint32_t FORMAT_ENCRYPTED = 1U << 31;
   /** The MariaDB 10.4.0 log format (only with innodb_encrypt_log=ON) */
   static constexpr uint32_t FORMAT_ENC_10_4 = FORMAT_10_4 | FORMAT_ENCRYPTED;
+  /** The MariaDB 10.5 physical redo log format */
+  static constexpr uint32_t FORMAT_10_5 = 0x50485953;
+  /** The MariaDB 10.5 physical format (only with innodb_encrypt_log=ON) */
+  static constexpr uint32_t FORMAT_ENC_10_5 = FORMAT_10_5 | FORMAT_ENCRYPTED;
 
-	MY_ALIGNED(CACHE_LINE_SIZE)
-	lsn_t		lsn;		/*!< log sequence number */
-	ulong		buf_free;	/*!< first free offset within the log
-					buffer in use */
+private:
+  /** The log sequence number of the last change of durable InnoDB files */
+  MY_ALIGNED(CACHE_LINE_SIZE)
+  std::atomic<lsn_t> lsn;
+  /** the first guaranteed-durable log sequence number */
+  std::atomic<lsn_t> flushed_to_disk_lsn;
+public:
+  /** first free offset within the log buffer in use */
+  size_t buf_free;
+private:
+  /** set when there may be need to flush the log buffer, or
+  preflush buffer pool pages, or initiate a log checkpoint.
+  This must hold if lsn - last_checkpoint_lsn > max_checkpoint_age. */
+  std::atomic<bool> check_flush_or_checkpoint_;
+public:
 
-	MY_ALIGNED(CACHE_LINE_SIZE)
-	LogSysMutex	mutex;		/*!< mutex protecting the log */
-	MY_ALIGNED(CACHE_LINE_SIZE)
-	LogSysMutex	write_mutex;	/*!< mutex protecting writing to log */
-	MY_ALIGNED(CACHE_LINE_SIZE)
-	FlushOrderMutex	log_flush_order_mutex;/*!< mutex to serialize access to
-					the flush list when we are putting
-					dirty blocks in the list. The idea
-					behind this mutex is to be able
-					to release log_sys.mutex during
-					mtr_commit and still ensure that
-					insertions in the flush_list happen
-					in the LSN order. */
-	byte*		buf;		/*!< Memory of double the
-					srv_log_buffer_size is
-					allocated here. This pointer will change
-					however to either the first half or the
-					second half in turns, so that log
-					write/flush to disk don't block
-					concurrent mtrs which will write
-					log to this buffer. Care to switch back
-					to the first half before freeing/resizing
-					must be undertaken. */
-	bool		first_in_use;	/*!< true if buf points to the first
-					half of the buffer, false
-					if the second half */
-	ulong		max_buf_free;	/*!< recommended maximum value of
-					buf_free for the buffer in use, after
-					which the buffer is flushed */
-	bool		check_flush_or_checkpoint;
-					/*!< this is set when there may
-					be need to flush the log buffer, or
-					preflush buffer pool pages, or make
-					a checkpoint; this MUST be TRUE when
-					lsn - last_checkpoint_lsn >
-					max_checkpoint_age; this flag is
-					peeked at by log_free_check(), which
-					does not reserve the log mutex */
-
-  /** Log files. Protected by mutex or write_mutex. */
-  struct files {
-    /** number of files */
-    ulint				n_files;
-    /** format of the redo log: e.g., FORMAT_10_4 */
+  /** mutex protecting the log */
+  MY_ALIGNED(CACHE_LINE_SIZE)
+  LogSysMutex mutex;
+  /** mutex to serialize access to the flush list when we are putting
+  dirty blocks in the list. The idea behind this mutex is to be able
+  to release log_sys.mutex during mtr_commit and still ensure that
+  insertions in the flush_list happen in the LSN order. */
+  MY_ALIGNED(CACHE_LINE_SIZE) FlushOrderMutex
+  log_flush_order_mutex;
+  /** log_buffer, append data here */
+  byte *buf;
+  /** log_buffer, writing data to file from this buffer.
+  Before flushing write_buf is swapped with flush_buf */
+  byte *flush_buf;
+  /** recommended maximum size of buf, after which the buffer is flushed */
+  size_t max_buf_free;
+  /** Log file stuff. Protected by mutex or write_mutex. */
+  struct file {
+    /** format of the redo log: e.g., FORMAT_10_5 */
     uint32_t				format;
     /** redo log subformat: 0 with separately logged TRUNCATE,
     2 with fully redo-logged TRUNCATE (1 in MariaDB 10.2) */
@@ -560,38 +567,47 @@ struct log_t{
     lsn_t				lsn;
     /** the byte offset of the above lsn */
     lsn_t				lsn_offset;
+    /** log file */
+    log_file_t				fd;
 
   public:
     /** used only in recovery: recovery scan succeeded up to this
     lsn in this log group */
     lsn_t				scanned_lsn;
 
-    /** file descriptors for all log files */
-    std::vector<log_file_t> files;
-
-    /** opens log files which must be closed prior this call */
-    void open_files(std::vector<std::string> paths);
-    /** reads buffer from log files
-    @param[in]	total_offset	offset in log files treated as a single file
+    /** opens log file which must be closed prior this call */
+    void open_file(std::string path);
+    /** writes header */
+    void write_header_durable(lsn_t lsn);
+    /** opens log file which must be closed prior this call */
+    dberr_t rename(std::string path) { return fd.rename(path); }
+    /** reads buffer from log file
+    @param[in]	offset		offset in log file
     @param[in]	buf		buffer where to read */
-    void read(os_offset_t total_offset, span<byte> buf);
-    /** writes buffer to log files
-    @param[in]	total_offset	offset in log files treated as a single file
+    void read(os_offset_t offset, span<byte> buf);
+    /** Tells whether writes require calling flush() */
+    bool writes_are_durable() const noexcept;
+    /** writes buffer to log file
+    @param[in]	offset		offset in log file
     @param[in]	buf		buffer from which to write */
-    void write(os_offset_t total_offset, span<byte> buf);
-    /** flushes OS page cache (excluding metadata!) for all log files */
-    void flush_data_only();
-    /** closes all log files */
-    void close_files();
+    void write(os_offset_t offset, span<byte> buf);
+    /** flushes OS page cache (excluding metadata!) for log file */
+    void flush();
+    /** closes log file */
+    void close_file();
 
     /** @return whether the redo log is encrypted */
     bool is_encrypted() const { return format & FORMAT_ENCRYPTED; }
+    /** @return whether the redo log is in the physical format */
+    bool is_physical() const
+    { return (format & ~FORMAT_ENCRYPTED) == FORMAT_10_5; }
     /** @return capacity in bytes */
-    lsn_t capacity() const{ return (file_size - LOG_FILE_HDR_SIZE) * n_files; }
+    lsn_t capacity() const{ return file_size - LOG_FILE_HDR_SIZE; }
     /** Calculate the offset of a log sequence number.
     @param[in]	lsn	log sequence number
     @return offset within the log */
     inline lsn_t calc_lsn_offset(lsn_t lsn) const;
+    inline lsn_t calc_lsn_offset_old(lsn_t lsn) const;
 
     /** Set the field values to correspond to a given lsn. */
     void set_fields(lsn_t lsn)
@@ -608,16 +624,11 @@ struct log_t{
     @return	whether no invalid blocks (e.g checksum mismatch) were found */
     bool read_log_seg(lsn_t* start_lsn, lsn_t end_lsn);
 
-    /** Initialize the redo log buffer.
-    @param[in]	n_files		number of files */
-    void create(ulint n_files);
+    /** Initialize the redo log buffer. */
+    void create();
 
     /** Close the redo log buffer. */
-    void close()
-    {
-      n_files = 0;
-      close_files();
-    }
+    void close() { close_file(); }
     void set_lsn(lsn_t a_lsn);
     lsn_t get_lsn() const { return lsn; }
     void set_lsn_offset(lsn_t a_lsn);
@@ -626,7 +637,7 @@ struct log_t{
 
 	/** The fields involved in the log buffer flush @{ */
 
-	ulong		buf_next_to_write;/*!< first offset in the log buffer
+	size_t		buf_next_to_write;/*!< first offset in the log buffer
 					where the byte content may not exist
 					written to file, e.g., the start
 					offset of a log record catenated
@@ -636,18 +647,9 @@ struct log_t{
 	lsn_t		write_lsn;	/*!< last written lsn */
 	lsn_t		current_flush_lsn;/*!< end lsn for the current running
 					write + flush operation */
-	lsn_t		flushed_to_disk_lsn;
-					/*!< how far we have written the log
-					AND flushed to disk */
 	std::atomic<size_t> pending_flushes; /*!< system calls in progress */
 	std::atomic<size_t> flushes;	/*!< system calls counter */
-	ulint		n_pending_flushes;/*!< number of currently
-					pending flushes; protected by
-					log_sys.mutex */
-	os_event_t	flush_event;	/*!< this event is in the reset state
-					when a flush is running;
-					os_event_set() and os_event_reset()
-					are protected by log_sys.mutex */
+
 	ulint		n_log_ios;	/*!< number of log i/os initiated thus
 					far */
 	ulint		n_log_ios_old;	/*!< number of log i/o's at the
@@ -657,7 +659,7 @@ struct log_t{
 	/* @} */
 
 	/** Fields involved in checkpoints @{ */
-	lsn_t		log_group_capacity; /*!< capacity of the log group; if
+	lsn_t		log_capacity;	/*!< capacity of the log; if
 					the checkpoint age exceeds this, it is
 					a serious error because it is possible
 					we will then overwrite log and spoil
@@ -689,13 +691,6 @@ struct log_t{
 					/*!< latest checkpoint lsn */
 	lsn_t		next_checkpoint_lsn;
 					/*!< next checkpoint lsn */
-	mtr_buf_t*	append_on_checkpoint;
-					/*!< extra redo log records to write
-					during a checkpoint, or NULL if none.
-					The pointer is protected by
-					log_sys.mutex, and the data must
-					remain constant as long as this
-					pointer is not NULL. */
 	ulint		n_pending_checkpoint_writes;
 					/*!< number of currently pending
 					checkpoint writes */
@@ -718,20 +713,39 @@ public:
 
   /** @return whether the redo log is encrypted */
   bool is_encrypted() const { return(log.is_encrypted()); }
+  /** @return whether the redo log is in the physical format */
+  bool is_physical() const { return log.is_physical(); }
 
   bool is_initialised() const { return m_initialised; }
+
+  lsn_t get_lsn() const { return lsn.load(std::memory_order_relaxed); }
+  void set_lsn(lsn_t lsn) { this->lsn.store(lsn, std::memory_order_relaxed); }
+
+  lsn_t get_flushed_lsn() const
+  { return flushed_to_disk_lsn.load(std::memory_order_relaxed); }
+  void set_flushed_lsn(lsn_t lsn)
+  { flushed_to_disk_lsn.store(lsn, std::memory_order_relaxed); }
+
+  bool check_flush_or_checkpoint() const
+  { return check_flush_or_checkpoint_.load(std::memory_order_relaxed); }
+  void set_check_flush_or_checkpoint(bool flag= true)
+  { check_flush_or_checkpoint_.store(flag, std::memory_order_relaxed); }
+
+  bool has_encryption_key_rotation() const {
+    return log.format == FORMAT_ENC_10_4 || log.format == FORMAT_ENC_10_5;
+  }
 
   /** @return the log block header + trailer size */
   unsigned framing_size() const
   {
-    return log.format == FORMAT_ENC_10_4
+    return has_encryption_key_rotation()
       ? LOG_BLOCK_HDR_SIZE + LOG_BLOCK_KEY + LOG_BLOCK_CHECKSUM
       : LOG_BLOCK_HDR_SIZE + LOG_BLOCK_CHECKSUM;
   }
   /** @return the log block payload size */
   unsigned payload_size() const
   {
-    return log.format == FORMAT_ENC_10_4
+    return has_encryption_key_rotation()
       ? OS_FILE_LOG_BLOCK_SIZE - LOG_BLOCK_HDR_SIZE - LOG_BLOCK_CHECKSUM -
       LOG_BLOCK_KEY
       : OS_FILE_LOG_BLOCK_SIZE - LOG_BLOCK_HDR_SIZE - LOG_BLOCK_CHECKSUM;
@@ -739,7 +753,7 @@ public:
   /** @return the log block trailer offset */
   unsigned trailer_offset() const
   {
-    return log.format == FORMAT_ENC_10_4
+    return has_encryption_key_rotation()
       ? OS_FILE_LOG_BLOCK_SIZE - LOG_BLOCK_CHECKSUM - LOG_BLOCK_KEY
       : OS_FILE_LOG_BLOCK_SIZE - LOG_BLOCK_CHECKSUM;
   }
@@ -759,39 +773,56 @@ public:
 
   /** Shut down the redo log subsystem. */
   void close();
+
+  /** Initiate a write of the log buffer to the file if needed.
+  @param flush  whether to initiate a durable write */
+  inline void initiate_write(bool flush)
+  {
+    const lsn_t lsn= get_lsn();
+    if (!flush || get_flushed_lsn() < lsn)
+      log_write_up_to(lsn, flush);
+  }
 };
 
 /** Redo log system */
 extern log_t	log_sys;
+#ifdef UNIV_DEBUG
+extern bool log_write_lock_own();
+#endif
+
+/** Gets the log capacity. It is OK to read the value without
+holding log_sys.mutex because it is constant.
+@return log capacity */
+inline lsn_t log_get_capacity(void) { return log_sys.log_capacity; }
 
 /** Calculate the offset of a log sequence number.
 @param[in]     lsn     log sequence number
 @return offset within the log */
-inline lsn_t log_t::files::calc_lsn_offset(lsn_t lsn) const
+inline lsn_t log_t::file::calc_lsn_offset(lsn_t lsn) const
 {
   ut_ad(this == &log_sys.log);
   /* The lsn parameters are updated while holding both the mutexes
   and it is ok to have either of them while reading */
-  ut_ad(log_sys.mutex.is_owned() || log_sys.write_mutex.is_owned());
-  const lsn_t group_size= capacity();
+  ut_ad(log_sys.mutex.is_owned() || log_write_lock_own());
+  const lsn_t size = capacity();
   lsn_t l= lsn - this->lsn;
   if (longlong(l) < 0) {
-    l= lsn_t(-longlong(l)) % group_size;
-    l= group_size - l;
+	  l = lsn_t(-longlong(l)) % size;
+	  l = size - l;
   }
 
   l+= lsn_offset - LOG_FILE_HDR_SIZE * (1 + lsn_offset / file_size);
-  l%= group_size;
+  l %= size;
   return l + LOG_FILE_HDR_SIZE * (1 + l / (file_size - LOG_FILE_HDR_SIZE));
 }
 
-inline void log_t::files::set_lsn(lsn_t a_lsn) {
-      ut_ad(log_sys.mutex.is_owned() || log_sys.write_mutex.is_owned());
+inline void log_t::file::set_lsn(lsn_t a_lsn) {
+      ut_ad(log_sys.mutex.is_owned() || log_write_lock_own());
       lsn = a_lsn;
 }
 
-inline void log_t::files::set_lsn_offset(lsn_t a_lsn) {
-      ut_ad(log_sys.mutex.is_owned() || log_sys.write_mutex.is_owned());
+inline void log_t::file::set_lsn_offset(lsn_t a_lsn) {
+      ut_ad(log_sys.mutex.is_owned() || log_write_lock_own());
       ut_ad((lsn % OS_FILE_LOG_BLOCK_SIZE) == (a_lsn % OS_FILE_LOG_BLOCK_SIZE));
       lsn_offset = a_lsn;
 }
@@ -812,40 +843,13 @@ inline void log_t::files::set_lsn_offset(lsn_t a_lsn) {
 /** Test if log sys mutex is owned. */
 #define log_mutex_own() mutex_own(&log_sys.mutex)
 
-/** Test if log sys write mutex is owned. */
-#define log_write_mutex_own() mutex_own(&log_sys.write_mutex)
 
 /** Acquire the log sys mutex. */
 #define log_mutex_enter() mutex_enter(&log_sys.mutex)
 
-/** Acquire the log sys write mutex. */
-#define log_write_mutex_enter() mutex_enter(&log_sys.write_mutex)
-
-/** Acquire all the log sys mutexes. */
-#define log_mutex_enter_all() do {		\
-	mutex_enter(&log_sys.write_mutex);	\
-	mutex_enter(&log_sys.mutex);		\
-} while (0)
 
 /** Release the log sys mutex. */
 #define log_mutex_exit() mutex_exit(&log_sys.mutex)
-
-/** Release the log sys write mutex.*/
-#define log_write_mutex_exit() mutex_exit(&log_sys.write_mutex)
-
-/** Release all the log sys mutexes. */
-#define log_mutex_exit_all() do {		\
-	mutex_exit(&log_sys.mutex);		\
-	mutex_exit(&log_sys.write_mutex);	\
-} while (0)
-
-/* log scrubbing speed, in bytes/sec */
-extern ulonglong innodb_scrub_log_speed;
-
-/** Event to wake up log_scrub_thread */
-extern os_event_t	log_scrub_event;
-/** Whether log_scrub_thread is active */
-extern bool		log_scrub_thread_active;
 
 #include "log0log.ic"
 

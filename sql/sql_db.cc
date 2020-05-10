@@ -61,7 +61,7 @@ long mysql_rm_arc_files(THD *thd, MY_DIR *dirp, const char *org_path);
 static my_bool rm_dir_w_symlink(const char *org_path, my_bool send_error);
 static void mysql_change_db_impl(THD *thd,
                                  LEX_CSTRING *new_db_name,
-                                 ulong new_db_access,
+                                 privilege_t new_db_access,
                                  CHARSET_INFO *new_db_charset);
 static bool mysql_rm_db_internal(THD *thd, const LEX_CSTRING *db,
                                  bool if_exists, bool silent);
@@ -186,9 +186,9 @@ bool my_dboptions_cache_init(void)
   if (!dboptions_init)
   {
     dboptions_init= 1;
-    error= my_hash_init(&dboptions, table_alias_charset,
-                        32, 0, 0, (my_hash_get_key) dboptions_get_key,
-                        free_dbopt,0);
+    error= my_hash_init(key_memory_dboptions_hash, &dboptions,
+                        table_alias_charset, 32, 0, 0, (my_hash_get_key)
+                        dboptions_get_key, free_dbopt, 0);
   }
   return error;
 }
@@ -218,9 +218,8 @@ void my_dbopt_cleanup(void)
 {
   mysql_rwlock_wrlock(&LOCK_dboptions);
   my_hash_free(&dboptions);
-  my_hash_init(&dboptions, table_alias_charset,
-               32, 0, 0, (my_hash_get_key) dboptions_get_key,
-               free_dbopt,0);
+  my_hash_init(key_memory_dboptions_hash, &dboptions, table_alias_charset, 32,
+               0, 0, (my_hash_get_key) dboptions_get_key, free_dbopt, 0);
   mysql_rwlock_unlock(&LOCK_dboptions);
 }
 
@@ -290,7 +289,7 @@ static my_bool put_dbopt(const char *dbname, Schema_specification_st *create)
     /* Options are not in the hash, insert them */
     char *tmp_name;
     char *tmp_comment= NULL;
-    if (!my_multi_malloc(MYF(MY_WME | MY_ZEROFILL),
+    if (!my_multi_malloc(key_memory_dboptions_hash, MYF(MY_WME | MY_ZEROFILL),
                          &opt, (uint) sizeof(*opt), &tmp_name, (uint) length+1,
                          &tmp_comment, (uint) DATABASE_COMMENT_MAXLEN+1,
                          NullS))
@@ -1088,7 +1087,7 @@ exit:
   */
   if (unlikely(thd->db.str && cmp_db_names(&thd->db, db) && !error))
   {
-    mysql_change_db_impl(thd, NULL, 0, thd->variables.collation_server);
+    mysql_change_db_impl(thd, NULL, NO_ACL, thd->variables.collation_server);
     thd->session_tracker.current_schema.mark_as_changed(thd);
   }
   my_dirend(dirp);
@@ -1148,9 +1147,9 @@ static bool find_db_tables_and_rm_known_files(THD *thd, MY_DIR *dirp,
                                                    (char*) table_list->table_name.str);
 
     table_list->alias= table_list->table_name;	// If lower_case_table_names=2
-    table_list->mdl_request.init(MDL_key::TABLE, table_list->db.str,
-                                 table_list->table_name.str, MDL_EXCLUSIVE,
-                                 MDL_TRANSACTION);
+    MDL_REQUEST_INIT(&table_list->mdl_request, MDL_key::TABLE,
+                     table_list->db.str, table_list->table_name.str,
+                     MDL_EXCLUSIVE, MDL_TRANSACTION);
     /* Link into list */
     (*tot_list_next_local)= table_list;
     (*tot_list_next_global)= table_list;
@@ -1352,7 +1351,7 @@ err:
 
 static void mysql_change_db_impl(THD *thd,
                                  LEX_CSTRING *new_db_name,
-                                 ulong new_db_access,
+                                 privilege_t new_db_access,
                                  CHARSET_INFO *new_db_charset)
 {
   /* 1. Change current database in THD. */
@@ -1501,7 +1500,7 @@ uint mysql_change_db(THD *thd, const LEX_CSTRING *new_db_name,
   LEX_CSTRING new_db_file_name;
 
   Security_context *sctx= thd->security_ctx;
-  ulong db_access= sctx->db_access;
+  privilege_t db_access(sctx->db_access);
   CHARSET_INFO *db_default_cl;
   DBUG_ENTER("mysql_change_db");
 
@@ -1518,7 +1517,7 @@ uint mysql_change_db(THD *thd, const LEX_CSTRING *new_db_name,
         new_db_name->length == 0.
       */
 
-      mysql_change_db_impl(thd, NULL, 0, thd->variables.collation_server);
+      mysql_change_db_impl(thd, NULL, NO_ACL, thd->variables.collation_server);
 
       goto done;
     }
@@ -1547,8 +1546,8 @@ uint mysql_change_db(THD *thd, const LEX_CSTRING *new_db_name,
     TODO: fix check_db_name().
   */
 
-  new_db_file_name.str= my_strndup(new_db_name->str, new_db_name->length,
-                                   MYF(MY_WME));
+  new_db_file_name.str= my_strndup(key_memory_THD_db, new_db_name->str,
+                                   new_db_name->length, MYF(MY_WME));
   new_db_file_name.length= new_db_name->length;
 
   if (new_db_file_name.str == NULL)
@@ -1570,7 +1569,7 @@ uint mysql_change_db(THD *thd, const LEX_CSTRING *new_db_name,
     my_free(const_cast<char*>(new_db_file_name.str));
 
     if (force_switch)
-      mysql_change_db_impl(thd, NULL, 0, thd->variables.collation_server);
+      mysql_change_db_impl(thd, NULL, NO_ACL, thd->variables.collation_server);
 
     DBUG_RETURN(ER_WRONG_DB_NAME);
   }
@@ -1622,7 +1621,7 @@ uint mysql_change_db(THD *thd, const LEX_CSTRING *new_db_name,
 
       /* Change db to NULL. */
 
-      mysql_change_db_impl(thd, NULL, 0, thd->variables.collation_server);
+      mysql_change_db_impl(thd, NULL, NO_ACL, thd->variables.collation_server);
 
       /* The operation succeed. */
       goto done;
@@ -1806,7 +1805,7 @@ bool mysql_upgrade_db(THD *thd, const LEX_CSTRING *old_db)
   }
 
   if ((table_list= thd->lex->query_tables) &&
-      (error= mysql_rename_tables(thd, table_list, 1)))
+      (error= mysql_rename_tables(thd, table_list, 1, 0)))
   {
     /*
       Failed to move all tables from the old database to the new one.

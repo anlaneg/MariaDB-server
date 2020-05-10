@@ -501,12 +501,6 @@ public:
     DBUG_RETURN(&key_map_full);
   }
 
-  bool primary_key_is_clustered() override {
-    DBUG_ENTER_FUNC();
-
-    DBUG_RETURN(true);
-  }
-
   bool should_store_row_debug_checksums() const {
     return m_store_row_debug_checksums && (rand() % 100 < m_checksums_pct);
   }
@@ -739,6 +733,7 @@ public:
       const TABLE *old_table_arg, const Rdb_tbl_def *old_tbl_def_arg) const
       MY_ATTRIBUTE((__nonnull__));
 
+  using handler::compare_key_parts;
   int compare_key_parts(const KEY *const old_key,
                         const KEY *const new_key) const
       MY_ATTRIBUTE((__nonnull__, __warn_unused_result__));
@@ -907,8 +902,10 @@ public:
   int check(THD *const thd, HA_CHECK_OPT *const check_opt) override
       MY_ATTRIBUTE((__warn_unused_result__));
   int remove_rows(Rdb_tbl_def *const tbl);
-  ha_rows records_in_range(uint inx, key_range *const min_key,
-                           key_range *const max_key) override
+  ha_rows records_in_range(uint inx,
+                           const key_range *const min_key,
+                           const key_range *const max_key,
+                           page_range *pages) override
       MY_ATTRIBUTE((__warn_unused_result__));
 
   int delete_table(Rdb_tbl_def *const tbl);

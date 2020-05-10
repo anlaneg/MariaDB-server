@@ -103,7 +103,8 @@ row_merge_create_fts_sort_index(
 		? DATA_VARCHAR : DATA_VARMYSQL;
 	field->col->mbminlen = idx_field->col->mbminlen;
 	field->col->mbmaxlen = idx_field->col->mbmaxlen;
-	field->col->len = HA_FT_MAXCHARLEN * unsigned(field->col->mbmaxlen);
+	field->col->len = static_cast<uint16_t>(
+		HA_FT_MAXCHARLEN * field->col->mbmaxlen);
 
 	field->fixed_len = 0;
 
@@ -635,7 +636,7 @@ row_merge_fts_doc_tokenize(
 
 		field->type.mtype = DATA_INT;
 		field->type.prtype = DATA_NOT_NULL | DATA_BINARY_TYPE;
-		field->type.len = len;
+		field->type.len = static_cast<uint16_t>(field->len);
 		field->type.mbminlen = 0;
 		field->type.mbmaxlen = 0;
 
@@ -659,7 +660,7 @@ row_merge_fts_doc_tokenize(
 
 		field->type.mtype = DATA_INT;
 		field->type.prtype = DATA_NOT_NULL;
-		field->type.len = len;
+		field->type.len = 4;
 		field->type.mbminlen = 0;
 		field->type.mbmaxlen = 0;
 		cur_len += len;
@@ -1340,7 +1341,7 @@ row_fts_sel_tree_propagate(
 	ulint		propogated,	/*<! in: tree node propagated */
 	int*		sel_tree,	/*<! in: selection tree */
 	const mrec_t**	mrec,		/*<! in: sort record */
-	offset_t**	offsets,	/*<! in: record offsets */
+	rec_offs**	offsets,	/*<! in: record offsets */
 	dict_index_t*	index)		/*<! in/out: FTS index */
 {
 	ulint	parent;
@@ -1390,7 +1391,7 @@ row_fts_sel_tree_update(
 	ulint		propagated,	/*<! in: node to propagate up */
 	ulint		height,		/*<! in: tree height */
 	const mrec_t**	mrec,		/*<! in: sort record */
-	offset_t**	offsets,	/*<! in: record offsets */
+	rec_offs**	offsets,	/*<! in: record offsets */
 	dict_index_t*	index)		/*<! in: index dictionary */
 {
 	ulint	i;
@@ -1412,7 +1413,7 @@ row_fts_build_sel_tree_level(
 	int*		sel_tree,	/*<! in/out: selection tree */
 	ulint		level,		/*<! in: selection tree level */
 	const mrec_t**	mrec,		/*<! in: sort record */
-	offset_t**	offsets,	/*<! in: record offsets */
+	rec_offs**	offsets,	/*<! in: record offsets */
 	dict_index_t*	index)		/*<! in: index dictionary */
 {
 	ulint	start;
@@ -1472,7 +1473,7 @@ row_fts_build_sel_tree(
 /*===================*/
 	int*		sel_tree,	/*<! in/out: selection tree */
 	const mrec_t**	mrec,		/*<! in: sort record */
-	offset_t**	offsets,	/*<! in: record offsets */
+	rec_offs**	offsets,	/*<! in: record offsets */
 	dict_index_t*	index)		/*<! in: index dictionary */
 {
 	ulint	treelevel = 1;
@@ -1522,7 +1523,7 @@ row_fts_merge_insert(
 	mem_heap_t*		heap;
 	dberr_t			error = DB_SUCCESS;
 	ulint*			foffs;
-	offset_t**		offsets;
+	rec_offs**		offsets;
 	fts_tokenizer_word_t	new_word;
 	ib_vector_t*		positions;
 	doc_id_t		last_doc_id;
@@ -1561,7 +1562,7 @@ row_fts_merge_insert(
 		heap, sizeof (*b) * fts_sort_pll_degree);
 	foffs = (ulint*) mem_heap_alloc(
 		heap, sizeof(*foffs) * fts_sort_pll_degree);
-	offsets = (offset_t**) mem_heap_alloc(
+	offsets = (rec_offs**) mem_heap_alloc(
 		heap, sizeof(*offsets) * fts_sort_pll_degree);
 	buf = (mrec_buf_t**) mem_heap_alloc(
 		heap, sizeof(*buf) * fts_sort_pll_degree);
@@ -1585,7 +1586,7 @@ row_fts_merge_insert(
 
 		num = 1 + REC_OFFS_HEADER_SIZE
 			+ dict_index_get_n_fields(index);
-		offsets[i] = static_cast<offset_t*>(mem_heap_zalloc(
+		offsets[i] = static_cast<rec_offs*>(mem_heap_zalloc(
 			heap, num * sizeof *offsets[i]));
 		rec_offs_set_n_alloc(offsets[i], num);
 		rec_offs_set_n_fields(offsets[i], dict_index_get_n_fields(index));
@@ -1619,7 +1620,8 @@ row_fts_merge_insert(
 	in order to get the correct aux table names. */
 	index->table->flags2 |= DICT_TF2_FTS_AUX_HEX_NAME;
 	DBUG_EXECUTE_IF("innodb_test_wrong_fts_aux_table_name",
-			index->table->flags2 &= ~DICT_TF2_FTS_AUX_HEX_NAME;);
+			index->table->flags2 &= ~DICT_TF2_FTS_AUX_HEX_NAME
+			& ((1U << DICT_TF2_BITS) - 1););
 	fts_table.type = FTS_INDEX_TABLE;
 	fts_table.index_id = index->id;
 	fts_table.table_id = table->id;
@@ -1640,9 +1642,7 @@ row_fts_merge_insert(
 	      == UT_BITS_IN_BYTES(aux_index->n_nullable));
 
 	/* Create bulk load instance */
-	ins_ctx.btr_bulk = UT_NEW_NOKEY(
-		BtrBulk(aux_index, trx, psort_info[0].psort_common->trx
-			->get_flush_observer()));
+	ins_ctx.btr_bulk = UT_NEW_NOKEY(BtrBulk(aux_index, trx));
 
 	/* Create tuple for insert */
 	ins_ctx.tuple = dtuple_create(heap, dict_index_get_n_fields(aux_index));
@@ -1773,10 +1773,6 @@ exit:
 
 	if (fts_enable_diag_print) {
 		ib::info() << "InnoDB_FTS: inserted " << count << " records";
-	}
-
-	if (psort_info[0].psort_common->trx->get_flush_observer()) {
-		row_merge_write_redo(aux_index);
 	}
 
 	return(error);

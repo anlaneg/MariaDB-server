@@ -30,7 +30,6 @@
 #include "lock.h"                              // unlock_table_name
 #include "sql_view.h"             // check_key_in_view, mysql_frm_type
 #include "sql_parse.h"            // mysql_init_select
-#include "sql_acl.h"              // *_ACL
 #include "filesort.h"             // filesort
 #include "sql_handler.h"          // mysql_ha_rm_tables
 #include "sql_select.h"
@@ -380,8 +379,8 @@ bool mysql_delete(THD *thd, TABLE_LIST *table_list, COND *conds,
     tables.table = table;
     tables.alias = table_list->alias;
 
-      if (select_lex->setup_ref_array(thd, order_list->elements) ||
-	  setup_order(thd, select_lex->ref_pointer_array, &tables,
+    if (select_lex->setup_ref_array(thd, order_list->elements) ||
+        setup_order(thd, select_lex->ref_pointer_array, &tables,
                     fields, all_fields, order))
     {
       free_underlaid_joins(thd, thd->lex->first_select_lex());
@@ -548,10 +547,12 @@ bool mysql_delete(THD *thd, TABLE_LIST *table_list, COND *conds,
     else
     {
       ha_rows scanned_limit= query_plan.scanned_rows;
+      table->no_keyread= 1;
       query_plan.index= get_index_for_order(order, table, select, limit,
                                             &scanned_limit,
                                             &query_plan.using_filesort, 
                                             &reverse);
+      table->no_keyread= 0;
       if (!query_plan.using_filesort)
         query_plan.scanned_rows= scanned_limit;
     }
@@ -751,6 +752,10 @@ bool mysql_delete(THD *thd, TABLE_LIST *table_list, COND *conds,
                                                              TRG_ACTION_BEFORE))
           && !table->versioned()
           && table->file->has_transactions();
+
+  if (table->versioned(VERS_TIMESTAMP) || (table_list->has_period()))
+    table->file->prepare_for_insert(1);
+  DBUG_ASSERT(table->file->inited != handler::NONE);
 
   THD_STAGE_INFO(thd, stage_updating);
   while (likely(!(error=info.read_record())) && likely(!thd->killed) &&
@@ -1238,6 +1243,9 @@ multi_delete::initialize_tables(JOIN *join)
 	normal_tables= 1;
       tbl->prepare_triggers_for_delete_stmt_or_event();
       tbl->prepare_for_position();
+
+      if (tbl->versioned(VERS_TIMESTAMP))
+        tbl->file->prepare_for_insert(1);
     }
     else if ((tab->type != JT_SYSTEM && tab->type != JT_CONST) &&
              walk == delete_tables)

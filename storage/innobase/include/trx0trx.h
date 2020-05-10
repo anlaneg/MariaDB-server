@@ -41,7 +41,6 @@ Created 3/26/1996 Heikki Tuuri
 
 // Forward declaration
 struct mtr_t;
-class FlushObserver;
 struct rw_trx_hash_element_t;
 
 /******************************************************************//**
@@ -181,17 +180,6 @@ trx_start_for_ddl_low(
 	trx_start_for_ddl_low((t), (o))
 #endif /* UNIV_DEBUG */
 
-/****************************************************************//**
-Commits a transaction. */
-void
-trx_commit(
-/*=======*/
-	trx_t*	trx);	/*!< in/out: transaction */
-
-/** Commit a transaction and a mini-transaction.
-@param[in,out]	trx	transaction
-@param[in,out]	mtr	mini-transaction (NULL if no modifications) */
-void trx_commit_low(trx_t* trx, mtr_t* mtr);
 /**********************************************************************//**
 Does the transaction commit for MySQL.
 @return DB_SUCCESS or error number */
@@ -454,6 +442,7 @@ Check transaction state */
 	ut_ad(!(t)->id);						\
 	ut_ad(!(t)->has_logged());					\
 	ut_ad(!(t)->is_referenced());					\
+	ut_ad(!(t)->is_wsrep());					\
 	ut_ad(!(t)->read_view.is_open());				\
 	ut_ad((t)->lock.wait_thr == NULL);				\
 	ut_ad(UT_LIST_GET_LEN((t)->lock.trx_locks) == 0);		\
@@ -523,8 +512,11 @@ code and no mutex is required when the query thread is no longer waiting. */
 /** The locks and state of an active transaction. Protected by
 lock_sys.mutex, trx->mutex or both. */
 struct trx_lock_t {
-	ulint		n_active_thrs;	/*!< number of active query threads */
-
+#ifdef UNIV_DEBUG
+	/** number of active query threads; at most 1, except for the
+	dummy transaction in trx_purge() */
+	ulint n_active_thrs;
+#endif
 	trx_que_t	que_state;	/*!< valid when trx->state
 					== TRX_STATE_ACTIVE: TRX_QUE_RUNNING,
 					TRX_QUE_LOCK_WAIT, ... */
@@ -840,6 +832,13 @@ public:
 
 	Transitions to COMMITTED are protected by trx_t::mutex. */
 	trx_state_t	state;
+#ifdef WITH_WSREP
+	/** whether wsrep_on(mysql_thd) held at the start of transaction */
+	bool		wsrep;
+	bool is_wsrep() const { return UNIV_UNLIKELY(wsrep); }
+#else /* WITH_WSREP */
+	bool is_wsrep() const { return false; }
+#endif /* WITH_WSREP */
 
 	ReadView	read_view;	/*!< consistent read view used in the
 					transaction, or NULL if not yet set */
@@ -891,10 +890,10 @@ public:
 					defer flush of the logs to disk
 					until after we release the
 					mutex. */
-	bool		must_flush_log_later;/*!< this flag is set to TRUE in
-					trx_commit() if flush_log_later was
-					TRUE, and there were modifications by
-					the transaction; in that case we must
+	bool		must_flush_log_later;/*!< set in commit()
+					if flush_log_later was
+					set and redo log was written;
+					in that case we will
 					flush the log in
 					trx_commit_complete_for_mysql() */
 	ulint		duplicates;	/*!< TRX_DUP_IGNORE | TRX_DUP_REPLACE */
@@ -1044,11 +1043,6 @@ public:
 	/*------------------------------*/
 	char*		detailed_error;	/*!< detailed error message for last
 					error, or empty. */
-private:
-	/** flush observer used to track flushing of non-redo logged pages
-	during bulk create index */
-	FlushObserver*	flush_observer;
-public:
 	/* Lock wait statistics */
 	ulint		n_rec_lock_waits;
 					/*!< Number of record lock waits,
@@ -1101,20 +1095,6 @@ public:
 		return(assign_temp_rseg());
 	}
 
-	/** Set the innodb_log_optimize_ddl page flush observer
-	@param[in,out]	space	tablespace
-	@param[in,out]	stage	performance_schema accounting */
-	void set_flush_observer(fil_space_t* space, ut_stage_alter_t* stage);
-
-	/** Remove the flush observer */
-	void remove_flush_observer();
-
-	/** @return the flush observer */
-	FlushObserver* get_flush_observer() const
-	{
-		return flush_observer;
-	}
-
   /** Transition to committed state, to release implicit locks. */
   inline void commit_state();
 
@@ -1125,11 +1105,29 @@ public:
   @param[in]	table_id	table identifier */
   void evict_table(table_id_t table_id);
 
+  /** Initiate rollback.
+  @param savept     savepoint to which to roll back
+  @return error code or DB_SUCCESS */
+  dberr_t rollback(trx_savept_t *savept= nullptr);
+  /** Roll back an active transaction.
+  @param savept     savepoint to which to roll back */
+  inline void rollback_low(trx_savept_t *savept= nullptr);
+  /** Finish rollback.
+  @return whether the rollback was completed normally
+  @retval false if the rollback was aborted by shutdown */
+  inline bool rollback_finish();
+private:
+  /** Mark a transaction committed in the main memory data structures. */
+  inline void commit_in_memory(const mtr_t *mtr);
+  /** Commit the transaction in a mini-transaction.
+  @param mtr  mini-transaction (if there are any persistent modifications) */
+  void commit_low(mtr_t *mtr= nullptr);
+public:
+  /** Commit the transaction. */
+  void commit();
 
-  bool is_referenced()
-  {
-    return n_ref > 0;
-  }
+
+  bool is_referenced() const { return n_ref > 0; }
 
 
   void reference()

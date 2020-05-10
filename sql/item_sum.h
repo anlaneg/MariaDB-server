@@ -355,7 +355,8 @@ public:
     ROW_NUMBER_FUNC, RANK_FUNC, DENSE_RANK_FUNC, PERCENT_RANK_FUNC,
     CUME_DIST_FUNC, NTILE_FUNC, FIRST_VALUE_FUNC, LAST_VALUE_FUNC,
     NTH_VALUE_FUNC, LEAD_FUNC, LAG_FUNC, PERCENTILE_CONT_FUNC,
-    PERCENTILE_DISC_FUNC, SP_AGGREGATE_FUNC, JSON_ARRAYAGG_FUNC
+    PERCENTILE_DISC_FUNC, SP_AGGREGATE_FUNC, JSON_ARRAYAGG_FUNC,
+    JSON_OBJECTAGG_FUNC
   };
 
   Item **ref_by; /* pointer to a ref to the object used to register it */
@@ -1313,7 +1314,7 @@ struct st_sp_security_context;
   Item_sum_sp handles STORED AGGREGATE FUNCTIONS
 
   Each Item_sum_sp represents a custom aggregate function. Inside the
-  function's body, we require at least one occurence of FETCH GROUP NEXT ROW
+  function's body, we require at least one occurrence of FETCH GROUP NEXT ROW
   instruction. This cursor is what makes custom stored aggregates possible.
 
   During computation the function's add method is called. This in turn performs
@@ -1341,7 +1342,7 @@ struct st_sp_security_context;
   group is already set in the argument x. This behaviour is done so when
   a user writes a function, he should "logically" include FETCH GROUP NEXT ROW
   before any "add" instructions in the stored function. This means however that
-  internally, the first occurence doesn't stop the function. See the
+  internally, the first occurrence doesn't stop the function. See the
   implementation of FETCH GROUP NEXT ROW for details as to how it happens.
 
   Either way, one should assume that after calling "Item_sum_sp::add()" that

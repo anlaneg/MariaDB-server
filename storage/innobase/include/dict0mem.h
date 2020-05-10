@@ -2,7 +2,7 @@
 
 Copyright (c) 1996, 2017, Oracle and/or its affiliates. All Rights Reserved.
 Copyright (c) 2012, Facebook Inc.
-Copyright (c) 2013, 2019, MariaDB Corporation.
+Copyright (c) 2013, 2020, MariaDB Corporation.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License as published by the Free Software
@@ -279,7 +279,7 @@ index tables) of a FTS table are in HEX format. */
 	(table->flags2 & (flag))
 
 #define DICT_TF2_FLAG_UNSET(table, flag)	\
-	(table->flags2 &= ~(flag))
+	(table->flags2 &= ~(flag) & ((1U << DICT_TF2_BITS) - 1))
 
 /** Tables could be chained together with Foreign key constraint. When
 first load the parent table, we would load all of its descedents.
@@ -641,7 +641,7 @@ public:
 			: DATA_BINARY_TYPE;
 		if (fixed) {
 			mtype = DATA_FIXBINARY;
-			len = fixed;
+			len = static_cast<uint16_t>(fixed);
 		} else {
 			mtype = DATA_BINARY;
 			len = len2 ? 65535 : 255;
@@ -734,6 +734,9 @@ public:
 				 | CHAR_COLL_MASK << 16
 				 | DATA_LONG_TRUE_VARCHAR));
 	}
+
+  /** @return whether the column values are comparable by memcmp() */
+  inline bool is_binary() const { return prtype & DATA_BINARY_TYPE; }
 };
 
 /** Index information put in a list of virtual column structure. Index
@@ -950,6 +953,9 @@ const char innobase_index_reserve_name[] = "GEN_CLUST_INDEX";
 /** Data structure for an index.  Most fields will be
 initialized to 0, NULL or FALSE in dict_mem_index_create(). */
 struct dict_index_t {
+  /** Maximum number of fields */
+  static constexpr unsigned MAX_N_FIELDS= (1U << 10) - 1;
+
 	index_id_t	id;	/*!< id of the index */
 	mem_heap_t*	heap;	/*!< memory heap */
 	id_name_t	name;	/*!< index name */
@@ -1166,18 +1172,24 @@ struct dict_index_t {
 	bool has_virtual() const { return type & DICT_VIRTUAL; }
 
 	/** @return the position of DB_TRX_ID */
-	unsigned db_trx_id() const {
+	uint16_t db_trx_id() const {
 		DBUG_ASSERT(is_primary());
 		DBUG_ASSERT(n_uniq);
 		DBUG_ASSERT(n_uniq <= MAX_REF_PARTS);
 		return n_uniq;
 	}
 	/** @return the position of DB_ROLL_PTR */
-	unsigned db_roll_ptr() const { return db_trx_id() + 1; }
+	uint16_t db_roll_ptr() const
+	{
+		return static_cast<uint16_t>(db_trx_id() + 1);
+	}
 
 	/** @return the offset of the metadata BLOB field,
 	or the first user field after the PRIMARY KEY,DB_TRX_ID,DB_ROLL_PTR */
-	unsigned first_user_field() const { return db_trx_id() + 2; }
+	uint16_t first_user_field() const
+	{
+		return static_cast<uint16_t>(db_trx_id() + 2);
+	}
 
 	/** @return whether the index is corrupted */
 	inline bool is_corrupted() const;
@@ -1244,7 +1256,7 @@ struct dict_index_t {
 	@param[in]	offsets	offsets
 	@return true if row is historical */
 	bool
-	vers_history_row(const rec_t* rec, const offset_t* offsets);
+	vers_history_row(const rec_t* rec, const rec_offs* offsets);
 
 	/** Check if record in secondary index is historical row.
 	@param[in]	rec	record in a secondary index
@@ -1667,7 +1679,7 @@ class field_map_element_t
 	/** Field metadata */
 	uint16_t data;
 
-	void clear_not_null() { data &= ~NOT_NULL; }
+	void clear_not_null() { data &= uint16_t(~NOT_NULL); }
 public:
 	bool is_dropped() const { return data & DROPPED; }
 	void set_dropped() { data |= DROPPED; }
@@ -2304,14 +2316,14 @@ inline bool dict_index_t::is_corrupted() const
 
 inline void dict_index_t::clear_instant_add()
 {
-	DBUG_ASSERT(is_primary());
-	DBUG_ASSERT(is_instant());
-	DBUG_ASSERT(!table->instant);
-	for (unsigned i = n_core_fields; i < n_fields; i++) {
-		fields[i].col->clear_instant();
-	}
-	n_core_fields = n_fields;
-	n_core_null_bytes = UT_BITS_IN_BYTES(unsigned(n_nullable));
+  DBUG_ASSERT(is_primary());
+  DBUG_ASSERT(is_instant());
+  DBUG_ASSERT(!table->instant);
+  for (unsigned i= n_core_fields; i < n_fields; i++)
+    fields[i].col->clear_instant();
+  n_core_fields= n_fields;
+  n_core_null_bytes= static_cast<byte>
+    (UT_BITS_IN_BYTES(static_cast<unsigned>(n_nullable)));
 }
 
 inline void dict_index_t::clear_instant_alter()
@@ -2352,8 +2364,9 @@ inline void dict_index_t::clear_instant_alter()
 	}
 
 	DBUG_ASSERT(&fields[n_fields - table->n_dropped()] == end);
-	n_core_fields = n_fields = n_def = end - fields;
-	n_core_null_bytes = UT_BITS_IN_BYTES(n_nullable);
+	n_core_fields = n_fields = n_def
+		= static_cast<unsigned>(end - fields) & MAX_N_FIELDS;
+	n_core_null_bytes = static_cast<byte>(UT_BITS_IN_BYTES(n_nullable));
 	std::sort(begin, end, [](const dict_field_t& a, const dict_field_t& b)
 			      { return a.col->ind < b.col->ind; });
 	table->instant = NULL;
@@ -2361,7 +2374,10 @@ inline void dict_index_t::clear_instant_alter()
 		auto a = std::find_if(begin, end,
 				      [ai_col](const dict_field_t& f)
 				      { return f.col == ai_col; });
-		table->persistent_autoinc = (a == end) ? 0 : 1 + (a - fields);
+		table->persistent_autoinc = (a == end)
+			? 0
+			: (1 + static_cast<unsigned>(a - fields))
+			& MAX_N_FIELDS;
 	}
 }
 

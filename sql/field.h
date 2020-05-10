@@ -51,6 +51,8 @@ class Table_ident;
 class SEL_ARG;
 class RANGE_OPT_PARAM;
 struct KEY_PART;
+struct SORT_FIELD;
+struct SORT_FIELD_ATTR;
 
 enum enum_check_fields
 {
@@ -594,6 +596,7 @@ public:
     name.str= NULL;
     name.length= 0;
   };
+  Virtual_column_info* clone(THD *thd);
   ~Virtual_column_info() {};
   enum_vcol_info_type get_vcol_type() const
   {
@@ -1075,6 +1078,12 @@ public:
   virtual uint32 data_length() { return pack_length(); }
   virtual uint32 sort_length() const { return pack_length(); }
 
+  /*
+    sort_suffix_length() return the length bytes needed to store the length
+    for binary charset
+  */
+  virtual uint32 sort_suffix_length() const { return 0; }
+
   /* 
     Get the number bytes occupied by the value in the field.
     CHAR values are stripped of trailing spaces.
@@ -1231,7 +1240,7 @@ public:
                                                    const Relay_log_info *rli,
                                                    const Conv_param &param)
                                                    const;
-  inline  int cmp(const uchar *str) { return cmp(ptr,str); }
+  inline  int cmp(const uchar *str) const { return cmp(ptr,str); }
   virtual int cmp_max(const uchar *a, const uchar *b, uint max_len) const
     { return cmp(a, b); }
   virtual int cmp(const uchar *,const uchar *) const=0;
@@ -1361,7 +1370,7 @@ public:
   void set_null_ptr(uchar *p_null_ptr, uint p_null_bit)
   {
     null_ptr= p_null_ptr;
-    null_bit= p_null_bit;
+    null_bit= static_cast<uchar>(p_null_bit);
   }
 
   bool stored_in_db() const { return !vcol_info || vcol_info->stored_in_db; }
@@ -1410,7 +1419,18 @@ public:
     return bytes;
   }
 
-  void make_sort_key(uchar *buff, uint length);
+  /*
+    Create mem-comparable sort key part for a sort key
+  */
+  void make_sort_key_part(uchar *buff, uint length);
+
+  /*
+    create a compact sort key which can be compared with a comparison
+    function. They are called packed sort keys
+  */
+  virtual uint make_packed_sort_key_part(uchar *buff,
+                                         const SORT_FIELD_ATTR *sort_field);
+
   virtual void make_send_field(Send_field *);
   virtual void sort_string(uchar *buff,uint length)=0;
   virtual bool optimize_range(uint idx, uint part) const;
@@ -1444,8 +1464,11 @@ public:
     if (null_ptr)
       null_ptr=ADD_TO_PTR(null_ptr,ptr_diff,uchar*);
   }
-  virtual void get_image(uchar *buff, uint length, CHARSET_INFO *cs)
-    { memcpy(buff,ptr,length); }
+  void get_image(uchar *buff, uint length, CHARSET_INFO *cs) const
+  { get_image(buff, length, ptr, cs); }
+  virtual void get_image(uchar *buff, uint length,
+                         const uchar *ptr_arg, CHARSET_INFO *cs) const
+    { memcpy(buff,ptr_arg,length); }
   virtual void set_image(const uchar *buff,uint length, CHARSET_INFO *cs)
     { memcpy(ptr,buff,length); }
 
@@ -1476,9 +1499,11 @@ public:
       Number of copied bytes (excluding padded zero bytes -- see above).
   */
 
-  virtual uint get_key_image(uchar *buff, uint length, imagetype type_arg)
+  uint get_key_image(uchar *buff, uint length, imagetype type_arg) const
+  { return get_key_image(buff, length, ptr, type_arg); }
+  virtual uint get_key_image(uchar *buff, uint length, const uchar *ptr_arg, imagetype type_arg) const
   {
-    get_image(buff, length, &my_charset_bin);
+    get_image(buff, length, ptr_arg, &my_charset_bin);
     return length;
   }
   virtual void set_key_image(const uchar *buff,uint length)
@@ -1527,7 +1552,7 @@ public:
   { return length;}
   virtual uint max_packed_col_length(uint max_length)
   { return max_length;}
-  virtual bool is_packable() { return false; }
+  virtual bool is_packable() const { return false; }
 
   uint offset(const uchar *record) const
   {
@@ -2120,11 +2145,12 @@ public:
     {}
   enum_conv_type rpl_conv_type_from(const Conv_source &source,
                                     const Relay_log_info *rli,
-                                    const Conv_param &param) const;
-  int store_decimal(const my_decimal *d);
-  uint32 max_data_length() const;
+                                    const Conv_param &param) const override;
+  int store_decimal(const my_decimal *d) override;
+  uint32 max_data_length() const override;
+  void make_send_field(Send_field *) override;
 
-  bool is_varchar_and_in_write_set() const
+  bool is_varchar_and_in_write_set() const override
   {
     DBUG_ASSERT(table && table->write_set);
     return bitmap_is_set(table->write_set, field_index);
@@ -2132,15 +2158,18 @@ public:
   bool match_collation_to_optimize_range() const { return true; }
 
   bool can_optimize_keypart_ref(const Item_bool_func *cond,
-                                const Item *item) const;
+                                const Item *item) const override;
   bool can_optimize_hash_join(const Item_bool_func *cond,
-                              const Item *item) const;
+                              const Item *item) const override;
   bool can_optimize_group_min_max(const Item_bool_func *cond,
-                                  const Item *const_item) const;
+                                  const Item *const_item) const override;
   bool can_optimize_range(const Item_bool_func *cond,
                           const Item *item,
-                          bool is_eq_func) const;
-  bool is_packable() { return true; }
+                          bool is_eq_func) const override;
+  bool is_packable() const override { return true; }
+  uint make_packed_sort_key_part(uchar *buff,
+                                 const SORT_FIELD_ATTR *sort_field)override;
+  uchar* pack_sort_string(uchar *to, const SORT_FIELD_ATTR *sort_field);
 };
 
 /* base class for float and double and decimal (old one) */
@@ -3970,7 +3999,8 @@ public:
   bool has_charset() const override { return charset() != &my_charset_bin; }
   Field *make_new_field(MEM_ROOT *root, TABLE *new_table, bool keep_type)
     override;
-  uint get_key_image(uchar *buff,uint length, imagetype type) override;
+  uint get_key_image(uchar *buff, uint length,
+                     const uchar *ptr_arg, imagetype type) const override;
   sql_mode_t value_depends_on_sql_mode() const override;
   sql_mode_t can_handle_sql_mode_dependency_on_store() const override;
   void print_key_value(String *out, uint32 length) override;
@@ -3980,13 +4010,21 @@ public:
 
 class Field_varstring :public Field_longstr {
 public:
-  uchar *get_data() const
+  const uchar *get_data() const
   {
-    return ptr + length_bytes;
+    return get_data(ptr);
+  }
+  const uchar *get_data(const uchar *ptr_arg) const
+  {
+    return ptr_arg + length_bytes;
   }
   uint get_length() const
   {
-    return length_bytes == 1 ? (uint) *ptr : uint2korr(ptr);
+    return get_length(ptr);
+  }
+  uint get_length(const uchar *ptr_arg) const
+  {
+    return length_bytes == 1 ? (uint) *ptr_arg : uint2korr(ptr_arg);
   }
 protected:
   void store_length(uint32 number)
@@ -3996,6 +4034,7 @@ protected:
     else
       int2store(ptr, number);
   }
+  virtual void val_str_from_ptr(String *val, const uchar *ptr) const;
 public:
   /*
     The maximum space available in a Field_varstring, in bytes. See
@@ -4042,8 +4081,11 @@ public:
   uint32 key_length() const override { return (uint32) field_length; }
   uint32 sort_length() const override
   {
-    return (uint32) field_length + (field_charset() == &my_charset_bin ?
-                                    length_bytes : 0);
+    return (uint32) field_length + sort_suffix_length();
+  }
+  virtual uint32 sort_suffix_length() const override
+  {
+    return (field_charset() == &my_charset_bin ? length_bytes : 0);
   }
   Copy_func *get_copy_func(const Field *from) const override;
   bool memcpy_field_possible(const Field *from) const override;
@@ -4064,7 +4106,8 @@ public:
     return cmp_max(a, b, ~0U);
   }
   void sort_string(uchar *buff,uint length) override;
-  uint get_key_image(uchar *buff,uint length, imagetype type) override;
+  uint get_key_image(uchar *buff, uint length,
+                     const uchar *ptr_arg, imagetype type) const override;
   void set_key_image(const uchar *buff,uint length) override;
   void sql_type(String &str) const override;
   void sql_rpl_type(String*) const override;
@@ -4116,6 +4159,7 @@ public:
   { return compression_method_ptr; }
 private:
   Compression_method *compression_method_ptr;
+  void val_str_from_ptr(String *val, const uchar *ptr) const override;
   int store(const char *to, size_t length, CHARSET_INFO *charset) override;
   using Field_str::store;
   String *val_str(String *, String *) override;
@@ -4187,6 +4231,30 @@ static inline longlong read_bigendian(const uchar *from, uint bytes)
   }
 }
 
+static inline void store_lowendian(ulonglong num, uchar *to, uint bytes)
+{
+  switch(bytes) {
+  case 1: *to= (uchar)num;    break;
+  case 2: int2store(to, num); break;
+  case 3: int3store(to, num); break;
+  case 4: int4store(to, num); break;
+  case 8: int8store(to, num); break;
+  default: DBUG_ASSERT(0);
+  }
+}
+
+static inline longlong read_lowendian(const uchar *from, uint bytes)
+{
+  switch(bytes) {
+  case 1: return from[0];
+  case 2: return uint2korr(from);
+  case 3: return uint3korr(from);
+  case 4: return uint4korr(from);
+  case 8: return sint8korr(from);
+  default: DBUG_ASSERT(0); return 0;
+  }
+}
+
 
 extern LEX_CSTRING temp_lex_str;
 
@@ -4210,7 +4278,7 @@ protected:
 
   static void do_copy_blob(Copy_field *copy);
   static void do_conv_blob(Copy_field *copy);
-  uint get_key_image_itRAW(uchar *buff, uint length);
+  uint get_key_image_itRAW(const uchar *ptr_arg, uchar *buff, uint length) const;
 public:
   Field_blob(uchar *ptr_arg, uchar *null_ptr_arg, uchar null_bit_arg,
 	     enum utype unireg_check_arg, const LEX_CSTRING *field_name_arg,
@@ -4353,6 +4421,7 @@ public:
   { return (uint32) (packlength); }
   uint row_pack_length() const override { return pack_length_no_ptr(); }
   uint32 sort_length() const override;
+  uint32 sort_suffix_length() const override;
   uint32 value_length() override { return get_length(); }
   virtual uint32 max_data_length() const override
   {
@@ -4376,11 +4445,11 @@ public:
   uint32 get_length(const uchar *ptr, uint packlength) const;
   uint32 get_length(const uchar *ptr_arg) const
   { return get_length(ptr_arg, this->packlength); }
-  inline uchar *get_ptr() const { return get_ptr(0); }
-  inline uchar *get_ptr(my_ptrdiff_t row_offset) const
+  inline uchar *get_ptr() const { return get_ptr(ptr); }
+  inline uchar *get_ptr(const uchar *ptr_arg) const
   {
     uchar *s;
-    memcpy(&s, ptr + packlength + row_offset, sizeof(uchar*));
+    memcpy(&s, ptr_arg + packlength, sizeof(uchar*));
     return s;
   }
   inline void set_ptr(uchar *length, uchar *data)
@@ -4399,10 +4468,11 @@ public:
     set_ptr_offset(0, length, data);
   }
   int copy_value(Field_blob *from);
-  uint get_key_image(uchar *buff, uint length, imagetype type) override
+  uint get_key_image(uchar *buff, uint length,
+                     const uchar *ptr_arg, imagetype type) const override
   {
     DBUG_ASSERT(type == itRAW);
-    return get_key_image_itRAW(buff, length);
+    return get_key_image_itRAW(ptr_arg, buff, length);
   }
   void set_key_image(const uchar *buff,uint length) override;
   Field *new_key_field(MEM_ROOT *root, TABLE *new_table,
@@ -4508,7 +4578,8 @@ private:
     compression methods or compression levels.
   */
 
-  uint get_key_image(uchar *, uint, imagetype) override
+  uint get_key_image(uchar *buff, uint length,
+                     const uchar *ptr_arg, imagetype type_arg) const override
   { DBUG_ASSERT(0); return 0; }
   void set_key_image(const uchar *, uint) override
   { DBUG_ASSERT(0); }
@@ -4795,15 +4866,17 @@ public:
   {
     return pos_in_interval_val_real(min, max);
   }
-  void get_image(uchar *buff, uint length, CHARSET_INFO *) override
-  { get_key_image(buff, length, itRAW); }
+  void get_image(uchar *buff, uint length,
+                 const uchar *ptr_arg, CHARSET_INFO *cs) const override
+  { get_key_image(buff, length, ptr_arg, itRAW); }
   void set_image(const uchar *buff,uint length, CHARSET_INFO *cs) override
   { Field_bit::store((char *) buff, length, cs); }
-  uint get_key_image(uchar *buff, uint length, imagetype type) override;
+  uint get_key_image(uchar *buff, uint length,
+                     const uchar *ptr_arg, imagetype type) const override;
   void set_key_image(const uchar *buff, uint length) override
   { Field_bit::store((char*) buff, length, &my_charset_bin); }
   void sort_string(uchar *buff, uint length) override
-  { get_key_image(buff, length, itRAW); }
+  { get_key_image(buff, length, ptr, itRAW); }
   uint32 pack_length() const override
   { return (uint32) (field_length + 7) / 8; }
   uint32 pack_length_in_rec() const override { return bytes_in_rec; }
@@ -4870,7 +4943,8 @@ public:
       explicitly using the field_length.
     */
     return Binlog_type_info(type(),
-            field_length % 8 + ((field_length / 8) << 8), 2);
+                            static_cast<uint16>((field_length & 7) |
+                                                ((field_length / 8) << 8)), 2);
   }
 
 private:
@@ -5461,7 +5535,8 @@ public:
 */
 
 class Send_field :public Sql_alloc,
-                  public Type_handler_hybrid_field_type
+                  public Type_handler_hybrid_field_type,
+                  public Send_field_extended_metadata
 {
 public:
   LEX_CSTRING db_name;
@@ -5506,9 +5581,9 @@ public:
   uint32 max_char_length(CHARSET_INFO *cs) const
   {
     return type_handler()->field_type() >= MYSQL_TYPE_TINY_BLOB &&
-           type_handler()->field_type() <= MYSQL_TYPE_BLOB ?
-                   length / cs->mbminlen :
-                   length / cs->mbmaxlen;
+           type_handler()->field_type() <= MYSQL_TYPE_BLOB
+      ? static_cast<uint32>(length / cs->mbminlen)
+      : static_cast<uint32>(length / cs->mbmaxlen);
   }
   uint32 max_octet_length(CHARSET_INFO *from, CHARSET_INFO *to) const
   {

@@ -307,7 +307,7 @@ struct SplM_field_ext_info: public SplM_field_info
     8. P contains some references on the columns of the joined tables C
        occurred also in the select list of this join
     9. There are defined some keys usable for ref access of fields from C
-       with available statistics. 
+       with available statistics.
 
   @retval
     true   if the answer is positive
@@ -341,7 +341,7 @@ bool JOIN::check_for_splittable_materialized()
     return false;
 
   ORDER *ord;
-  Dynamic_array<SplM_field_ext_info> candidates;
+  Dynamic_array<SplM_field_ext_info> candidates(PSI_INSTRUMENT_MEM);
 
   /*
     Select from partition_list all candidates for splitting.
@@ -477,6 +477,15 @@ bool JOIN::check_for_splittable_materialized()
   /* Attach this info to the table T */
   derived->table->set_spl_opt_info(spl_opt_info);
 
+  /*
+    If this is specification of a materialized derived table T that is
+    potentially splittable and is used in the from list of the right operand
+    of an IN predicand transformed to a semi-join then the embedding semi-join
+    nest is not allowed to be materialized.
+  */
+  if (derived && derived->is_materialized_derived() &&
+      derived->embedding && derived->embedding->sj_subq_pred)
+    derived->embedding->sj_subq_pred->types_allow_materialization= FALSE;
   return true;
 }
 
@@ -703,7 +712,7 @@ void JOIN::add_keyuses_for_splitting()
   KEY_FIELD *added_key_field;
   if (!spl_opt_info->added_key_fields.elements)
     goto err;
-  if (!(ext_keyuses_for_splitting= new Dynamic_array<KEYUSE_EXT>))
+  if (!(ext_keyuses_for_splitting= new Dynamic_array<KEYUSE_EXT>(PSI_INSTRUMENT_MEM)))
     goto err;
   while ((added_key_field= li++))
   {
@@ -733,13 +742,11 @@ void JOIN::add_keyuses_for_splitting()
   save_query_plan(save_qep);
 
   if (!keyuse.buffer &&
-       my_init_dynamic_array(&keyuse, sizeof(KEYUSE), 20, 64,
-                             MYF(MY_THREAD_SPECIFIC)))
+       my_init_dynamic_array(PSI_INSTRUMENT_ME, &keyuse, sizeof(KEYUSE),
+                             20, 64, MYF(MY_THREAD_SPECIFIC)))
     goto err;
 
-  if (allocate_dynamic(&keyuse,
-                       save_qep->keyuse.elements +
-                       added_keyuse_count))
+  if (allocate_dynamic(&keyuse, save_qep->keyuse.elements + added_keyuse_count))
     goto err;
 
   memcpy(keyuse.buffer,
@@ -959,7 +966,7 @@ SplM_plan_info * JOIN_TAB::choose_best_splitting(double record_count,
         The plan for the chosen key has not been found in the cache.
         Build a new plan and save info on it in the cache
       */
-      table_map all_table_map= (1 << join->table_count) - 1;
+      table_map all_table_map= (((table_map) 1) << join->table_count) - 1;
       reset_validity_vars_for_keyuses(best_key_keyuse_ext_start, best_table,
                                       best_key, remaining_tables, true);
       choose_plan(join, all_table_map & ~join->const_table_map);

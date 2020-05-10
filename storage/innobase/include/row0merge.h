@@ -1,7 +1,7 @@
 /*****************************************************************************
 
 Copyright (c) 2005, 2016, Oracle and/or its affiliates. All Rights Reserved.
-Copyright (c) 2015, 2019, MariaDB Corporation.
+Copyright (c) 2015, 2020, MariaDB Corporation.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License as published by the Free Software
@@ -203,34 +203,6 @@ row_merge_file_destroy_low(
 	const pfs_os_file_t&	fd);	/*!< in: merge file descriptor */
 
 /*********************************************************************//**
-Provide a new pathname for a table that is being renamed if it belongs to
-a file-per-table tablespace.  The caller is responsible for freeing the
-memory allocated for the return value.
-@return new pathname of tablespace file, or NULL if space = 0 */
-char*
-row_make_new_pathname(
-/*==================*/
-	dict_table_t*	table,		/*!< in: table to be renamed */
-	const char*	new_name)	/*!< in: new name */
-	MY_ATTRIBUTE((nonnull, warn_unused_result));
-
-/*********************************************************************//**
-Rename the tables in the data dictionary.  The data dictionary must
-have been locked exclusively by the caller, because the transaction
-will not be committed.
-@return error code or DB_SUCCESS */
-dberr_t
-row_merge_rename_tables_dict(
-/*=========================*/
-	dict_table_t*	old_table,	/*!< in/out: old table, renamed to
-					tmp_name */
-	dict_table_t*	new_table,	/*!< in/out: new table, renamed to
-					old_table->name */
-	const char*	tmp_name,	/*!< in: new name for old_table */
-	trx_t*		trx)		/*!< in/out: dictionary transaction */
-	MY_ATTRIBUTE((nonnull, warn_unused_result));
-
-/*********************************************************************//**
 Rename an index in the dictionary that was created. The data
 dictionary must have been locked exclusively by the caller, because
 the transaction will not be committed.
@@ -291,12 +263,6 @@ row_merge_drop_table(
 	trx_t*		trx,		/*!< in: transaction */
 	dict_table_t*	table)		/*!< in: table instance to drop */
 	MY_ATTRIBUTE((nonnull, warn_unused_result));
-
-/** Write an MLOG_INDEX_LOAD record to indicate in the redo-log
-that redo-logging of individual index pages was disabled, and
-the flushing of such pages to the data files was completed.
-@param[in]	index	an index tree on which redo logging was disabled */
-void row_merge_write_redo(const dict_index_t* index);
 
 /** Build indexes on a table by reading a clustered index, creating a temporary
 file containing index entries, merge sorting these index entries and inserting
@@ -489,7 +455,7 @@ row_merge_read_rec(
 	const mrec_t**		mrec,	/*!< out: pointer to merge record,
 					or NULL on end of list
 					(non-NULL on I/O error) */
-	offset_t*		offsets,/*!< out: offsets of mrec */
+	rec_offs*		offsets,/*!< out: offsets of mrec */
 	row_merge_block_t*	crypt_block, /*!< in: crypt buf or NULL */
 	ulint			space)	   /*!< in: space id */
 	MY_ATTRIBUTE((warn_unused_result));

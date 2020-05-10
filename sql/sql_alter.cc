@@ -25,6 +25,7 @@ Alter_info::Alter_info(const Alter_info &rhs, MEM_ROOT *mem_root)
   :drop_list(rhs.drop_list, mem_root),
   alter_list(rhs.alter_list, mem_root),
   key_list(rhs.key_list, mem_root),
+  alter_rename_key_list(rhs.alter_rename_key_list, mem_root),
   create_list(rhs.create_list, mem_root),
   check_constraint_list(rhs.check_constraint_list, mem_root),
   flags(rhs.flags), partition_flags(rhs.partition_flags),
@@ -46,6 +47,7 @@ Alter_info::Alter_info(const Alter_info &rhs, MEM_ROOT *mem_root)
   list_copy_and_replace_each_value(drop_list, mem_root);
   list_copy_and_replace_each_value(alter_list, mem_root);
   list_copy_and_replace_each_value(key_list, mem_root);
+  list_copy_and_replace_each_value(alter_rename_key_list, mem_root);
   list_copy_and_replace_each_value(create_list, mem_root);
   /* partition_names are not deeply copied currently */
 }
@@ -69,6 +71,10 @@ bool Alter_info::set_requested_algorithm(const LEX_CSTRING *str)
   return false;
 }
 
+void Alter_info::set_requested_algorithm(enum_alter_table_algorithm algo_val)
+{
+  requested_algorithm= algo_val;
+}
 
 bool Alter_info::set_requested_lock(const LEX_CSTRING *str)
 {
@@ -86,13 +92,16 @@ bool Alter_info::set_requested_lock(const LEX_CSTRING *str)
   return false;
 }
 
-const char* Alter_info::algorithm() const
+const char* Alter_info::algorithm_clause(THD *thd) const
 {
-  switch (requested_algorithm) {
+  switch (algorithm(thd)) {
   case ALTER_TABLE_ALGORITHM_INPLACE:
     return "ALGORITHM=INPLACE";
   case ALTER_TABLE_ALGORITHM_COPY:
     return "ALGORITHM=COPY";
+  case ALTER_TABLE_ALGORITHM_NONE:
+    DBUG_ASSERT(0);
+    /* Fall through */
   case ALTER_TABLE_ALGORITHM_DEFAULT:
     return "ALGORITHM=DEFAULT";
   case ALTER_TABLE_ALGORITHM_NOCOPY:
@@ -123,9 +132,6 @@ const char* Alter_info::lock() const
 bool Alter_info::supports_algorithm(THD *thd, enum_alter_inplace_result result,
                                     const Alter_inplace_info *ha_alter_info)
 {
-  if (requested_algorithm == Alter_info::ALTER_TABLE_ALGORITHM_DEFAULT)
-    requested_algorithm = (Alter_info::enum_alter_table_algorithm) thd->variables.alter_algorithm;
-
   switch (result) {
   case HA_ALTER_INPLACE_EXCLUSIVE_LOCK:
   case HA_ALTER_INPLACE_SHARED_LOCK:
@@ -134,16 +140,16 @@ bool Alter_info::supports_algorithm(THD *thd, enum_alter_inplace_result result,
      return false;
   case HA_ALTER_INPLACE_COPY_NO_LOCK:
   case HA_ALTER_INPLACE_COPY_LOCK:
-    if (requested_algorithm >= Alter_info::ALTER_TABLE_ALGORITHM_NOCOPY)
+    if (algorithm(thd) >= Alter_info::ALTER_TABLE_ALGORITHM_NOCOPY)
     {
-      ha_alter_info->report_unsupported_error(algorithm(),
+      ha_alter_info->report_unsupported_error(algorithm_clause(thd),
                                               "ALGORITHM=INPLACE");
       return true;
     }
     return false;
   case HA_ALTER_INPLACE_NOCOPY_NO_LOCK:
   case HA_ALTER_INPLACE_NOCOPY_LOCK:
-    if (requested_algorithm == Alter_info::ALTER_TABLE_ALGORITHM_INSTANT)
+    if (algorithm(thd) == Alter_info::ALTER_TABLE_ALGORITHM_INSTANT)
     {
       ha_alter_info->report_unsupported_error("ALGORITHM=INSTANT",
                                               "ALGORITHM=NOCOPY");
@@ -151,9 +157,9 @@ bool Alter_info::supports_algorithm(THD *thd, enum_alter_inplace_result result,
     }
     return false;
   case HA_ALTER_INPLACE_NOT_SUPPORTED:
-    if (requested_algorithm >= Alter_info::ALTER_TABLE_ALGORITHM_INPLACE)
+    if (algorithm(thd) >= Alter_info::ALTER_TABLE_ALGORITHM_INPLACE)
     {
-      ha_alter_info->report_unsupported_error(algorithm(),
+      ha_alter_info->report_unsupported_error(algorithm_clause(thd),
 					      "ALGORITHM=COPY");
       return true;
     }
@@ -174,7 +180,7 @@ bool Alter_info::supports_lock(THD *thd, enum_alter_inplace_result result,
   case HA_ALTER_INPLACE_EXCLUSIVE_LOCK:
     // If SHARED lock and no particular algorithm was requested, use COPY.
     if (requested_lock == Alter_info::ALTER_TABLE_LOCK_SHARED &&
-        requested_algorithm == Alter_info::ALTER_TABLE_ALGORITHM_DEFAULT &&
+        algorithm(thd) == Alter_info::ALTER_TABLE_ALGORITHM_DEFAULT &&
         thd->variables.alter_algorithm ==
                 Alter_info::ALTER_TABLE_ALGORITHM_DEFAULT)
          return false;
@@ -235,6 +241,14 @@ bool Alter_info::vers_prohibited(THD *thd) const
     }
   }
   return false;
+}
+
+Alter_info::enum_alter_table_algorithm
+Alter_info::algorithm(const THD *thd) const
+{
+  if (requested_algorithm == ALTER_TABLE_ALGORITHM_NONE)
+   return (Alter_info::enum_alter_table_algorithm) thd->variables.alter_algorithm;
+  return requested_algorithm;
 }
 
 
@@ -320,7 +334,8 @@ Alter_table_ctx::Alter_table_ctx(THD *thd, TABLE_LIST *table_list,
   }
 
   tmp_name.str= tmp_name_buff;
-  tmp_name.length= my_snprintf(tmp_name_buff, sizeof(tmp_name_buff), "%s-%lx_%llx",
+  tmp_name.length= my_snprintf(tmp_name_buff, sizeof(tmp_name_buff),
+                               "%s-alter-%lx-%llx",
                                tmp_file_prefix, current_pid, thd->thread_id);
   /* Safety fix for InnoDB */
   if (lower_case_table_names)
@@ -395,8 +410,8 @@ bool Sql_cmd_alter_table::execute(THD *thd)
   HA_CREATE_INFO create_info(lex->create_info);
   Alter_info alter_info(lex->alter_info, thd->mem_root);
   create_info.alter_info= &alter_info;
-  ulong priv=0;
-  ulong priv_needed= ALTER_ACL;
+  privilege_t priv(NO_ACL);
+  privilege_t priv_needed(ALTER_ACL);
   bool result;
 
   DBUG_ENTER("Sql_cmd_alter_table::execute");
@@ -505,9 +520,9 @@ bool Sql_cmd_alter_table::execute(THD *thd)
       (!thd->is_current_stmt_binlog_format_row() ||
        !thd->find_temporary_table(first_table)))
   {
-    WSREP_TO_ISOLATION_BEGIN_ALTER((lex->name.str ? select_lex->db.str : NULL),
-                                   (lex->name.str ? lex->name.str : NULL),
-                                   first_table, &alter_info);
+    WSREP_TO_ISOLATION_BEGIN_ALTER((lex->name.str ? select_lex->db.str : first_table->db.str),
+                                   (lex->name.str ? lex->name.str : first_table->table_name.str),
+                                   first_table, &alter_info, used_engine ? &create_info : NULL);
 
     thd->variables.auto_increment_offset = 1;
     thd->variables.auto_increment_increment = 1;
@@ -520,7 +535,7 @@ bool Sql_cmd_alter_table::execute(THD *thd)
                             &alter_info,
                             select_lex->order_list.elements,
                             select_lex->order_list.first,
-                            lex->ignore);
+                            lex->ignore, lex->if_exists());
 
   DBUG_RETURN(result);
 #ifdef WITH_WSREP

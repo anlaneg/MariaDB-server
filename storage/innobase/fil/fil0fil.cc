@@ -916,7 +916,7 @@ fil_mutex_enter_and_prepare_for_io(
 					os_thread_sleep(20000);
 					/* Flush tablespaces so that we can
 					close modified files in the LRU list */
-					fil_flush_file_spaces(FIL_TYPE_TABLESPACE);
+					fil_flush_file_spaces();
 
 					count++;
 					mutex_enter(&fil_system.mutex);
@@ -1722,7 +1722,7 @@ fil_write_flushed_lsn(
 		}
 
 		err = fil_write(page_id, 0, 0, srv_page_size, buf);
-		fil_flush_file_spaces(FIL_TYPE_TABLESPACE);
+		fil_flush_file_spaces();
 	}
 
 	aligned_free(buf);
@@ -1812,91 +1812,67 @@ fil_create_directory_for_tablename(
 	ut_free(path);
 }
 
-/** Write a log record about an operation on a tablespace file.
-@param[in]	type		MLOG_FILE_NAME or MLOG_FILE_DELETE
-or MLOG_FILE_CREATE2 or MLOG_FILE_RENAME2
-@param[in]	space_id	tablespace identifier
-@param[in]	first_page_no	first page number in the file
-@param[in]	path		file path
-@param[in]	new_path	if type is MLOG_FILE_RENAME2, the new name
-@param[in]	flags		if type is MLOG_FILE_CREATE2, the space flags
-@param[in,out]	mtr		mini-transaction */
-static
-void
-fil_op_write_log(
-	mlog_id_t	type,
-	ulint		space_id,
-	ulint		first_page_no,
-	const char*	path,
-	const char*	new_path,
-	ulint		flags,
-	mtr_t*		mtr)
+/** Write a log record about a file operation.
+@param type           file operation
+@param first_page_no  first page number in the file
+@param path           file path
+@param new_path       new file path for type=FILE_RENAME */
+inline void mtr_t::log_file_op(mfile_type_t type, ulint space_id,
+			       const char *path, const char *new_path)
 {
-	byte*		log_ptr;
-	ulint		len;
+  ut_ad((new_path != nullptr) == (type == FILE_RENAME));
+  ut_ad(!(byte(type) & 15));
 
-	ut_ad(first_page_no == 0 || type == MLOG_FILE_CREATE2);
-	ut_ad(fil_space_t::is_valid_flags(flags, space_id));
+  /* fil_name_parse() requires that there be at least one path
+  separator and that the file path end with ".ibd". */
+  ut_ad(strchr(path, OS_PATH_SEPARATOR) != NULL);
+  ut_ad(!strcmp(&path[strlen(path) - strlen(DOT_IBD)], DOT_IBD));
 
-	/* fil_name_parse() requires that there be at least one path
-	separator and that the file path end with ".ibd". */
-	ut_ad(strchr(path, OS_PATH_SEPARATOR) != NULL);
-	ut_ad(first_page_no /* trimming an undo tablespace */
-	      || !strcmp(&path[strlen(path) - strlen(DOT_IBD)], DOT_IBD));
+  flag_modified();
+  if (m_log_mode != MTR_LOG_ALL)
+    return;
+  m_last= nullptr;
 
-	log_ptr = mlog_open(mtr, 11 + 4 + 2 + 1);
+  const size_t len= strlen(path);
+  const size_t new_len= type == FILE_RENAME ? 1 + strlen(new_path) : 0;
+  ut_ad(len > 0);
+  byte *const log_ptr= m_log.open(1 + 3/*length*/ + 5/*space_id*/ +
+                                  1/*page_no=0*/);
+  byte *end= log_ptr + 1;
+  end= mlog_encode_varint(end, space_id);
+  *end++= 0;
+  if (UNIV_LIKELY(end + len + new_len >= &log_ptr[16]))
+  {
+    *log_ptr= type;
+    size_t total_len= len + new_len + end - log_ptr - 15;
+    if (total_len >= MIN_3BYTE)
+      total_len+= 2;
+    else if (total_len >= MIN_2BYTE)
+      total_len++;
+    end= mlog_encode_varint(log_ptr + 1, total_len);
+    end= mlog_encode_varint(end, space_id);
+    *end++= 0;
+  }
+  else
+  {
+    *log_ptr= static_cast<byte>(type | (end + len + new_len - &log_ptr[1]));
+    ut_ad(*log_ptr & 15);
+  }
 
-	if (log_ptr == NULL) {
-		/* Logging in mtr is switched off during crash recovery:
-		in that case mlog_open returns NULL */
-		return;
-	}
+  m_log.close(end);
 
-	log_ptr = mlog_write_initial_log_record_low(
-		type, space_id, first_page_no, log_ptr, mtr);
-
-	if (type == MLOG_FILE_CREATE2) {
-		mach_write_to_4(log_ptr, flags);
-		log_ptr += 4;
-	}
-
-	/* Let us store the strings as null-terminated for easier readability
-	and handling */
-
-	len = strlen(path) + 1;
-
-	mach_write_to_2(log_ptr, len);
-	log_ptr += 2;
-	mlog_close(mtr, log_ptr);
-
-	mlog_catenate_string(
-		mtr, reinterpret_cast<const byte*>(path), len);
-
-	switch (type) {
-	case MLOG_FILE_RENAME2:
-		ut_ad(strchr(new_path, OS_PATH_SEPARATOR) != NULL);
-		len = strlen(new_path) + 1;
-		log_ptr = mlog_open(mtr, 2 + len);
-		ut_a(log_ptr);
-		mach_write_to_2(log_ptr, len);
-		log_ptr += 2;
-		mlog_close(mtr, log_ptr);
-
-		mlog_catenate_string(
-			mtr, reinterpret_cast<const byte*>(new_path), len);
-		break;
-	case MLOG_FILE_NAME:
-	case MLOG_FILE_DELETE:
-	case MLOG_FILE_CREATE2:
-		break;
-	default:
-		ut_ad(0);
-	}
+  if (type == FILE_RENAME)
+  {
+    ut_ad(strchr(new_path, OS_PATH_SEPARATOR));
+    m_log.push(reinterpret_cast<const byte*>(path), uint32_t(len + 1));
+    m_log.push(reinterpret_cast<const byte*>(new_path), uint32_t(new_len));
+  }
+  else
+    m_log.push(reinterpret_cast<const byte*>(path), uint32_t(len));
 }
 
 /** Write redo log for renaming a file.
 @param[in]	space_id	tablespace id
-@param[in]	first_page_no	first page number in the file
 @param[in]	old_name	tablespace file name
 @param[in]	new_name	tablespace file name after renaming
 @param[in,out]	mtr		mini-transaction */
@@ -1904,16 +1880,12 @@ static
 void
 fil_name_write_rename_low(
 	ulint		space_id,
-	ulint		first_page_no,
 	const char*	old_name,
 	const char*	new_name,
 	mtr_t*		mtr)
 {
-	ut_ad(!is_predefined_tablespace(space_id));
-
-	fil_op_write_log(
-		MLOG_FILE_RENAME2,
-		space_id, first_page_no, old_name, new_name, 0, mtr);
+  ut_ad(!is_predefined_tablespace(space_id));
+  mtr->log_file_op(FILE_RENAME, space_id, old_name, new_name);
 }
 
 /** Write redo log for renaming a file.
@@ -1928,46 +1900,28 @@ fil_name_write_rename(
 {
 	mtr_t	mtr;
 	mtr.start();
-	fil_name_write_rename_low(space_id, 0, old_name, new_name, &mtr);
+	fil_name_write_rename_low(space_id, old_name, new_name, &mtr);
 	mtr.commit();
 	log_write_up_to(mtr.commit_lsn(), true);
 }
 
-/** Write MLOG_FILE_NAME for a file.
+/** Write FILE_MODIFY for a file.
 @param[in]	space_id	tablespace id
-@param[in]	first_page_no	first page number in the file
 @param[in]	name		tablespace file name
 @param[in,out]	mtr		mini-transaction */
 static
 void
 fil_name_write(
 	ulint		space_id,
-	ulint		first_page_no,
 	const char*	name,
 	mtr_t*		mtr)
 {
-	fil_op_write_log(
-		MLOG_FILE_NAME, space_id, first_page_no, name, NULL, 0, mtr);
-}
-/** Write MLOG_FILE_NAME for a file.
-@param[in]	space		tablespace
-@param[in]	first_page_no	first page number in the file
-@param[in]	file		tablespace file
-@param[in,out]	mtr		mini-transaction */
-static
-void
-fil_name_write(
-	const fil_space_t*	space,
-	ulint			first_page_no,
-	const fil_node_t*	file,
-	mtr_t*			mtr)
-{
-	fil_name_write(space->id, first_page_no, file->name, mtr);
+  ut_ad(!is_predefined_tablespace(space_id));
+  mtr->log_file_op(FILE_MODIFY, space_id, name);
 }
 
 /** Replay a file rename operation if possible.
 @param[in]	space_id	tablespace identifier
-@param[in]	first_page_no	first page number in the file
 @param[in]	name		old file name
 @param[in]	new_name	new file name
 @return	whether the operation was successfully applied
@@ -1976,12 +1930,9 @@ name was successfully renamed to new_name)  */
 bool
 fil_op_replay_rename(
 	ulint		space_id,
-	ulint		first_page_no,
 	const char*	name,
 	const char*	new_name)
 {
-	ut_ad(first_page_no == 0);
-
 	/* In order to replay the rename, the following must hold:
 	* The new name is not already used.
 	* A tablespace exists with the old name.
@@ -2249,15 +2200,11 @@ fil_close_tablespace(
 
 	/* Invalidate in the buffer pool all pages belonging to the
 	tablespace. Since we have set space->stop_new_ops = true, readahead
-	or ibuf merge can no longer read more pages of this tablespace to the
-	buffer pool. Thus we can clean the tablespace out of the buffer pool
+	can no longer read more pages of this tablespace to buf_pool.
+	Thus we can clean the tablespace out of buf_pool
 	completely and permanently. The flag stop_new_ops also prevents
 	fil_flush() from being applied to this tablespace. */
-
-	{
-		FlushObserver observer(space, trx, NULL);
-		buf_LRU_flush_or_remove_pages(id, &observer);
-	}
+	buf_LRU_flush_or_remove_pages(id, true);
 
 	/* If the free is successful, the X lock will be released before
 	the space memory data structure is freed. */
@@ -2306,14 +2253,9 @@ bool fil_table_accessible(const dict_table_t* table)
 
 /** Delete a tablespace and associated .ibd file.
 @param[in]	id		tablespace identifier
+@param[in]	if_exists	whether to ignore missing tablespace
 @return	DB_SUCCESS or error */
-dberr_t
-fil_delete_tablespace(
-	ulint id
-#ifdef BTR_CUR_HASH_ADAPT
-	, bool drop_ahi /*!< whether to drop the adaptive hash index */
-#endif /* BTR_CUR_HASH_ADAPT */
-	)
+dberr_t fil_delete_tablespace(ulint id, bool if_exists)
 {
 	char*		path = 0;
 	fil_space_t*	space = 0;
@@ -2324,19 +2266,20 @@ fil_delete_tablespace(
 		id, FIL_OPERATION_DELETE, &space, &path);
 
 	if (err != DB_SUCCESS) {
+		if (!if_exists) {
+			ib::error() << "Cannot delete tablespace " << id
+				    << " because it is not found"
+				       " in the tablespace memory cache.";
+		}
 
-		ib::error() << "Cannot delete tablespace " << id
-			<< " because it is not found in the tablespace"
-			" memory cache.";
-
-		return(err);
+		goto func_exit;
 	}
 
 	ut_a(space);
 	ut_a(path != 0);
 
 	/* IMPORTANT: Because we have set space::stop_new_ops there
-	can't be any new ibuf merges, reads or flushes. We are here
+	can't be any new reads or flushes. We are here
 	because node::n_pending was zero above. However, it is still
 	possible to have pending read and write requests:
 
@@ -2356,7 +2299,7 @@ fil_delete_tablespace(
 	To deal with potential read requests, we will check the
 	::stop_new_ops flag in fil_io(). */
 
-	buf_LRU_flush_or_remove_pages(id, NULL);
+	buf_LRU_flush_or_remove_pages(id, false);
 
 	/* If it is a delete then also delete any generated files, otherwise
 	when we drop the database the remove directory will fail. */
@@ -2366,9 +2309,9 @@ fil_delete_tablespace(
 		to be gone. */
 		mtr_t		mtr;
 
-		mtr_start(&mtr);
-		fil_op_write_log(MLOG_FILE_DELETE, id, 0, path, NULL, 0, &mtr);
-		mtr_commit(&mtr);
+		mtr.start();
+		mtr.log_file_op(FILE_DELETE, id, path);
+		mtr.commit();
 		/* Even if we got killed shortly after deleting the
 		tablespace file, the record must have already been
 		written to the redo log. */
@@ -2424,8 +2367,9 @@ fil_delete_tablespace(
 		err = DB_TABLESPACE_NOT_FOUND;
 	}
 
+func_exit:
 	ut_free(path);
-
+	ibuf_delete_for_discarded_space(id);
 	return(err);
 }
 
@@ -2444,18 +2388,6 @@ fil_space_t* fil_truncate_prepare(ulint space_id)
 	}
 	ut_ad(space != NULL);
 	return space;
-}
-
-/** Write log about an undo tablespace truncate operation. */
-void fil_truncate_log(fil_space_t* space, ulint size, mtr_t* mtr)
-{
-	/* Write a MLOG_FILE_CREATE2 record with the new size, so that
-	recovery and backup will ignore any preceding redo log records
-	for writing pages that are after the new end of the tablespace. */
-	ut_ad(UT_LIST_GET_LEN(space->chain) == 1);
-	const fil_node_t* file = UT_LIST_GET_FIRST(space->chain);
-	fil_op_write_log(MLOG_FILE_CREATE2, space->id, size, file->name,
-			 NULL, space->flags & ~FSP_FLAGS_MEM_MASK, mtr);
 }
 
 /*******************************************************************//**
@@ -2893,10 +2825,11 @@ err_exit:
 		page_zip_set_size(&page_zip, zip_size);
 		page_zip.data = page + srv_page_size;
 #ifdef UNIV_DEBUG
-		page_zip.m_start =
+		page_zip.m_start = 0;
 #endif /* UNIV_DEBUG */
-			page_zip.m_end = page_zip.m_nonempty =
-			page_zip.n_blobs = 0;
+		page_zip.m_end = 0;
+		page_zip.m_nonempty = 0;
+		page_zip.n_blobs = 0;
 
 		buf_flush_init_for_writing(NULL, page, &page_zip, false);
 
@@ -2948,10 +2881,7 @@ err_exit:
 					      false, true);
 		mtr_t mtr;
 		mtr.start();
-		fil_op_write_log(
-			MLOG_FILE_CREATE2, space_id, 0, node->name,
-			NULL, space->flags & ~FSP_FLAGS_MEM_MASK, &mtr);
-		fil_name_write(space, 0, node, &mtr);
+		mtr.log_file_op(FILE_CREATE, space_id, node->name);
 		mtr.commit();
 
 		node->find_metadata(file);
@@ -3051,8 +2981,6 @@ fil_ibd_open(
 		ut_ad(!srv_read_only_mode);
 		ut_ad(srv_log_file_size != 0);
 	}
-
-	ut_ad(fil_type_is_data(purpose));
 
 	/* Table flags can be ULINT_UNDEFINED if
 	dict_tf_to_fsp_flags_failure is set. */
@@ -3960,6 +3888,8 @@ inline void IORequest::set_fil_node(fil_node_t* node)
 @param[in] message	message for aio handler if non-sync aio
 			used, else ignored
 @param[in] ignore	whether to ignore out-of-bounds page_id
+@param[in] punch_hole	punch the hole to the file for page_compressed
+			tablespace
 @return DB_SUCCESS, or DB_TABLESPACE_DELETED
 	if we are trying to do i/o on a tablespace which does not exist */
 dberr_t
@@ -3972,7 +3902,8 @@ fil_io(
 	ulint			len,
 	void*			buf,
 	void*			message,
-	bool			ignore)
+	bool			ignore,
+	bool			punch_hole)
 {
 	os_offset_t		offset;
 	IORequest		req_type(type);
@@ -4084,8 +4015,7 @@ fil_io(
 
 	/* Open file if closed */
 	if (!fil_node_prepare_for_io(node, space)) {
-		if (fil_type_is_data(space->purpose)
-		    && fil_is_user_tablespace_id(space->id)) {
+		if (fil_is_user_tablespace_id(space->id)) {
 			mutex_exit(&fil_system.mutex);
 
 			if (!ignore) {
@@ -4111,11 +4041,7 @@ fil_io(
 		ut_a(0);
 	}
 
-	/* Check that at least the start offset is within the bounds of a
-	single-table tablespace, including rollback tablespaces. */
-	if (node->size <= cur_page_no
-	    && space->id != TRX_SYS_SPACE
-	    && fil_type_is_data(space->purpose)) {
+	if (space->id && node->size <= cur_page_no) {
 		if (ignore) {
 			/* If we can tolerate the non-existent pages, we
 			should return with DB_ERROR and let caller decide
@@ -4151,13 +4077,20 @@ fil_io(
 	      || !fil_is_user_tablespace_id(page_id.space())
 	      || offset == page_id.page_no() * zip_size);
 
-	/* Queue the aio request */
-	dberr_t err = os_aio(
-		req_type,
-		mode, name, node->handle, buf, offset, len,
-		space->purpose != FIL_TYPE_TEMPORARY
-		&& srv_read_only_mode,
-		node, message);
+	dberr_t err = DB_SUCCESS;
+
+	if (punch_hole) {
+		/* Punch the hole to the file */
+		err = os_file_punch_hole(node->handle, offset, len);
+	} else {
+		/* Queue the aio request */
+		err = os_aio(
+			req_type,
+			mode, name, node->handle, buf, offset, len,
+			space->purpose != FIL_TYPE_TEMPORARY
+			&& srv_read_only_mode,
+			node, message);
+	}
 
 	/* We an try to recover the page from the double write buffer if
 	the decompression fails or the page is corrupt. */
@@ -4222,8 +4155,8 @@ void fil_aio_callback(os_aio_userdata_t *data)
 	}
 
 	ulint offset = bpage->id.page_no();
-	if (dblwr && bpage->init_on_flush) {
-		bpage->init_on_flush = false;
+	if (dblwr && bpage->status == buf_page_t::INIT_ON_FLUSH) {
+		bpage->status = buf_page_t::NORMAL;
 		dblwr = false;
 	}
 	dberr_t err = buf_page_io_complete(bpage, dblwr);
@@ -4287,16 +4220,11 @@ fil_flush(fil_space_t* space)
 }
 
 /** Flush to disk the writes in file spaces of the given type
-possibly cached by the OS.
-@param[in]	purpose	FIL_TYPE_TABLESPACE */
-void
-fil_flush_file_spaces(
-	fil_type_t	purpose)
+possibly cached by the OS. */
+void fil_flush_file_spaces()
 {
 	ulint*		space_ids;
 	ulint		n_space_ids;
-
-	ut_ad(purpose == FIL_TYPE_TABLESPACE);
 
 	mutex_enter(&fil_system.mutex);
 
@@ -4317,7 +4245,7 @@ fil_flush_file_spaces(
 	     end = fil_system.unflushed_spaces.end();
 	     it != end; ++it) {
 
-		if (it->purpose == purpose && !it->is_stopping()) {
+		if (it->purpose == FIL_TYPE_TABLESPACE && !it->is_stopping()) {
 			space_ids[n_space_ids++] = it->id;
 		}
 	}
@@ -4373,9 +4301,7 @@ struct	Check {
 /******************************************************************//**
 Checks the consistency of the tablespace cache.
 @return true if ok */
-bool
-fil_validate(void)
-/*==============*/
+bool fil_validate()
 {
 	fil_space_t*	space;
 	fil_node_t*	fil_node;
@@ -4416,39 +4342,6 @@ fil_validate(void)
 	return(true);
 }
 
-/********************************************************************//**
-Returns true if file address is undefined.
-@return true if undefined */
-bool
-fil_addr_is_null(
-/*=============*/
-	fil_addr_t	addr)	/*!< in: address */
-{
-	return(addr.page == FIL_NULL);
-}
-
-/********************************************************************//**
-Get the predecessor of a file page.
-@return FIL_PAGE_PREV */
-ulint
-fil_page_get_prev(
-/*==============*/
-	const byte*	page)	/*!< in: file page */
-{
-	return(mach_read_from_4(page + FIL_PAGE_PREV));
-}
-
-/********************************************************************//**
-Get the successor of a file page.
-@return FIL_PAGE_NEXT */
-ulint
-fil_page_get_next(
-/*==============*/
-	const byte*	page)	/*!< in: file page */
-{
-	return(mach_read_from_4(page + FIL_PAGE_NEXT));
-}
-
 /*********************************************************************//**
 Sets the file page type. */
 void
@@ -4485,80 +4378,6 @@ fil_delete_file(
 	}
 }
 
-/** Generate redo log for swapping two .ibd files
-@param[in]	old_table	old table
-@param[in]	new_table	new table
-@param[in]	tmp_name	temporary table name
-@param[in,out]	mtr		mini-transaction
-@return innodb error code */
-dberr_t
-fil_mtr_rename_log(
-	const dict_table_t*	old_table,
-	const dict_table_t*	new_table,
-	const char*		tmp_name,
-	mtr_t*			mtr)
-{
-	ut_ad(old_table->space != fil_system.temp_space);
-	ut_ad(new_table->space != fil_system.temp_space);
-	ut_ad(old_table->space->id == old_table->space_id);
-	ut_ad(new_table->space->id == new_table->space_id);
-
-	/* If neither table is file-per-table,
-	there will be no renaming of files. */
-	if (!old_table->space_id && !new_table->space_id) {
-		return(DB_SUCCESS);
-	}
-
-	const bool has_data_dir = DICT_TF_HAS_DATA_DIR(old_table->flags);
-
-	if (old_table->space_id) {
-		char*	tmp_path = fil_make_filepath(
-			has_data_dir ? old_table->data_dir_path : NULL,
-			tmp_name, IBD, has_data_dir);
-		if (tmp_path == NULL) {
-			return(DB_OUT_OF_MEMORY);
-		}
-
-		const char* old_path = old_table->space->chain.start->name;
-		/* Temp filepath must not exist. */
-		dberr_t err = fil_rename_tablespace_check(
-			old_path, tmp_path, !old_table->space);
-		if (err != DB_SUCCESS) {
-			ut_free(tmp_path);
-			return(err);
-		}
-
-		fil_name_write_rename_low(
-			old_table->space_id, 0, old_path, tmp_path, mtr);
-
-		ut_free(tmp_path);
-	}
-
-	if (new_table->space_id) {
-		const char* new_path = new_table->space->chain.start->name;
-		char* old_path = fil_make_filepath(
-			has_data_dir ? old_table->data_dir_path : NULL,
-			old_table->name.m_name, IBD, has_data_dir);
-
-		/* Destination filepath must not exist unless this ALTER
-		TABLE starts and ends with a file_per-table tablespace. */
-		if (!old_table->space_id) {
-			dberr_t err = fil_rename_tablespace_check(
-				new_path, old_path, !new_table->space);
-			if (err != DB_SUCCESS) {
-				ut_free(old_path);
-				return(err);
-			}
-		}
-
-		fil_name_write_rename_low(
-			new_table->space_id, 0, new_path, old_path, mtr);
-		ut_free(old_path);
-	}
-
-	return DB_SUCCESS;
-}
-
 #ifdef UNIV_DEBUG
 /** Check that a tablespace is valid for mtr_commit().
 @param[in]	space	persistent tablespace that has been changed */
@@ -4582,7 +4401,7 @@ fil_space_validate_for_mtr_commit(
 }
 #endif /* UNIV_DEBUG */
 
-/** Write a MLOG_FILE_NAME record for a persistent tablespace.
+/** Write a FILE_MODIFY record for a persistent tablespace.
 @param[in]	space	tablespace
 @param[in,out]	mtr	mini-transaction */
 static
@@ -4592,7 +4411,7 @@ fil_names_write(
 	mtr_t*			mtr)
 {
 	ut_ad(UT_LIST_GET_LEN(space->chain) == 1);
-	fil_name_write(space, 0, UT_LIST_GET_FIRST(space->chain), mtr);
+	fil_name_write(space->id, UT_LIST_GET_FIRST(space->chain)->name, mtr);
 }
 
 /** Note that a non-predefined persistent tablespace has been modified
@@ -4604,45 +4423,45 @@ fil_names_dirty(
 {
 	ut_ad(log_mutex_own());
 	ut_ad(recv_recovery_is_on());
-	ut_ad(log_sys.lsn != 0);
+	ut_ad(log_sys.get_lsn() != 0);
 	ut_ad(space->max_lsn == 0);
 	ut_d(fil_space_validate_for_mtr_commit(space));
 
 	UT_LIST_ADD_LAST(fil_system.named_spaces, space);
-	space->max_lsn = log_sys.lsn;
+	space->max_lsn = log_sys.get_lsn();
 }
 
-/** Write MLOG_FILE_NAME records when a non-predefined persistent
+/** Write FILE_MODIFY records when a non-predefined persistent
 tablespace was modified for the first time since the latest
 fil_names_clear().
-@param[in,out]	space	tablespace
-@param[in,out]	mtr	mini-transaction */
-void
-fil_names_dirty_and_write(
-	fil_space_t*	space,
-	mtr_t*		mtr)
+@param[in,out]	space	tablespace */
+void fil_names_dirty_and_write(fil_space_t* space)
 {
 	ut_ad(log_mutex_own());
 	ut_d(fil_space_validate_for_mtr_commit(space));
-	ut_ad(space->max_lsn == log_sys.lsn);
+	ut_ad(space->max_lsn == log_sys.get_lsn());
 
 	UT_LIST_ADD_LAST(fil_system.named_spaces, space);
-	fil_names_write(space, mtr);
+	mtr_t mtr;
+	mtr.start();
+	fil_names_write(space, &mtr);
 
 	DBUG_EXECUTE_IF("fil_names_write_bogus",
 			{
 				char bogus_name[] = "./test/bogus file.ibd";
 				os_normalize_path(bogus_name);
 				fil_name_write(
-					SRV_SPACE_ID_UPPER_BOUND, 0,
-					bogus_name, mtr);
+					SRV_SPACE_ID_UPPER_BOUND,
+					bogus_name, &mtr);
 			});
+
+	mtr.commit_files();
 }
 
 /** On a log checkpoint, reset fil_names_dirty_and_write() flags
-and write out MLOG_FILE_NAME and MLOG_CHECKPOINT if needed.
+and write out FILE_MODIFY and FILE_CHECKPOINT if needed.
 @param[in]	lsn		checkpoint LSN
-@param[in]	do_write	whether to always write MLOG_CHECKPOINT
+@param[in]	do_write	whether to always write FILE_CHECKPOINT
 @return whether anything was written to the redo log
 @retval false	if no flags were set and nothing written
 @retval true	if anything was written to the redo log */
@@ -4652,7 +4471,7 @@ fil_names_clear(
 	bool	do_write)
 {
 	mtr_t	mtr;
-	ulint	mtr_checkpoint_size = LOG_CHECKPOINT_FREE_PER_THREAD;
+	ulint	mtr_checkpoint_size = RECV_SCAN_SIZE - 1;
 
 	DBUG_EXECUTE_IF(
 		"increase_mtr_checkpoint_size",
@@ -4662,15 +4481,18 @@ fil_names_clear(
 	ut_ad(log_mutex_own());
 	ut_ad(lsn);
 
-	if (log_sys.append_on_checkpoint) {
-		mtr_write_log(log_sys.append_on_checkpoint);
-		do_write = true;
-	}
-
 	mtr.start();
 
 	for (fil_space_t* space = UT_LIST_GET_FIRST(fil_system.named_spaces);
 	     space != NULL; ) {
+		if (mtr.get_log()->size()
+		    + (3 + 5 + 1) + strlen(space->chain.start->name)
+		    >= mtr_checkpoint_size) {
+			/* Prevent log parse buffer overflow */
+			mtr.commit_files();
+			mtr.start();
+		}
+
 		fil_space_t*	next = UT_LIST_GET_NEXT(named_spaces, space);
 
 		ut_ad(space->max_lsn > 0);
@@ -4691,19 +4513,6 @@ fil_names_clear(
 
 		fil_names_write(space, &mtr);
 		do_write = true;
-
-		const mtr_buf_t* mtr_log = mtr_get_log(&mtr);
-
-		/** If the mtr buffer size exceeds the size of
-		LOG_CHECKPOINT_FREE_PER_THREAD then commit the multi record
-		mini-transaction, start the new mini-transaction to
-		avoid the parsing buffer overflow error during recovery. */
-
-		if (mtr_log->size() > mtr_checkpoint_size) {
-			ut_ad(mtr_log->size() < (RECV_PARSING_BUF_SIZE / 2));
-			mtr.commit_files();
-			mtr.start();
-		}
 
 		space = next;
 	}

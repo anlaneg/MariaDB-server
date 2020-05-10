@@ -338,9 +338,11 @@ bool THD::open_temporary_table(TABLE_LIST *tl)
     have invalid db or table name.
     Instead THD::open_tables() should be used.
   */
-  DBUG_ASSERT(!tl->derived && !tl->schema_table);
+  DBUG_ASSERT(!tl->derived);
+  DBUG_ASSERT(!tl->schema_table);
+  DBUG_ASSERT(has_temporary_tables());
 
-  if (tl->open_type == OT_BASE_ONLY || !has_temporary_tables())
+  if (tl->open_type == OT_BASE_ONLY)
   {
     DBUG_PRINT("info", ("skip_temporary is set or no temporary tables"));
     DBUG_RETURN(false);
@@ -452,10 +454,13 @@ bool THD::open_temporary_table(TABLE_LIST *tl)
 */
 bool THD::open_temporary_tables(TABLE_LIST *tl)
 {
+  TABLE_LIST *first_not_own;
   DBUG_ENTER("THD::open_temporary_tables");
 
-  TABLE_LIST *first_not_own= lex->first_not_own_table();
+  if (!has_temporary_tables())
+    DBUG_RETURN(0);
 
+  first_not_own= lex->first_not_own_table();
   for (TABLE_LIST *table= tl; table && table != first_not_own;
        table= table->next_global)
   {
@@ -748,11 +753,7 @@ void THD::mark_tmp_tables_as_free_for_reuse()
     while ((table= tables_it++))
     {
       if ((table->query_id == query_id) && !table->open_by_handler)
-      {
-        if (table->update_handler)
-          table->delete_update_handler();
         mark_tmp_table_as_free_for_reuse(table);
-      }
     }
   }
 
@@ -872,7 +873,7 @@ void THD::restore_tmp_table_share(TMP_TABLE_SHARE *share)
   @return false                       Temporary tables exist
           true                        No temporary table exist
 */
-inline bool THD::has_temporary_tables()
+bool THD::has_temporary_tables()
 {
   DBUG_ENTER("THD::has_temporary_tables");
   bool result= (rgi_slave
@@ -955,7 +956,8 @@ TMP_TABLE_SHARE *THD::create_temporary_table(LEX_CUSTRING *frm,
   /* Create the table definition key for the temporary table. */
   key_length= create_tmp_table_def_key(key_cache, db, table_name);
 
-  if (!(share= (TMP_TABLE_SHARE *) my_malloc(sizeof(TMP_TABLE_SHARE) +
+  if (!(share= (TMP_TABLE_SHARE *) my_malloc(key_memory_table_share,
+                                             sizeof(TMP_TABLE_SHARE) +
                                              strlen(path) + 1 + key_length,
                                              MYF(MY_WME))))
   {
@@ -1002,7 +1004,8 @@ TMP_TABLE_SHARE *THD::create_temporary_table(LEX_CUSTRING *frm,
   if (!temporary_tables)
   {
     if ((temporary_tables=
-         (All_tmp_tables_list *) my_malloc(sizeof(All_tmp_tables_list),
+         (All_tmp_tables_list *) my_malloc(key_memory_table_share,
+                                           sizeof(All_tmp_tables_list),
                                            MYF(MY_WME))))
     {
       temporary_tables->empty();
@@ -1107,7 +1110,8 @@ TABLE *THD::open_temporary_table(TMP_TABLE_SHARE *share,
   DBUG_ENTER("THD::open_temporary_table");
 
 
-  if (!(table= (TABLE *) my_malloc(sizeof(TABLE), MYF(MY_WME))))
+  if (!(table= (TABLE *) my_malloc(key_memory_TABLE, sizeof(TABLE),
+                                   MYF(MY_WME))))
   {
     DBUG_RETURN(NULL);                          /* Out of memory */
   }
@@ -1125,21 +1129,17 @@ TABLE *THD::open_temporary_table(TMP_TABLE_SHARE *share,
 
   table->reginfo.lock_type= TL_WRITE;           /* Simulate locked */
   table->grant.privilege= TMP_TABLE_ACLS;
+  table->query_id= query_id;
   share->tmp_table= (table->file->has_transaction_manager() ?
                      TRANSACTIONAL_TMP_TABLE : NON_TRANSACTIONAL_TMP_TABLE);
   share->not_usable_by_query_cache= 1;
-
-  table->pos_in_table_list= 0;
-  table->query_id= query_id;
 
   /* Add table to the head of table list. */
   share->all_tmp_tables.push_front(table);
 
   /* Increment Slave_open_temp_table_definitions status variable count. */
   if (rgi_slave)
-  {
-    thread_safe_increment32(&slave_open_temp_tables);
-  }
+    slave_open_temp_tables++;
 
   DBUG_PRINT("tmptable", ("Opened table: '%s'.'%s  table: %p",
                           table->s->db.str,
@@ -1245,7 +1245,7 @@ void THD::close_temporary_table(TABLE *table)
     /* Natural invariant of temporary_tables */
     DBUG_ASSERT(slave_open_temp_tables || !temporary_tables);
     /* Decrement Slave_open_temp_table_definitions status variable count. */
-    thread_safe_decrement32(&slave_open_temp_tables);
+    slave_open_temp_tables--;
   }
 
   DBUG_VOID_RETURN;

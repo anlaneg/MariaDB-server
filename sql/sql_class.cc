@@ -35,7 +35,7 @@
 #include "sql_base.h"                           // close_thread_tables
 #include "sql_time.h"                         // date_time_format_copy
 #include "tztime.h"                           // MYSQL_TIME <-> my_time_t
-#include "sql_acl.h"                          // NO_ACCESS,
+#include "sql_acl.h"                          // NO_ACL,
                                               // acl_getroot_no_password
 #include "sql_base.h"
 #include "sql_handler.h"                      // mysql_ha_cleanup
@@ -175,7 +175,8 @@ Key::Key(const Key &rhs, MEM_ROOT *mem_root)
   columns(rhs.columns, mem_root),
   name(rhs.name),
   option_list(rhs.option_list),
-  generated(rhs.generated), invisible(false)
+  generated(rhs.generated), invisible(false),
+  without_overlaps(rhs.without_overlaps), period(rhs.period)
 {
   list_copy_and_replace_each_value(columns, mem_root);
 }
@@ -632,18 +633,20 @@ THD::THD(my_thread_id id, bool is_wsrep_applier)
   :Statement(&main_lex, &main_mem_root, STMT_CONVENTIONAL_EXECUTION,
              /* statement id */ 0),
    rli_fake(0), rgi_fake(0), rgi_slave(NULL),
-   protocol_text(this), protocol_binary(this),
-   m_current_stage_key(0),
+   protocol_text(this), protocol_binary(this), initial_status_var(0),
+   m_current_stage_key(0), m_psi(0),
    in_sub_stmt(0), log_all_errors(0),
    binlog_unsafe_warning_flags(0),
-   binlog_table_maps(0),
+   current_stmt_binlog_format(BINLOG_FORMAT_MIXED),
    bulk_param(0),
    table_map_for_update(0),
    m_examined_row_count(0),
    accessed_rows_and_keys(0),
    m_digest(NULL),
    m_statement_psi(NULL),
+   m_transaction_psi(NULL),
    m_idle_psi(NULL),
+   col_access(NO_ACL),
    thread_id(id),
    thread_dbug_id(id),
    os_thread_id(0),
@@ -742,8 +745,9 @@ THD::THD(my_thread_id id, bool is_wsrep_applier)
     the destructor works OK in case of an error. The main_mem_root
     will be re-initialized in init_for_queries().
   */
-  init_sql_alloc(&main_mem_root, "THD::main_mem_root",
-                 ALLOC_ROOT_MIN_BLOCK_SIZE, 0, MYF(MY_THREAD_SPECIFIC));
+  init_sql_alloc(key_memory_thd_main_mem_root,
+                 &main_mem_root, ALLOC_ROOT_MIN_BLOCK_SIZE, 0,
+                 MYF(MY_THREAD_SPECIFIC));
 
   /*
     Allocation of user variables for binary logging is always done with main
@@ -755,7 +759,6 @@ THD::THD(my_thread_id id, bool is_wsrep_applier)
   thread_stack= 0;
   scheduler= thread_scheduler;                 // Will be fixed later
   event_scheduler.data= 0;
-  event_scheduler.m_psi= 0;
   skip_wait_timeout= false;
   catalog= (char*)"std"; // the only catalog we have for now
   main_security_ctx.init();
@@ -766,7 +769,6 @@ THD::THD(my_thread_id id, bool is_wsrep_applier)
   count_cuted_fields= CHECK_FIELD_IGNORE;
   killed= NOT_KILLED;
   killed_err= 0;
-  col_access=0;
   is_slave_error= thread_specific_used= FALSE;
   my_hash_clear(&handler_tables_hash);
   my_hash_clear(&ull_hash);
@@ -793,9 +795,10 @@ THD::THD(my_thread_id id, bool is_wsrep_applier)
   query_name_consts= 0;
   semisync_info= 0;
   db_charset= global_system_variables.collation_database;
-  bzero(ha_data, sizeof(ha_data));
+  bzero((void*) ha_data, sizeof(ha_data));
   mysys_var=0;
   binlog_evt_union.do_union= FALSE;
+  binlog_table_maps= FALSE;
   enable_slow_log= 0;
   durability_property= HA_REGULAR_DURABILITY;
 
@@ -839,16 +842,18 @@ THD::THD(my_thread_id id, bool is_wsrep_applier)
   reset_open_tables_state(this);
 
   init();
+  debug_sync_init_thread(this);
 #if defined(ENABLED_PROFILING)
   profiling.set_thd(this);
 #endif
   user_connect=(USER_CONN *)0;
-  my_hash_init(&user_vars, system_charset_info, USER_VARS_HASH_SIZE, 0, 0,
-               (my_hash_get_key) get_var_key,
+  my_hash_init(key_memory_user_var_entry, &user_vars, system_charset_info,
+               USER_VARS_HASH_SIZE, 0, 0, (my_hash_get_key) get_var_key,
                (my_hash_free_key) free_user_var, HASH_THREAD_SPECIFIC);
-  my_hash_init(&sequences, system_charset_info, SEQUENCES_HASH_SIZE, 0, 0,
-               (my_hash_get_key) get_sequence_last_key,
-               (my_hash_free_key) free_sequence_last, HASH_THREAD_SPECIFIC);
+  my_hash_init(PSI_INSTRUMENT_ME, &sequences, system_charset_info,
+               SEQUENCES_HASH_SIZE, 0, 0, (my_hash_get_key)
+               get_sequence_last_key, (my_hash_free_key) free_sequence_last,
+               HASH_THREAD_SPECIFIC);
 
   sp_proc_cache= NULL;
   sp_func_cache= NULL;
@@ -857,7 +862,7 @@ THD::THD(my_thread_id id, bool is_wsrep_applier)
 
   /* For user vars replication*/
   if (opt_bin_log)
-    my_init_dynamic_array(&user_var_events,
+    my_init_dynamic_array(key_memory_user_var_entry, &user_var_events,
 			  sizeof(BINLOG_USER_VAR_EVENT *), 16, 16, MYF(0));
   else
     bzero((char*) &user_var_events, sizeof(user_var_events));
@@ -885,7 +890,8 @@ THD::THD(my_thread_id id, bool is_wsrep_applier)
   m_token_array= NULL;
   if (max_digest_length > 0)
   {
-    m_token_array= (unsigned char*) my_malloc(max_digest_length,
+    m_token_array= (unsigned char*) my_malloc(PSI_INSTRUMENT_ME,
+                                              max_digest_length,
                                               MYF(MY_WME|MY_THREAD_SPECIFIC));
   }
 
@@ -1185,18 +1191,8 @@ void *thd_memdup(MYSQL_THD thd, const void* str, size_t size)
 extern "C"
 void thd_get_xid(const MYSQL_THD thd, MYSQL_XID *xid)
 {
-#ifdef WITH_WSREP
-  if (!thd->wsrep_xid.is_null())
-  {
-    *xid = *(MYSQL_XID *) &thd->wsrep_xid;
-    return;
-  }
-#endif /* WITH_WSREP */
-  *xid= thd->transaction.xid_state.is_explicit_XA() ?
-        *(MYSQL_XID *) thd->transaction.xid_state.get_xid() :
-        *(MYSQL_XID *) &thd->transaction.implicit_xid;
+  *xid = *(MYSQL_XID *) thd->get_xid();
 }
-
 
 extern "C"
 my_time_t thd_TIME_to_gmt_sec(MYSQL_THD thd, const MYSQL_TIME *ltime,
@@ -1218,11 +1214,6 @@ void thd_gmt_sec_to_TIME(MYSQL_THD thd, MYSQL_TIME *ltime, my_time_t t)
 
 
 #ifdef _WIN32
-extern "C"   THD *_current_thd_noinline(void)
-{
-  return my_pthread_getspecific_ptr(THD*,THR_THD);
-}
-
 extern "C" my_thread_id next_thread_id_noinline()
 {
 #undef next_thread_id
@@ -1321,17 +1312,10 @@ void THD::init()
   else
     variables.option_bits&= ~OPTION_BIN_LOG;
 
-  variables.sql_log_bin_off= 0;
-
   select_commands= update_commands= other_commands= 0;
   /* Set to handle counting of aborted connections */
   userstat_running= opt_userstat_running;
   last_global_update_time= current_connect_time= time(NULL);
-#if defined(ENABLED_DEBUG_SYNC)
-  /* Initialize the Debug Sync Facility. See debug_sync.cc. */
-  debug_sync_init_thread(this);
-#endif /* defined(ENABLED_DEBUG_SYNC) */
-
 #ifndef EMBEDDED_LIBRARY
   session_tracker.enable(this);
 #endif //EMBEDDED_LIBRARY
@@ -1448,12 +1432,13 @@ void THD::change_user(void)
 
   init();
   stmt_map.reset();
-  my_hash_init(&user_vars, system_charset_info, USER_VARS_HASH_SIZE, 0, 0,
-               (my_hash_get_key) get_var_key,
-               (my_hash_free_key) free_user_var, 0);
-  my_hash_init(&sequences, system_charset_info, SEQUENCES_HASH_SIZE, 0, 0,
-               (my_hash_get_key) get_sequence_last_key,
-               (my_hash_free_key) free_sequence_last, HASH_THREAD_SPECIFIC);
+  my_hash_init(key_memory_user_var_entry, &user_vars, system_charset_info,
+               USER_VARS_HASH_SIZE, 0, 0, (my_hash_get_key) get_var_key,
+               (my_hash_free_key) free_user_var, HASH_THREAD_SPECIFIC);
+  my_hash_init(key_memory_user_var_entry, &sequences, system_charset_info,
+               SEQUENCES_HASH_SIZE, 0, 0, (my_hash_get_key)
+               get_sequence_last_key, (my_hash_free_key) free_sequence_last,
+               HASH_THREAD_SPECIFIC);
   sp_cache_clear(&sp_proc_cache);
   sp_cache_clear(&sp_func_cache);
   sp_cache_clear(&sp_package_spec_cache);
@@ -1490,7 +1475,8 @@ bool THD::set_db(const LEX_CSTRING *new_db)
     const char *tmp= NULL;
     if (new_db->str)
     {
-      if (!(tmp= my_strndup(new_db->str, new_db->length, MYF(MY_WME | ME_FATAL))))
+      if (!(tmp= my_strndup(key_memory_THD_db, new_db->str, new_db->length,
+                            MYF(MY_WME | ME_FATAL))))
         result= 1;
     }
 
@@ -1581,11 +1567,6 @@ void THD::cleanup(void)
   }
   wt_thd_destroy(&transaction.wt);
 
-#if defined(ENABLED_DEBUG_SYNC)
-  /* End the Debug Sync Facility. See debug_sync.cc. */
-  debug_sync_end_thread(this);
-#endif /* defined(ENABLED_DEBUG_SYNC) */
-
   my_hash_free(&user_vars);
   my_hash_free(&sequences);
   sp_cache_clear(&sp_proc_cache);
@@ -1639,6 +1620,7 @@ void THD::free_connection()
 #if defined(ENABLED_PROFILING)
   profiling.restart();                          // Reset profiling
 #endif
+  debug_sync_reset_thread(this);
 }
 
 /*
@@ -1682,6 +1664,8 @@ THD::~THD()
   DBUG_ENTER("~THD()");
   /* Make sure threads are not available via server_threads.  */
   assert_not_linked();
+  if (m_psi)
+    PSI_CALL_set_thread_THD(m_psi, 0);
 
   /*
     In error cases, thd may not be current thd. We have to fix this so
@@ -1745,6 +1729,7 @@ THD::~THD()
     lf_hash_put_pins(tdc_hash_pins);
   if (xid_hash_pins)
     lf_hash_put_pins(xid_hash_pins);
+  debug_sync_end_thread(this);
   /* Ensure everything is freed */
   status_var.local_memory_used-= sizeof(THD);
 
@@ -2162,7 +2147,7 @@ void THD::reset_killed()
   the structure for the net buffer
 */
 
-bool THD::store_globals()
+void THD::store_globals()
 {
   /*
     Assert that thread_stack is initialized: it's necessary to be able
@@ -2170,8 +2155,7 @@ bool THD::store_globals()
   */
   DBUG_ASSERT(thread_stack);
 
-  if (set_current_thd(this))
-    return 1;
+  set_current_thd(this);
   /*
     mysys_var is concurrently readable by a killer thread.
     It is protected by LOCK_thd_kill, it is not needed to lock while the
@@ -2213,8 +2197,6 @@ bool THD::store_globals()
     created in another thread
   */
   thr_lock_info_init(&lock_info, mysys_var);
-
-  return 0;
 }
 
 /**
@@ -2232,11 +2214,6 @@ void THD::reset_globals()
   /* Undocking the thread specific data. */
   set_current_thd(0);
   net.thd= 0;
-}
-
-bool THD::trace_started()
-{
-  return opt_trace.is_started();
 }
 
 /*
@@ -3026,7 +3003,8 @@ int select_send::send_data(List<Item> &items)
 
   thd->inc_sent_row_count(1);
 
-  if (thd->vio_ok())
+  /* Don't return error if disconnected, only if write fails */
+  if (likely(thd->vio_ok()))
     DBUG_RETURN(protocol->write());
 
   DBUG_RETURN(0);
@@ -3929,12 +3907,12 @@ Statement_map::Statement_map() :
     START_STMT_HASH_SIZE = 16,
     START_NAME_HASH_SIZE = 16
   };
-  my_hash_init(&st_hash, &my_charset_bin, START_STMT_HASH_SIZE, 0, 0,
-               get_statement_id_as_hash_key,
+  my_hash_init(key_memory_prepared_statement_map, &st_hash, &my_charset_bin,
+               START_STMT_HASH_SIZE, 0, 0, get_statement_id_as_hash_key,
                delete_statement_as_hash_key, MYF(0));
-  my_hash_init(&names_hash, system_charset_info, START_NAME_HASH_SIZE, 0, 0,
+  my_hash_init(key_memory_prepared_statement_map, &names_hash, system_charset_info, START_NAME_HASH_SIZE, 0, 0,
                (my_hash_get_key) get_stmt_name_hash_key,
-               NULL,MYF(0));
+               NULL, MYF(0));
 }
 
 
@@ -4292,10 +4270,10 @@ void Security_context::init()
   host= user= ip= external_user= 0;
   host_or_ip= "connecting host";
   priv_user[0]= priv_host[0]= proxy_user[0]= priv_role[0]= '\0';
-  master_access= 0;
+  master_access= NO_ACL;
   password_expired= false;
 #ifndef NO_EMBEDDED_ACCESS_CHECKS
-  db_access= NO_ACCESS;
+  db_access= NO_ACL;
 #endif
 }
 
@@ -4330,7 +4308,7 @@ void Security_context::skip_grants()
 {
   /* privileges for the user are unknown everything is allowed */
   host_or_ip= (char *)"";
-  master_access= ~NO_ACCESS;
+  master_access= ALL_KNOWN_ACL;
   *priv_user= *priv_host= '\0';
   password_expired= false;
 }
@@ -4338,15 +4316,16 @@ void Security_context::skip_grants()
 
 bool Security_context::set_user(char *user_arg)
 {
-  my_free((char*) user);
-  user= my_strdup(user_arg, MYF(0));
+  my_free(const_cast<char*>(user));
+  user= my_strdup(key_memory_MPVIO_EXT_auth_info, user_arg, MYF(0));
   return user == 0;
 }
 
-bool Security_context::check_access(ulong want_access, bool match_any)
+bool Security_context::check_access(const privilege_t want_access,
+                                    bool match_any)
 {
   DBUG_ENTER("Security_context::check_access");
-  DBUG_RETURN((match_any ? (master_access & want_access)
+  DBUG_RETURN((match_any ? (master_access & want_access) != NO_ACL
                          : ((master_access & want_access) == want_access)));
 }
 
@@ -4826,6 +4805,7 @@ MYSQL_THD create_background_thd()
   auto thd_mysysvar= pthread_getspecific(THR_KEY_mysys);
   auto thd= new THD(0);
   pthread_setspecific(THR_KEY_mysys, save_mysysvar);
+  thd->set_psi(PSI_CALL_get_thread());
 
   /*
     Workaround the adverse effect of incrementing thread_count
@@ -5691,6 +5671,7 @@ void THD::leave_locked_tables_mode()
 {
   if (locked_tables_mode == LTM_LOCK_TABLES)
   {
+    DBUG_ASSERT(current_backup_stage == BACKUP_FINISHED);
     /*
       When leaving LOCK TABLES mode we have to change the duration of most
       of the metadata locks being held, except for HANDLER and GRL locks,
@@ -5848,8 +5829,9 @@ int THD::decide_logging_format(TABLE_LIST *tables)
 {
   DBUG_ENTER("THD::decide_logging_format");
   DBUG_PRINT("info", ("Query: %.*s", (uint) query_length(), query()));
-  DBUG_PRINT("info", ("variables.binlog_format: %lu",
-                      variables.binlog_format));
+  DBUG_PRINT("info", ("binlog_format: %lu", (ulong) variables.binlog_format));
+  DBUG_PRINT("info", ("current_stmt_binlog_format: %lu",
+                      (ulong) current_stmt_binlog_format));
   DBUG_PRINT("info", ("lex->get_stmt_unsafe_flags(): 0x%x",
                       lex->get_stmt_unsafe_flags()));
 
@@ -5872,18 +5854,14 @@ int THD::decide_logging_format(TABLE_LIST *tables)
       DBUG_RETURN(-1);
     }
   }
+#endif /* WITH_WSREP */
 
   if ((WSREP_EMULATE_BINLOG_NNULL(this) ||
-       (mysql_bin_log.is_open() && (variables.option_bits & OPTION_BIN_LOG))) &&
+       (mysql_bin_log.is_open() && 
+        (variables.option_bits & OPTION_BIN_LOG))) &&
       !(wsrep_binlog_format() == BINLOG_FORMAT_STMT &&
         !binlog_filter->db_ok(db.str)))
-#else
-  if (mysql_bin_log.is_open() && (variables.option_bits & OPTION_BIN_LOG) &&
-      !(wsrep_binlog_format() == BINLOG_FORMAT_STMT &&
-        !binlog_filter->db_ok(db.str)))
-#endif /* WITH_WSREP */
   {
-
     if (is_bulk_op())
     {
       if (wsrep_binlog_format() == BINLOG_FORMAT_STMT)
@@ -5926,6 +5904,7 @@ int THD::decide_logging_format(TABLE_LIST *tables)
     bool has_auto_increment_write_tables_not_first= FALSE;
     bool found_first_not_own_table= FALSE;
     bool has_write_tables_with_unsafe_statements= FALSE;
+    bool blackhole_table_found= 0;
 
     /*
       A pointer to a previous table that was changed.
@@ -6051,6 +6030,10 @@ int THD::decide_logging_format(TABLE_LIST *tables)
         if (prev_write_table && prev_write_table->file->ht !=
             table->file->ht)
           multi_write_engine= TRUE;
+
+        if (table->file->ht->db_type == DB_TYPE_BLACKHOLE_DB)
+          blackhole_table_found= 1;
+
         if (share->non_determinstic_insert &&
             !(sql_command_flags[lex->sql_command] & CF_SCHEMA_CHANGE))
           has_write_tables_with_unsafe_statements= true;
@@ -6296,7 +6279,8 @@ int THD::decide_logging_format(TABLE_LIST *tables)
                         is_current_stmt_binlog_format_row() ?
                         "ROW" : "STATEMENT"));
 
-    if (variables.binlog_format == BINLOG_FORMAT_ROW &&
+    if (blackhole_table_found &&
+        variables.binlog_format == BINLOG_FORMAT_ROW &&
         (sql_command_flags[lex->sql_command] &
          (CF_UPDATES_DATA | CF_DELETES_DATA)))
     {
@@ -6312,8 +6296,8 @@ int THD::decide_logging_format(TABLE_LIST *tables)
         if (table->table->file->ht->db_type == DB_TYPE_BLACKHOLE_DB &&
             table->lock_type >= TL_WRITE_ALLOW_WRITE)
         {
-            table_names.append(&table->table_name);
-            table_names.append(",");
+          table_names.append(&table->table_name);
+          table_names.append(",");
         }
       }
       if (!table_names.is_empty())
@@ -6333,9 +6317,12 @@ int THD::decide_logging_format(TABLE_LIST *tables)
                             table_names.c_ptr());
       }
     }
+
+    if (is_write && is_current_stmt_binlog_format_row())
+      binlog_prepare_for_row_logging();
   }
-#ifndef DBUG_OFF
   else
+  {
     DBUG_PRINT("info", ("decision: no logging since "
                         "mysql_bin_log.is_open() = %d "
                         "and (options & OPTION_BIN_LOG) = 0x%llx "
@@ -6345,22 +6332,23 @@ int THD::decide_logging_format(TABLE_LIST *tables)
                         (variables.option_bits & OPTION_BIN_LOG),
                         (uint) wsrep_binlog_format(),
                         binlog_filter->db_ok(db.str)));
-#endif
-
+    if (WSREP_NNULL(this) && is_current_stmt_binlog_format_row())
+      binlog_prepare_for_row_logging();
+  }
   DBUG_RETURN(0);
 }
 
 int THD::decide_logging_format_low(TABLE *table)
 {
+  DBUG_ENTER("decide_logging_format_low");
   /*
-   INSERT...ON DUPLICATE KEY UPDATE on a table with more than one unique keys
-   can be unsafe.
-   */
-  if(wsrep_binlog_format() <= BINLOG_FORMAT_STMT &&
-       !is_current_stmt_binlog_format_row() &&
-       !lex->is_stmt_unsafe() &&
-       lex->sql_command == SQLCOM_INSERT &&
-       lex->duplicates == DUP_UPDATE)
+    INSERT...ON DUPLICATE KEY UPDATE on a table with more than one unique keys
+    can be unsafe.
+  */
+  if (wsrep_binlog_format() <= BINLOG_FORMAT_STMT &&
+      !is_current_stmt_binlog_format_row() &&
+      !lex->is_stmt_unsafe() &&
+      lex->duplicates == DUP_UPDATE)
   {
     uint unique_keys= 0;
     uint keys= table->s->keys, i= 0;
@@ -6387,27 +6375,22 @@ exit:;
       lex->set_stmt_unsafe(LEX::BINLOG_STMT_UNSAFE_INSERT_TWO_KEYS);
       binlog_unsafe_warning_flags|= lex->get_stmt_unsafe_flags();
       set_current_stmt_binlog_format_row_if_mixed();
-      return 1;
+      if (is_current_stmt_binlog_format_row())
+        binlog_prepare_for_row_logging();
+      DBUG_RETURN(1);
     }
   }
-  return 0;
+  DBUG_RETURN(0);
 }
 
-/*
-  Implementation of interface to write rows to the binary log through the
-  thread.  The thread is responsible for writing the rows it has
-  inserted/updated/deleted.
-*/
-
 #ifndef MYSQL_CLIENT
-
 /*
   Template member function for ensuring that there is an rows log
   event of the apropriate type before proceeding.
 
   PRE CONDITION:
     - Events of type 'RowEventT' have the type code 'type_code'.
-    
+
   POST CONDITION:
     If a non-NULL pointer is returned, the pending event for thread 'thd' will
     be an event of type 'RowEventT' (which have the type code 'type_code')
@@ -6600,7 +6583,8 @@ CPP_UNNAMED_NS_START
       }
       else
       {
-        m_memory= (uchar *) my_malloc(total_length, MYF(MY_WME));
+        m_memory= (uchar *) my_malloc(key_memory_Row_data_memory_memory,
+                                      total_length, MYF(MY_WME));
         m_release_memory_on_destruction= TRUE;
       }
     }
@@ -6819,12 +6803,13 @@ void THD::binlog_prepare_row_images(TABLE *table)
 
   /**
     if there is a primary key in the table (ie, user declared PK or a
-    non-null unique index) and we dont want to ship the entire image,
+    non-null unique index) and we don't want to ship the entire image,
     and the handler involved supports this.
    */
   if (table->s->primary_key < MAX_KEY &&
       (thd->variables.binlog_row_image < BINLOG_ROW_IMAGE_FULL) &&
-      !ha_check_storage_engine_flag(table->s->db_type(), HTON_NO_BINLOG_ROW_OPT))
+      !ha_check_storage_engine_flag(table->s->db_type(),
+                                    HTON_NO_BINLOG_ROW_OPT))
   {
     /**
       Just to be sure that tmp_set is currently not in use as
@@ -6869,7 +6854,7 @@ void THD::binlog_prepare_row_images(TABLE *table)
 
 
 
-int THD::binlog_remove_pending_rows_event(bool clear_maps,
+int THD::binlog_remove_pending_rows_event(bool reset_stmt,
                                           bool is_transactional)
 {
   DBUG_ENTER("THD::binlog_remove_pending_rows_event");
@@ -6883,11 +6868,11 @@ int THD::binlog_remove_pending_rows_event(bool clear_maps,
 
   mysql_bin_log.remove_pending_rows_event(this, is_transactional);
 
-  if (clear_maps)
-    binlog_table_maps= 0;
-
+  if (reset_stmt)
+    reset_binlog_for_next_statement();
   DBUG_RETURN(0);
 }
+
 
 int THD::binlog_flush_pending_rows_event(bool stmt_end, bool is_transactional)
 {
@@ -6914,9 +6899,8 @@ int THD::binlog_flush_pending_rows_event(bool stmt_end, bool is_transactional)
     if (stmt_end)
     {
       pending->set_flags(Rows_log_event::STMT_END_F);
-      binlog_table_maps= 0;
+      reset_binlog_for_next_statement();
     }
-
     error= mysql_bin_log.flush_and_set_pending_rows_event(this, 0,
                                                           is_transactional);
   }
@@ -7288,8 +7272,11 @@ int THD::binlog_query(THD::enum_binlog_query_type qtype, char const *query_arg,
           suppress_use, errcode);
         error= mysql_bin_log.write(&qinfo);
       }
+      /*
+        row logged binlog may not have been reset in the case of locked tables
+      */
+      reset_binlog_for_next_statement();
 
-      binlog_table_maps= 0;
       DBUG_RETURN(error >= 0 ? error : 1);
     }
 
@@ -7783,4 +7770,9 @@ bool THD::timestamp_to_TIME(MYSQL_TIME *ltime, my_time_t ts,
     ltime->second_part= sec_part;
   }
   return 0;
+}
+
+THD_list_iterator *THD_list_iterator::iterator()
+{
+  return &server_threads;
 }

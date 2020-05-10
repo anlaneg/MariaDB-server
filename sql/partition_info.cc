@@ -30,7 +30,6 @@
                                            // NOT_A_PARTITION_ID
 #include "partition_info.h"
 #include "sql_parse.h"
-#include "sql_acl.h"                          // *_ACL
 #include "sql_base.h"                         // fill_record
 #include "lock.h"
 #include "table.h"
@@ -337,7 +336,8 @@ char *partition_info::create_default_partition_names(THD *thd, uint part_no,
   {
     do
     {
-      sprintf(move_ptr, "p%u", (start_no + i));
+      if (make_partition_name(move_ptr, (start_no + i)))
+        DBUG_RETURN(NULL);
       move_ptr+= MAX_PART_NAME_SIZE;
     } while (++i < num_parts_arg);
   }
@@ -406,11 +406,9 @@ bool partition_info::set_up_default_partitions(THD *thd, handler *file,
 
   if (part_type == VERSIONING_PARTITION)
   {
-    if (use_default_num_partitions)
-    {
+    if (start_no == 0 && use_default_num_partitions)
       num_parts= 2;
-      use_default_num_partitions= false;
-    }
+    use_default_num_partitions= false;
   }
   else if (part_type != HASH_PARTITION)
   {
@@ -452,7 +450,7 @@ bool partition_info::set_up_default_partitions(THD *thd, handler *file,
       default_name+=MAX_PART_NAME_SIZE;
       if (part_type == VERSIONING_PARTITION)
       {
-        if (i < num_parts - 1) {
+        if (start_no > 0 || i < num_parts - 1) {
           part_elem->type= partition_element::HISTORY;
         } else {
           part_elem->type= partition_element::CURRENT;
@@ -733,7 +731,7 @@ char *partition_info::find_duplicate_name()
   max_names= num_parts;
   if (is_sub_partitioned())
     max_names+= num_parts * num_subparts;
-  if (my_hash_init(&partition_names, system_charset_info, max_names, 0, 0,
+  if (my_hash_init(PSI_INSTRUMENT_ME, &partition_names, system_charset_info, max_names, 0, 0,
                    (my_hash_get_key) get_part_name_from_elem, 0, HASH_UNIQUE))
   {
     DBUG_ASSERT(0);

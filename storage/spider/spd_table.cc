@@ -6138,7 +6138,7 @@ SPIDER_PARTITION_SHARE *spider_get_pt_share(
     }
 
     if(
-      my_hash_init(&partition_share->pt_handler_hash, spd_charset_utf8mb3_bin,
+      my_hash_init(PSI_INSTRUMENT_ME, &partition_share->pt_handler_hash, spd_charset_utf8mb3_bin,
         32, 0, 0, (my_hash_get_key) spider_pt_handler_share_get_key, 0, 0)
     ) {
       *error_num = HA_ERR_OUT_OF_MEM;
@@ -6976,62 +6976,6 @@ int spider_db_init(
   memset(&spider_alloc_mem_count, 0, sizeof(spider_alloc_mem_count));
   memset(&spider_free_mem_count, 0, sizeof(spider_free_mem_count));
 
-#ifdef _WIN32
-  HMODULE current_module = GetModuleHandle(NULL);
-#ifndef SPIDER_HAS_NEXT_THREAD_ID
-  spd_db_att_thread_id = (ulong *)
-    GetProcAddress(current_module, "?thread_id@@3KA");
-#endif
-#ifdef SPIDER_XID_USES_xid_cache_iterate
-#else
-#ifdef XID_CACHE_IS_SPLITTED
-  spd_db_att_xid_cache_split_num = (uint *)
-    GetProcAddress(current_module,
-      "?opt_xid_cache_split_num@@3IA");
-  spd_db_att_LOCK_xid_cache = *((pthread_mutex_t **)
-    GetProcAddress(current_module,
-      "?LOCK_xid_cache@@3PAUst_mysql_mutex@@A"));
-  spd_db_att_xid_cache = *((HASH **)
-    GetProcAddress(current_module, "?xid_cache@@3PAUst_hash@@A"));
-#else
-  spd_db_att_LOCK_xid_cache = (pthread_mutex_t *)
-#if MYSQL_VERSION_ID < 50500
-    GetProcAddress(current_module,
-      "?LOCK_xid_cache@@3U_RTL_CRITICAL_SECTION@@A");
-#else
-    GetProcAddress(current_module,
-      "?LOCK_xid_cache@@3Ust_mysql_mutex@@A");
-#endif
-  spd_db_att_xid_cache = (HASH *)
-    GetProcAddress(current_module, "?xid_cache@@3Ust_hash@@A");
-#endif
-#endif
-  spd_charset_utf8mb3_bin = (struct charset_info_st *)
-    GetProcAddress(current_module, "my_charset_utf8mb3_bin");
-  spd_defaults_extra_file = (const char **)
-    GetProcAddress(current_module, "my_defaults_extra_file");
-  spd_defaults_file = (const char **)
-    GetProcAddress(current_module, "my_defaults_file");
-  spd_mysqld_unix_port = (const char **)
-    GetProcAddress(current_module, "?mysqld_unix_port@@3PADA");
-  spd_mysqld_port = (uint *)
-    GetProcAddress(current_module, "?mysqld_port@@3IA");
-  spd_abort_loop = (bool volatile *)
-    GetProcAddress(current_module, "?abort_loop@@3_NC");
-  spd_tz_system = *(Time_zone **)
-#ifdef _WIN64
-    GetProcAddress(current_module, "?my_tz_SYSTEM@@3PEAVTime_zone@@EA");
-#else
-    GetProcAddress(current_module, "?my_tz_SYSTEM@@3PAVTime_zone@@A");
-#endif
-  spd_mysqld_server_started = (int *)
-    GetProcAddress(current_module, "?mysqld_server_started@@3HA");
-  spd_LOCK_server_started = (pthread_mutex_t *)
-    GetProcAddress(current_module,
-      "?LOCK_server_started@@3Ust_mysql_mutex@@A");
-  spd_COND_server_started = (pthread_cond_t *)
-    GetProcAddress(current_module, "?COND_server_started@@3Ust_mysql_cond@@A");
-#else
 #ifndef SPIDER_HAS_NEXT_THREAD_ID
   spd_db_att_thread_id = &thread_id;
 #endif
@@ -7056,7 +7000,6 @@ int spider_db_init(
   spd_mysqld_server_started = &mysqld_server_started;
   spd_LOCK_server_started = &LOCK_server_started;
   spd_COND_server_started = &COND_server_started;
-#endif
 
 #ifdef HAVE_PSI_INTERFACE
   init_spider_psi_keys();
@@ -7184,7 +7127,7 @@ int spider_db_init(
 #endif
     goto error_mem_calc_mutex_init;
 
-  if (my_hash_init(&spider_open_tables, spd_charset_utf8mb3_bin, 32, 0, 0,
+  if (my_hash_init(PSI_INSTRUMENT_ME, &spider_open_tables, spd_charset_utf8mb3_bin, 32, 0, 0,
                    (my_hash_get_key) spider_tbl_get_key, 0, 0))
     goto error_open_tables_hash_init;
 
@@ -7193,7 +7136,7 @@ int spider_db_init(
     spider_open_tables,
     spider_open_tables.array.max_element *
     spider_open_tables.array.size_of_element);
-  if (my_hash_init(&spider_init_error_tables, spd_charset_utf8mb3_bin, 32, 0, 0,
+  if (my_hash_init(PSI_INSTRUMENT_ME, &spider_init_error_tables, spd_charset_utf8mb3_bin, 32, 0, 0,
                    (my_hash_get_key) spider_tbl_get_key, 0, 0))
     goto error_init_error_tables_hash_init;
 
@@ -7203,7 +7146,7 @@ int spider_db_init(
     spider_init_error_tables.array.max_element *
     spider_init_error_tables.array.size_of_element);
 #ifdef WITH_PARTITION_STORAGE_ENGINE
-  if (my_hash_init(&spider_open_pt_share, spd_charset_utf8mb3_bin, 32, 0, 0,
+  if (my_hash_init(PSI_INSTRUMENT_ME, &spider_open_pt_share, spd_charset_utf8mb3_bin, 32, 0, 0,
                    (my_hash_get_key) spider_pt_share_get_key, 0, 0))
     goto error_open_pt_share_hash_init;
 
@@ -7213,10 +7156,9 @@ int spider_db_init(
     spider_open_pt_share.array.max_element *
     spider_open_pt_share.array.size_of_element);
 #endif
-  if (my_hash_init(&spider_lgtm_tblhnd_share_hash, spd_charset_utf8mb3_bin,
-                   32, 0, 0,
-                   (my_hash_get_key) spider_lgtm_tblhnd_share_hash_get_key,
-                   0, 0))
+  if (my_hash_init(PSI_INSTRUMENT_ME, &spider_lgtm_tblhnd_share_hash,
+                   spd_charset_utf8mb3_bin, 32, 0, 0,
+                   (my_hash_get_key) spider_lgtm_tblhnd_share_hash_get_key, 0, 0))
     goto error_lgtm_tblhnd_share_hash_init;
 
   spider_alloc_calc_mem_init(spider_lgtm_tblhnd_share_hash, 245);
@@ -7224,11 +7166,11 @@ int spider_db_init(
     spider_lgtm_tblhnd_share_hash,
     spider_lgtm_tblhnd_share_hash.array.max_element *
     spider_lgtm_tblhnd_share_hash.array.size_of_element);
-  if (my_hash_init(&spider_open_connections, spd_charset_utf8mb3_bin, 32, 0, 0,
+  if (my_hash_init(PSI_INSTRUMENT_ME, &spider_open_connections, spd_charset_utf8mb3_bin, 32, 0, 0,
                    (my_hash_get_key) spider_conn_get_key, 0, 0))
     goto error_open_connections_hash_init;
 
-  if (my_hash_init(&spider_ipport_conns, spd_charset_utf8mb3_bin, 32, 0, 0,
+  if (my_hash_init(PSI_INSTRUMENT_ME, &spider_ipport_conns, spd_charset_utf8mb3_bin, 32, 0, 0,
                    (my_hash_get_key) spider_ipport_conn_get_key,
                    spider_free_ipport_conn, 0))
       goto error_ipport_conn__hash_init;
@@ -7239,7 +7181,7 @@ int spider_db_init(
     spider_open_connections.array.max_element *
     spider_open_connections.array.size_of_element);
 #if defined(HS_HAS_SQLCOM) && defined(HAVE_HANDLERSOCKET)
-  if (my_hash_init(&spider_hs_r_conn_hash, spd_charset_utf8mb3_bin, 32, 0, 0,
+  if (my_hash_init(PSI_INSTRUMENT_ME, &spider_hs_r_conn_hash, spd_charset_utf8mb3_bin, 32, 0, 0,
                    (my_hash_get_key) spider_conn_get_key, 0, 0))
     goto error_hs_r_conn_hash_init;
 
@@ -7248,7 +7190,7 @@ int spider_db_init(
     spider_hs_r_conn_hash,
     spider_hs_r_conn_hash.array.max_element *
     spider_hs_r_conn_hash.array.size_of_element);
-  if (my_hash_init(&spider_hs_w_conn_hash, spd_charset_utf8mb3_bin, 32, 0, 0,
+  if (my_hash_init(PSI_INSTRUMENT_ME, &spider_hs_w_conn_hash, spd_charset_utf8mb3_bin, 32, 0, 0,
                    (my_hash_get_key) spider_conn_get_key, 0, 0))
     goto error_hs_w_conn_hash_init;
 
@@ -7258,7 +7200,7 @@ int spider_db_init(
     spider_hs_w_conn_hash.array.max_element *
     spider_hs_w_conn_hash.array.size_of_element);
 #endif
-  if (my_hash_init(&spider_allocated_thds, spd_charset_utf8mb3_bin, 32, 0, 0,
+  if (my_hash_init(PSI_INSTRUMENT_ME, &spider_allocated_thds, spd_charset_utf8mb3_bin, 32, 0, 0,
                    (my_hash_get_key) spider_allocated_thds_get_key, 0, 0))
     goto error_allocated_thds_hash_init;
 
@@ -7319,7 +7261,7 @@ int spider_db_init(
     roop_count < (int) spider_param_udf_table_mon_mutex_count();
     roop_count++)
   {
-    if (my_hash_init(&spider_udf_table_mon_list_hash[roop_count],
+    if (my_hash_init(PSI_INSTRUMENT_ME, &spider_udf_table_mon_list_hash[roop_count],
       spd_charset_utf8mb3_bin, 32, 0, 0,
       (my_hash_get_key) spider_udf_tbl_mon_list_key, 0, 0))
       goto error_init_udf_table_mon_list_hash;
@@ -10025,7 +9967,7 @@ void *spider_table_bg_sts_action(
     thread->killed = FALSE;
     pthread_mutex_unlock(&thread->mutex);
 #if !defined(MYSQL_DYNAMIC_PLUGIN) || !defined(_WIN32)
-    my_pthread_setspecific_ptr(THR_THD, NULL);
+    set_current_thd(nullptr);
 #endif
     my_thread_end();
     DBUG_RETURN(NULL);
@@ -10092,7 +10034,7 @@ void *spider_table_bg_sts_action(
       pthread_cond_signal(&thread->sync_cond);
       pthread_mutex_unlock(&thread->mutex);
 #if !defined(MYSQL_DYNAMIC_PLUGIN) || !defined(_WIN32)
-      my_pthread_setspecific_ptr(THR_THD, NULL);
+      set_current_thd(nullptr);
 #endif
       my_thread_end();
       DBUG_RETURN(NULL);
@@ -10224,7 +10166,7 @@ void *spider_table_bg_crd_action(
     thread->killed = FALSE;
     pthread_mutex_unlock(&thread->mutex);
 #if !defined(MYSQL_DYNAMIC_PLUGIN) || !defined(_WIN32)
-    my_pthread_setspecific_ptr(THR_THD, NULL);
+    set_current_thd(nullptr);
 #endif
     my_thread_end();
     DBUG_RETURN(NULL);
@@ -10244,7 +10186,7 @@ void *spider_table_bg_crd_action(
       pthread_cond_signal(&thread->sync_cond);
       pthread_mutex_unlock(&thread->mutex);
 #if !defined(MYSQL_DYNAMIC_PLUGIN) || !defined(_WIN32)
-      my_pthread_setspecific_ptr(THR_THD, NULL);
+      set_current_thd(nullptr);
 #endif
       my_thread_end();
       DBUG_RETURN(NULL);

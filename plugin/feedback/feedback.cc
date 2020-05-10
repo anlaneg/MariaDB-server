@@ -178,13 +178,12 @@ static LEX_STRING vars_filter[]= {
   {C_STRING_WITH_LEN("secure_auth")},
   {C_STRING_WITH_LEN("slow_launch_time")},
   {C_STRING_WITH_LEN("sql%")},
-  {C_STRING_WITH_LEN("storage_engine")},
+  {C_STRING_WITH_LEN("default_storage_engine")},
   {C_STRING_WITH_LEN("sync_binlog")},
   {C_STRING_WITH_LEN("table_definition_cache")},
   {C_STRING_WITH_LEN("table_open_cache")},
   {C_STRING_WITH_LEN("thread_handling")},
   {C_STRING_WITH_LEN("time_zone")},
-  {C_STRING_WITH_LEN("timed_mutexes")},
   {C_STRING_WITH_LEN("version%")},
   {0, 0}
 };
@@ -281,7 +280,7 @@ static int init(void *p)
       if (*s == ' ')
         url_count++;
 
-    urls= (Url **)my_malloc(url_count*sizeof(Url*), MYF(MY_WME));
+    urls= (Url **)my_malloc(PSI_INSTRUMENT_ME, url_count*sizeof(Url*), MYF(MY_WME));
     if (!urls)
       return 1;
 

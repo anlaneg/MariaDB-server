@@ -28,6 +28,8 @@ Created 10/25/1995 Heikki Tuuri
 #define fil0fil_h
 
 #include "fsp0types.h"
+#include "mach0data.h"
+#include "assume_aligned.h"
 
 #ifndef UNIV_INNOCHECKSUM
 
@@ -42,8 +44,6 @@ Created 10/25/1995 Heikki Tuuri
 struct unflushed_spaces_tag_t;
 struct rotation_list_tag_t;
 
-/** whether to reduce redo logging during ALTER TABLE */
-extern	my_bool	innodb_log_optimize_ddl;
 // Forward declaration
 extern my_bool srv_use_doublewrite_buf;
 extern struct buf_dblwr_t* buf_dblwr;
@@ -61,21 +61,6 @@ enum fil_type_t {
 	/** persistent tablespace (for system, undo log or tables) */
 	FIL_TYPE_TABLESPACE,
 };
-
-/** Check if fil_type is any of FIL_TYPE_TEMPORARY, FIL_TYPE_IMPORT
-or FIL_TYPE_TABLESPACE.
-@param[in]	type	variable of type fil_type_t
-@return true if any of FIL_TYPE_TEMPORARY, FIL_TYPE_IMPORT
-or FIL_TYPE_TABLESPACE */
-inline
-bool
-fil_type_is_data(
-	fil_type_t	type)
-{
-	return(type == FIL_TYPE_TEMPORARY
-	       || type == FIL_TYPE_IMPORT
-	       || type == FIL_TYPE_TABLESPACE);
-}
 
 struct fil_node_t;
 
@@ -100,25 +85,16 @@ struct fil_space_t
 				Protected by log_sys.mutex.
 				If and only if this is nonzero, the
 				tablespace will be in named_spaces. */
-	/** Log sequence number of the latest MLOG_INDEX_LOAD record
-	that was found while parsing the redo log */
-	lsn_t		enable_lsn;
 	/** set when an .ibd file is about to be deleted,
 	or an undo tablespace is about to be truncated.
-	When this is set following new ops are not allowed:
+	When this is set, the following new ops are not allowed:
 	* read IO request
-	* ibuf merge
 	* file flush
 	Note that we can still possibly have new write operations
 	because we don't check this flag when doing flush batches. */
 	bool		stop_new_ops;
 	/** whether undo tablespace truncation is in progress */
 	bool		is_being_truncated;
-#ifdef UNIV_DEBUG
-	/** reference count for operations who want to skip redo log in the
-	file space in order to make modify_check() pass. */
-	Atomic_counter<ulint> redo_skipped_count;
-#endif
 	fil_type_t	purpose;/*!< purpose */
 	UT_LIST_BASE_NODE_T(fil_node_t) chain;
 				/*!< base node for the file chain */
@@ -144,7 +120,7 @@ struct fil_space_t
 	/** Number of pending buffer pool operations accessing the tablespace
 	without holding a table lock or dict_sys.latch S-latch
 	that would prevent the table (and tablespace) from being
-	dropped. An example is change buffer merge.
+	dropped. An example is fil_crypt_thread.
 	The tablespace cannot be dropped while this is nonzero,
 	or while fil_node_t::n_pending is nonzero.
 	Protected by fil_system.mutex and std::atomic. */
@@ -159,7 +135,7 @@ struct fil_space_t
 	rw_lock_t	latch;	/*!< latch protecting the file space storage
 				allocation */
 	UT_LIST_NODE_T(fil_space_t) named_spaces;
-				/*!< list of spaces for which MLOG_FILE_NAME
+				/*!< list of spaces for which FILE_MODIFY
 				records have been issued */
 	/** Checks that this tablespace in a list of unflushed tablespaces.
 	@return true if in a list */
@@ -651,13 +627,6 @@ extern const char* dot_ext[];
 but in the MySQL Embedded Server Library and mysqlbackup it is not the default
 directory, and we must set the base file path explicitly */
 extern const char*	fil_path_to_mysql_datadir;
-
-/* Space address data type; this is intended to be used when
-addresses accurate to a byte are stored in file pages. If the page part
-of the address is FIL_NULL, the address is considered undefined. */
-
-typedef	byte	fil_faddr_t;	/*!< 'type' definition in C: an address
-				stored in a file page is a string of bytes */
 #else
 # include "univ.i"
 #endif /* !UNIV_INNOCHECKSUM */
@@ -860,6 +829,14 @@ enum fil_encryption_t {
 	FIL_ENCRYPTION_OFF
 };
 
+/** Get the file page type.
+@param[in]	page	file page
+@return page type */
+inline uint16_t fil_page_get_type(const byte *page)
+{
+  return mach_read_from_2(my_assume_aligned<2>(page + FIL_PAGE_TYPE));
+}
+
 #ifndef UNIV_INNOCHECKSUM
 
 /** Number of pending tablespace flushes */
@@ -880,8 +857,7 @@ fil_space_get(
 	MY_ATTRIBUTE((warn_unused_result));
 
 /** The tablespace memory cache; also the totality of logs (the log
-data space) is stored here; below we talk about tablespaces, but also
-the ib_logfiles form a 'space' and it is handled here */
+data space) is stored here; below we talk about tablespaces */
 struct fil_system_t {
   /**
     Constructor.
@@ -961,7 +937,7 @@ public:
 					/*!< list of all file spaces */
 	UT_LIST_BASE_NODE_T(fil_space_t) named_spaces;
 					/*!< list of all file spaces
-					for which a MLOG_FILE_NAME
+					for which a FILE_MODIFY
 					record has been written since
 					the latest redo log checkpoint.
 					Protected only by log_sys.mutex. */
@@ -982,7 +958,7 @@ public:
 
 	/** Return the next fil_space_t from key rotation list.
 	Once started, the caller must keep calling this until it returns NULL.
-	fil_space_acquire() and fil_space_release() are invoked here which
+	fil_space_acquire() and fil_space_t::release() are invoked here, which
 	blocks a concurrent operation from dropping the tablespace.
 	@param[in]      prev_space      Previous tablespace or NULL to start
 					from beginning of fil_system->rotation
@@ -1180,7 +1156,6 @@ fil_create_directory_for_tablename(
 				'databasename/tablename' format */
 /** Replay a file rename operation if possible.
 @param[in]	space_id	tablespace identifier
-@param[in]	first_page_no	first page number in the file
 @param[in]	name		old file name
 @param[in]	new_name	new file name
 @return	whether the operation was successfully applied
@@ -1189,7 +1164,6 @@ name was successfully renamed to new_name)  */
 bool
 fil_op_replay_rename(
 	ulint		space_id,
-	ulint		first_page_no,
 	const char*	name,
 	const char*	new_name)
 	MY_ATTRIBUTE((warn_unused_result));
@@ -1207,24 +1181,15 @@ bool fil_table_accessible(const dict_table_t* table)
 
 /** Delete a tablespace and associated .ibd file.
 @param[in]	id		tablespace identifier
+@param[in]	if_exists	whether to ignore missing tablespace
 @return	DB_SUCCESS or error */
-dberr_t
-fil_delete_tablespace(
-	ulint id
-#ifdef BTR_CUR_HASH_ADAPT
-	, bool drop_ahi = false /*!< whether to drop the adaptive hash index */
-#endif /* BTR_CUR_HASH_ADAPT */
-	);
+dberr_t fil_delete_tablespace(ulint id, bool if_exists= false);
 
 /** Prepare to truncate an undo tablespace.
 @param[in]	space_id	undo tablespace id
 @return	the tablespace
 @retval	NULL if the tablespace does not exist */
 fil_space_t* fil_truncate_prepare(ulint space_id);
-
-/** Write log about an undo tablespace truncate operation. */
-void fil_truncate_log(fil_space_t* space, ulint size, mtr_t* mtr)
-	MY_ATTRIBUTE((nonnull));
 
 /*******************************************************************//**
 Closes a single-table tablespace. The tablespace must be cached in the
@@ -1402,6 +1367,8 @@ fil_space_extend(
 @param[in]	message		message for aio handler if non-sync aio
 				used, else ignored
 @param[in]	ignore		whether to ignore out-of-bounds page_id
+@param[in]	punch_hole	punch the hole to the file for page_compressed
+				tablespace
 @return DB_SUCCESS, or DB_TABLESPACE_DELETED
 if we are trying to do i/o on a tablespace which does not exist */
 dberr_t
@@ -1414,7 +1381,8 @@ fil_io(
 	ulint			len,
 	void*			buf,
 	void*			message,
-	bool			ignore = false);
+	bool			ignore = false,
+	bool			punch_hole = false);
 
 /**********************************************************************//**
 Waits for an aio operation to complete. This function is used to write the
@@ -1440,38 +1408,12 @@ void
 fil_flush(fil_space_t* space);
 
 /** Flush to disk the writes in file spaces of the given type
-possibly cached by the OS.
-@param[in]	purpose	FIL_TYPE_TABLESPACE */
-void
-fil_flush_file_spaces(
-	fil_type_t	purpose);
+possibly cached by the OS. */
+void fil_flush_file_spaces();
 /******************************************************************//**
 Checks the consistency of the tablespace cache.
 @return true if ok */
-bool
-fil_validate(void);
-/*==============*/
-/********************************************************************//**
-Returns true if file address is undefined.
-@return true if undefined */
-bool
-fil_addr_is_null(
-/*=============*/
-	fil_addr_t	addr);	/*!< in: address */
-/********************************************************************//**
-Get the predecessor of a file page.
-@return FIL_PAGE_PREV */
-ulint
-fil_page_get_prev(
-/*==============*/
-	const byte*	page);	/*!< in: file page */
-/********************************************************************//**
-Get the successor of a file page.
-@return FIL_PAGE_NEXT */
-ulint
-fil_page_get_next(
-/*==============*/
-	const byte*	page);	/*!< in: file page */
+bool fil_validate();
 /*********************************************************************//**
 Sets the file page type. */
 void
@@ -1508,20 +1450,6 @@ char*
 fil_path_to_space_name(
 	const char*	filename);
 
-/** Generate redo log for swapping two .ibd files
-@param[in]	old_table	old table
-@param[in]	new_table	new table
-@param[in]	tmp_name	temporary table name
-@param[in,out]	mtr		mini-transaction
-@return innodb error code */
-dberr_t
-fil_mtr_rename_log(
-	const dict_table_t*	old_table,
-	const dict_table_t*	new_table,
-	const char*		tmp_name,
-	mtr_t*			mtr)
-	MY_ATTRIBUTE((nonnull, warn_unused_result));
-
 /** Acquire the fil_system mutex. */
 #define fil_system_enter()	mutex_enter(&fil_system.mutex)
 /** Release the fil_system mutex. */
@@ -1541,26 +1469,18 @@ void
 fil_names_dirty(
 	fil_space_t*	space);
 
-/** Write MLOG_FILE_NAME records when a non-predefined persistent
+/** Write FILE_MODIFY records when a non-predefined persistent
 tablespace was modified for the first time since the latest
 fil_names_clear().
-@param[in,out]	space	tablespace
-@param[in,out]	mtr	mini-transaction */
-void
-fil_names_dirty_and_write(
-	fil_space_t*	space,
-	mtr_t*		mtr);
+@param[in,out]	space	tablespace */
+void fil_names_dirty_and_write(fil_space_t* space);
 
-/** Write MLOG_FILE_NAME records if a persistent tablespace was modified
+/** Write FILE_MODIFY records if a persistent tablespace was modified
 for the first time since the latest fil_names_clear().
 @param[in,out]	space	tablespace
 @param[in,out]	mtr	mini-transaction
-@return whether any MLOG_FILE_NAME record was written */
-inline MY_ATTRIBUTE((warn_unused_result))
-bool
-fil_names_write_if_was_clean(
-	fil_space_t*	space,
-	mtr_t*		mtr)
+@return whether any FILE_MODIFY record was written */
+inline bool fil_names_write_if_was_clean(fil_space_t* space)
 {
 	ut_ad(log_mutex_own());
 
@@ -1569,11 +1489,11 @@ fil_names_write_if_was_clean(
 	}
 
 	const bool	was_clean = space->max_lsn == 0;
-	ut_ad(space->max_lsn <= log_sys.lsn);
-	space->max_lsn = log_sys.lsn;
+	ut_ad(space->max_lsn <= log_sys.get_lsn());
+	space->max_lsn = log_sys.get_lsn();
 
 	if (was_clean) {
-		fil_names_dirty_and_write(space, mtr);
+		fil_names_dirty_and_write(space);
 	}
 
 	return(was_clean);
@@ -1584,8 +1504,7 @@ yet, to get valid size and flags.
 @param[in,out]	space	tablespace */
 inline void fil_space_open_if_needed(fil_space_t* space)
 {
-	ut_d(extern volatile bool recv_recovery_on);
-	ut_ad(recv_recovery_on);
+	ut_ad(recv_recovery_is_on());
 
 	if (space->size == 0) {
 		/* Initially, size and flags will be set to 0,
@@ -1598,9 +1517,9 @@ inline void fil_space_open_if_needed(fil_space_t* space)
 }
 
 /** On a log checkpoint, reset fil_names_dirty_and_write() flags
-and write out MLOG_FILE_NAME and MLOG_CHECKPOINT if needed.
+and write out FILE_MODIFY and FILE_CHECKPOINT if needed.
 @param[in]	lsn		checkpoint LSN
-@param[in]	do_write	whether to always write MLOG_CHECKPOINT
+@param[in]	do_write	whether to always write FILE_CHECKPOINT
 @return whether anything was written to the redo log
 @retval false	if no flags were set and nothing written
 @retval true	if anything was written to the redo log */

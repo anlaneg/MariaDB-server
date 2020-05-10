@@ -1,7 +1,7 @@
 /*****************************************************************************
 
 Copyright (c) 2011, 2015, Oracle and/or its affiliates. All Rights Reserved.
-Copyright (c) 2015, 2018, MariaDB Corporation.
+Copyright (c) 2015, 2020, MariaDB Corporation.
 
 Portions of this file contain modifications contributed and copyrighted by
 Google, Inc. Those modifications are gratefully acknowledged and are described
@@ -88,7 +88,8 @@ srv_enter_innodb_with_tickets(
 					to enter InnoDB */
 {
 	trx->declared_to_be_inside_innodb = TRUE;
-	trx->n_tickets_to_enter_innodb = srv_n_free_tickets_to_enter;
+	trx->n_tickets_to_enter_innodb = static_cast<uint32_t>(
+		srv_n_free_tickets_to_enter);
 }
 
 /*********************************************************************//**
@@ -118,8 +119,7 @@ srv_conc_enter_innodb_with_atomics(
 	for (;;) {
 		ulint	sleep_in_us;
 #ifdef WITH_WSREP
-		if (wsrep_on(trx->mysql_thd) &&
-		    wsrep_thd_is_aborting(trx->mysql_thd)) {
+		if (trx->is_wsrep() && wsrep_thd_is_aborting(trx->mysql_thd)) {
 			if (wsrep_get_debug()) {
 				ib::info() <<
 					"srv_conc_enter due to MUST_ABORT";

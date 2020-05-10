@@ -1,4 +1,4 @@
-/* Copyright (C) 2012, 2019, MariaDB Corporation.
+/* Copyright (C) 2012, 2020, MariaDB
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -23,7 +23,6 @@
 #include <sql_audit.h>
 #include <debug_sync.h>
 #include <threadpool.h>
-#include <my_counter.h>
 
 #ifdef WITH_WSREP
 #include "wsrep_trans_observer.h"
@@ -51,7 +50,6 @@ static void  threadpool_remove_connection(THD *thd);
 static int   threadpool_process_request(THD *thd);
 static THD*  threadpool_add_connection(CONNECT *connect, void *scheduler_data);
 
-extern "C" pthread_key(struct st_my_thread_var*, THR_KEY_mysys);
 extern bool do_command(THD*);
 
 static inline TP_connection *get_TP_connection(THD *thd)
@@ -90,15 +88,15 @@ struct Worker_thread_context
 
   void save()
   {
-    psi_thread = PSI_CALL_get_thread();
-    mysys_var= (st_my_thread_var *)pthread_getspecific(THR_KEY_mysys);
+    psi_thread= PSI_CALL_get_thread();
+    mysys_var= my_thread_var;
   }
 
   void restore()
   {
     PSI_CALL_set_thread(psi_thread);
-    pthread_setspecific(THR_KEY_mysys,mysys_var);
-    pthread_setspecific(THR_THD, 0);
+    set_mysys_var(mysys_var);
+    set_current_thd(nullptr);
   }
 };
 
@@ -148,10 +146,10 @@ static void thread_attach(THD* thd)
      attaching the thd. */
   wsrep_wait_rollback_complete_and_acquire_ownership(thd);
 #endif /* WITH_WSREP */
-  pthread_setspecific(THR_KEY_mysys,thd->mysys_var);
+  set_mysys_var(thd->mysys_var);
   thd->thread_stack=(char*)&thd;
   thd->store_globals();
-  PSI_CALL_set_thread(thd->event_scheduler.m_psi);
+  PSI_CALL_set_thread(thd->get_psi());
   mysql_socket_set_thread_owner(thd->net.vio->mysql_socket);
 }
 
@@ -232,35 +230,22 @@ static THD* threadpool_add_connection(CONNECT *connect, void *scheduler_data)
     Store them in THD.
   */
 
-  pthread_setspecific(THR_KEY_mysys, 0);
+  set_mysys_var(NULL);
   my_thread_init();
-  st_my_thread_var* mysys_var= (st_my_thread_var *)pthread_getspecific(THR_KEY_mysys);
+  st_my_thread_var* mysys_var= my_thread_var;
+  PSI_CALL_set_thread(PSI_CALL_new_thread(key_thread_one_connection, connect, 0));
   if (!mysys_var ||!(thd= connect->create_thd(NULL)))
   {
     /* Out of memory? */
     connect->close_and_delete();
     if (mysys_var)
-    {
-#ifdef HAVE_PSI_INTERFACE
-      /*
-       current PSI is still from worker thread.
-       Set to 0, to avoid premature cleanup by my_thread_end
-      */
-      if (PSI_server) PSI_server->set_thread(0);
-#endif
       my_thread_end();
-    }
     return NULL;
   }
   delete connect;
   server_threads.insert(thd);
   thd->set_mysys_var(mysys_var);
   thd->event_scheduler.data= scheduler_data;
-
-  /* Create new PSI thread for use with the THD. */
-  thd->event_scheduler.m_psi=
-    PSI_CALL_new_thread(key_thread_one_connection, thd, thd->thread_id);
-
 
   /* Login. */
   thread_attach(thd);
@@ -270,8 +255,7 @@ static THD* threadpool_add_connection(CONNECT *connect, void *scheduler_data)
   thd->start_utime= now;
   thd->thr_create_utime= now;
 
-  if (setup_connection_thread_globals(thd))
-    goto end;
+  setup_connection_thread_globals(thd);
 
   if (thd_prepare_connection(thd))
     goto end;
@@ -301,6 +285,7 @@ static void threadpool_remove_connection(THD *thd)
   end_connection(thd);
   close_connection(thd, 0);
   unlink_thd(thd);
+  PSI_CALL_delete_current_thread(); // before THD is destroyed
   delete thd;
 
   /*

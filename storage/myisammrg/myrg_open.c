@@ -1,5 +1,6 @@
 /*
    Copyright (c) 2000, 2011, Oracle and/or its affiliates
+   Copyright (c) 2010, 2020, MariaDB Corporation.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -39,7 +40,7 @@ MYRG_INFO *myrg_open(const char *name, int mode, int handle_locking)
   uint files= 0, i, UNINIT_VAR(key_parts), min_keys= 0;
   size_t length, dir_length;
   ulonglong file_offset=0;
-  char name_buff[FN_REFLEN*2],buff[FN_REFLEN],*end;
+  char name_buff[FN_REFLEN*2],buff[FN_REFLEN];
   MYRG_INFO *m_info=0;
   File fd;
   IO_CACHE file;
@@ -63,8 +64,9 @@ MYRG_INFO *myrg_open(const char *name, int mode, int handle_locking)
   dir_length=dirname_part(name_buff, name, &name_buff_length);
   while ((length=my_b_gets(&file,buff,FN_REFLEN-1)))
   {
-    if ((end=buff+length)[-1] == '\n')
-      end[-1]='\0';
+    char *end= &buff[length - 1];
+    if (*end == '\n')
+      *end= '\0';
     if (buff[0] && buff[0] != '#')
       files++;
   }
@@ -72,8 +74,9 @@ MYRG_INFO *myrg_open(const char *name, int mode, int handle_locking)
   my_b_seek(&file, 0);
   while ((length=my_b_gets(&file,buff,FN_REFLEN-1)))
   {
-    if ((end=buff+length)[-1] == '\n')
-      *--end='\0';
+    char *end= &buff[length - 1];
+    if (*end == '\n')
+      *end= '\0';
     if (!buff[0])
       continue;		/* Skip empty lines */
     if (buff[0] == '#')
@@ -108,7 +111,8 @@ MYRG_INFO *myrg_open(const char *name, int mode, int handle_locking)
     if (!m_info)                                /* First file */
     {
       key_parts=isam->s->base.key_parts;
-      if (!(m_info= (MYRG_INFO*) my_malloc(sizeof(MYRG_INFO) +
+      if (!(m_info= (MYRG_INFO*) my_malloc(rg_key_memory_MYRG_INFO,
+                                           sizeof(MYRG_INFO) +
                                            files*sizeof(MYRG_TABLE) +
                                            key_parts*sizeof(long),
                                            MYF(MY_WME|MY_ZEROFILL))))
@@ -149,7 +153,8 @@ MYRG_INFO *myrg_open(const char *name, int mode, int handle_locking)
 
   if (bad_children)
     goto bad_children;
-  if (!m_info && !(m_info= (MYRG_INFO*) my_malloc(sizeof(MYRG_INFO),
+  if (!m_info && !(m_info= (MYRG_INFO*) my_malloc(rg_key_memory_MYRG_INFO,
+                                                  sizeof(MYRG_INFO),
                                                   MYF(MY_WME | MY_ZEROFILL))))
     goto err;
   /* Don't mark table readonly, for ALTER TABLE ... UNION=(...) to work */
@@ -285,7 +290,8 @@ MYRG_INFO *myrg_parent_open(const char *parent_name,
   }
 
   /* Allocate MERGE parent table structure. */
-  if (!(m_info= (MYRG_INFO*) my_malloc(sizeof(MYRG_INFO) +
+  if (!(m_info= (MYRG_INFO*) my_malloc(rg_key_memory_MYRG_INFO,
+                                       sizeof(MYRG_INFO) +
                                        child_count * sizeof(MYRG_TABLE),
                                        MYF(MY_WME | MY_ZEROFILL))))
     goto err; /* purecov: inspected */
@@ -435,7 +441,8 @@ int myrg_attach_children(MYRG_INFO *m_info, int handle_locking,
       if (!m_info->rec_per_key_part)
       {
         if(!(m_info->rec_per_key_part= (ulong*)
-             my_malloc(key_parts * sizeof(long), MYF(MY_WME))))
+             my_malloc(rg_key_memory_MYRG_INFO,
+                       key_parts * sizeof(long), MYF(MY_WME))))
           goto err; /* purecov: inspected */
         errpos= 1;
       }

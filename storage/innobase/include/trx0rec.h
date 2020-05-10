@@ -1,7 +1,7 @@
 /*****************************************************************************
 
 Copyright (c) 1996, 2016, Oracle and/or its affiliates. All Rights Reserved.
-Copyright (c) 2017, 2019, MariaDB Corporation.
+Copyright (c) 2017, 2020, MariaDB Corporation.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License as published by the Free Software
@@ -110,7 +110,7 @@ trx_undo_update_rec_get_sys_cols(
 					general parameters */
 	trx_id_t*	trx_id,		/*!< out: trx id */
 	roll_ptr_t*	roll_ptr,	/*!< out: roll ptr */
-	ulint*		info_bits);	/*!< out: info bits state */
+	byte*		info_bits);	/*!< out: info bits state */
 /*******************************************************************//**
 Builds an update vector based on a remaining part of an undo log record.
 @return remaining part of the record, NULL if an error detected, which
@@ -132,7 +132,7 @@ trx_undo_update_rec_get_update(
 				the update vector */
 	trx_id_t	trx_id,	/*!< in: transaction id from this undorecord */
 	roll_ptr_t	roll_ptr,/*!< in: roll pointer from this undo record */
-	ulint		info_bits,/*!< in: info bits from this undo record */
+	byte		info_bits,/*!< in: info bits from this undo record */
 	mem_heap_t*	heap,	/*!< in: memory heap from which the memory
 				needed is allocated */
 	upd_t**		upd);	/*!< out, own: update vector */
@@ -191,7 +191,7 @@ trx_undo_report_row_operation(
 	const rec_t*	rec,		/*!< in: case of an update or delete
 					marking, the record in the clustered
 					index; NULL if insert */
-	const offset_t*	offsets,	/*!< in: rec_get_offsets(rec) */
+	const rec_offs*	offsets,	/*!< in: rec_get_offsets(rec) */
 	roll_ptr_t*	roll_ptr)	/*!< out: DB_ROLL_PTR to the
 					undo log record */
 	MY_ATTRIBUTE((nonnull(1,2,8), warn_unused_result));
@@ -224,7 +224,7 @@ trx_undo_prev_version_build(
 				index_rec page and purge_view */
 	const rec_t*	rec,	/*!< in: version of a clustered index record */
 	dict_index_t*	index,	/*!< in: clustered index */
-	offset_t*	offsets,/*!< in/out: rec_get_offsets(rec, index) */
+	rec_offs*	offsets,/*!< in/out: rec_get_offsets(rec, index) */
 	mem_heap_t*	heap,	/*!< in: memory heap from which the memory
 				needed is allocated */
 	rec_t**		old_vers,/*!< out, own: previous version, or NULL if
@@ -240,23 +240,6 @@ trx_undo_prev_version_build(
 				into this function by purge thread or not.
 				And if we read "after image" of undo log */
 
-/** Parse MLOG_UNDO_INSERT.
-@param[in]	ptr	log record
-@param[in]	end_ptr	end of log record buffer
-@param[in,out]	page	page or NULL
-@return	end of log record
-@retval	NULL	if the log record is incomplete */
-byte*
-trx_undo_parse_add_undo_rec(
-	const byte*	ptr,
-	const byte*	end_ptr,
-	page_t*		page);
-/** Erase the unused undo log page end.
-@param[in,out]	undo_page	undo log page
-@return whether the page contained something */
-bool
-trx_undo_erase_page_end(page_t* undo_page);
-
 /** Read from an undo log record a non-virtual column value.
 @param[in,out]	ptr		pointer to remaining part of the undo record
 @param[in,out]	field		stored field
@@ -264,12 +247,8 @@ trx_undo_erase_page_end(page_t* undo_page);
 @param[in,out]	orig_len	original length of the locally stored part
 of an externally stored column, or 0
 @return remaining part of undo log record after reading these values */
-byte*
-trx_undo_rec_get_col_val(
-        const byte*     ptr,
-        const byte**    field,
-        ulint*          len,
-        ulint*          orig_len);
+byte *trx_undo_rec_get_col_val(const byte *ptr, const byte **field,
+                               uint32_t *len, uint32_t *orig_len);
 
 /** Read virtual column value from undo log
 @param[in]	table		the table
@@ -292,7 +271,7 @@ info, and verify the column is still indexed, and output its position
 @param[in,out]	is_undo_log	his function is used to parse both undo log,
 				and online log for virtual columns. So
 				check to see if this is undo log
-@param[out]	field_no	the column number
+@param[out]	field_no	the column number, or FIL_NULL if not indexed
 @return remaining part of undo log record after reading these values */
 const byte*
 trx_undo_read_v_idx(
@@ -300,7 +279,7 @@ trx_undo_read_v_idx(
 	const byte*		ptr,
 	bool			first_v_col,
 	bool*			is_undo_log,
-	ulint*			field_no);
+	uint32_t*		field_no);
 
 /* Types of an undo log record: these have to be smaller than 16, as the
 compilation info multiplied by 16 is ORed to this value in an undo log

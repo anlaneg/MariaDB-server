@@ -207,7 +207,7 @@ static void memo_slot_release(mtr_memo_slot_t *slot)
   switch (slot->type) {
 #ifdef UNIV_DEBUG
   default:
-    ut_ad(!"invalid type");
+    ut_ad("invalid type" == 0);
     break;
   case MTR_MEMO_MODIFY:
     break;
@@ -243,7 +243,7 @@ struct ReleaseLatches {
     switch (slot->type) {
 #ifdef UNIV_DEBUG
     default:
-      ut_ad(!"invalid type");
+      ut_ad("invalid type" == 0);
       break;
     case MTR_MEMO_MODIFY:
       break;
@@ -297,11 +297,10 @@ struct DebugCheck {
 /** Release a resource acquired by the mini-transaction. */
 struct ReleaseBlocks {
 	/** Release specific object */
-	ReleaseBlocks(lsn_t start_lsn, lsn_t end_lsn, FlushObserver* observer)
+	ReleaseBlocks(lsn_t start_lsn, lsn_t end_lsn)
 		:
 		m_end_lsn(end_lsn),
-		m_start_lsn(start_lsn),
-		m_flush_observer(observer)
+		m_start_lsn(start_lsn)
 	{
 		/* Do nothing */
 	}
@@ -316,8 +315,7 @@ struct ReleaseBlocks {
 
 		block = reinterpret_cast<buf_block_t*>(slot->object);
 
-		buf_flush_note_modification(block, m_start_lsn,
-					    m_end_lsn, m_flush_observer);
+		buf_flush_note_modification(block, m_start_lsn, m_end_lsn);
 	}
 
 	/** @return true always. */
@@ -340,9 +338,6 @@ struct ReleaseBlocks {
 
 	/** Mini-transaction REDO end LSN */
 	lsn_t		m_start_lsn;
-
-	/** Flush observer */
-	FlushObserver*	m_flush_observer;
 };
 
 /** Write the block contents to the REDO log */
@@ -356,25 +351,6 @@ struct mtr_write_log_t {
 	}
 };
 
-/** Append records to the system-wide redo log buffer.
-@param[in]	log	redo log records */
-void
-mtr_write_log(
-	const mtr_buf_t*	log)
-{
-	const ulint	len = log->size();
-	mtr_write_log_t	write_log;
-
-	ut_ad(!recv_no_log_write);
-	DBUG_PRINT("ib_log",
-		   (ULINTPF " extra bytes written at " LSN_PF,
-		    len, log_sys.lsn));
-
-	log_reserve_and_open(len);
-	log->for_each_block(write_log);
-	log_close();
-}
-
 /** Start a mini-transaction. */
 void mtr_t::start()
 {
@@ -383,17 +359,18 @@ void mtr_t::start()
   ut_d(m_start= true);
   ut_d(m_commit= false);
 
+  m_last= nullptr;
+  m_last_offset= 0;
+
   new(&m_memo) mtr_buf_t();
   new(&m_log) mtr_buf_t();
 
   m_made_dirty= false;
   m_inside_ibuf= false;
   m_modifications= false;
-  m_n_log_recs= 0;
   m_log_mode= MTR_LOG_ALL;
   ut_d(m_user_space_id= TRX_SYS_SPACE);
   m_user_space= nullptr;
-  m_flush_observer= nullptr;
   m_commit_lsn= 0;
 }
 
@@ -417,7 +394,7 @@ void mtr_t::commit()
   ut_ad(!m_modifications || !recv_no_log_write);
   ut_ad(!m_modifications || m_log_mode != MTR_LOG_NONE);
 
-  if (m_modifications && (m_n_log_recs || m_log_mode == MTR_LOG_NO_REDO))
+  if (m_modifications && (m_log_mode == MTR_LOG_NO_REDO || !m_log.empty()))
   {
     ut_ad(!srv_read_only_mode || m_log_mode == MTR_LOG_NO_REDO);
 
@@ -437,8 +414,7 @@ void mtr_t::commit()
     log_mutex_exit();
 
     m_memo.for_each_block_in_reverse(CIterate<const ReleaseBlocks>
-                                     (ReleaseBlocks(start_lsn, m_commit_lsn,
-                                                    m_flush_observer)));
+                                     (ReleaseBlocks(start_lsn, m_commit_lsn)));
     if (m_made_dirty)
       log_flush_order_mutex_exit();
 
@@ -452,7 +428,7 @@ void mtr_t::commit()
 
 /** Commit a mini-transaction that did not modify any pages,
 but generated some redo log on a higher level, such as
-MLOG_FILE_NAME records and an optional MLOG_CHECKPOINT marker.
+FILE_MODIFY records and an optional FILE_CHECKPOINT marker.
 The caller must invoke log_mutex_enter() and log_mutex_exit().
 This is to be used at log_checkpoint().
 @param[in]	checkpoint_lsn		log checkpoint LSN, or 0 */
@@ -461,27 +437,20 @@ void mtr_t::commit_files(lsn_t checkpoint_lsn)
 	ut_ad(log_mutex_own());
 	ut_ad(is_active());
 	ut_ad(!is_inside_ibuf());
-	ut_ad(get_log_mode() == MTR_LOG_ALL);
+	ut_ad(m_log_mode == MTR_LOG_ALL);
 	ut_ad(!m_made_dirty);
 	ut_ad(m_memo.size() == 0);
 	ut_ad(!srv_read_only_mode);
-	ut_ad(checkpoint_lsn || m_n_log_recs > 1);
-
-	switch (m_n_log_recs) {
-	case 0:
-		break;
-	case 1:
-		*m_log.front()->begin() |= MLOG_SINGLE_REC_FLAG;
-		break;
-	default:
-		mlog_catenate_ulint(&m_log, MLOG_MULTI_REC_END, MLOG_1BYTE);
-	}
 
 	if (checkpoint_lsn) {
-		byte*	ptr = m_log.push<byte*>(SIZE_OF_MLOG_CHECKPOINT);
-		compile_time_assert(SIZE_OF_MLOG_CHECKPOINT == 1 + 8);
-		*ptr = MLOG_CHECKPOINT;
-		mach_write_to_8(ptr + 1, checkpoint_lsn);
+		byte*	ptr = m_log.push<byte*>(SIZE_OF_FILE_CHECKPOINT);
+		compile_time_assert(SIZE_OF_FILE_CHECKPOINT == 3 + 8 + 1);
+		*ptr = FILE_CHECKPOINT | (SIZE_OF_FILE_CHECKPOINT - 2);
+		::memset(ptr + 1, 0, 2);
+		mach_write_to_8(ptr + 3, checkpoint_lsn);
+		ptr[3 + 8] = 0;
+	} else {
+		*m_log.push<byte*>(1) = 0;
 	}
 
 	finish_write(m_log.size());
@@ -489,14 +458,14 @@ void mtr_t::commit_files(lsn_t checkpoint_lsn)
 
 	if (checkpoint_lsn) {
 		DBUG_PRINT("ib_log",
-			   ("MLOG_CHECKPOINT(" LSN_PF ") written at " LSN_PF,
-			    checkpoint_lsn, log_sys.lsn));
+			   ("FILE_CHECKPOINT(" LSN_PF ") written at " LSN_PF,
+			    checkpoint_lsn, log_sys.get_lsn()));
 	}
 }
 
 #ifdef UNIV_DEBUG
 /** Check if a tablespace is associated with the mini-transaction
-(needed for generating a MLOG_FILE_NAME record)
+(needed for generating a FILE_MODIFY record)
 @param[in]	space	tablespace
 @return whether the mini-transaction is associated with the space */
 bool
@@ -504,12 +473,11 @@ mtr_t::is_named_space(ulint space) const
 {
 	ut_ad(!m_user_space || m_user_space->id != TRX_SYS_SPACE);
 
-	switch (get_log_mode()) {
+	switch (m_log_mode) {
 	case MTR_LOG_NONE:
 	case MTR_LOG_NO_REDO:
 		return(true);
 	case MTR_LOG_ALL:
-	case MTR_LOG_SHORT_INSERTS:
 		return(m_user_space_id == space
 		       || is_predefined_tablespace(space));
 	}
@@ -518,19 +486,18 @@ mtr_t::is_named_space(ulint space) const
 	return(false);
 }
 /** Check if a tablespace is associated with the mini-transaction
-(needed for generating a MLOG_FILE_NAME record)
+(needed for generating a FILE_MODIFY record)
 @param[in]	space	tablespace
 @return whether the mini-transaction is associated with the space */
 bool mtr_t::is_named_space(const fil_space_t* space) const
 {
   ut_ad(!m_user_space || m_user_space->id != TRX_SYS_SPACE);
 
-  switch (get_log_mode()) {
+  switch (m_log_mode) {
   case MTR_LOG_NONE:
   case MTR_LOG_NO_REDO:
     return true;
   case MTR_LOG_ALL:
-  case MTR_LOG_SHORT_INSERTS:
     return m_user_space == space || is_predefined_tablespace(space->id);
   }
 
@@ -557,10 +524,9 @@ mtr_t::x_lock_space(ulint space_id, const char* file, unsigned line)
 	} else if ((space = m_user_space) && space_id == space->id) {
 	} else {
 		space = fil_space_get(space_id);
-		ut_ad(get_log_mode() != MTR_LOG_NO_REDO
+		ut_ad(m_log_mode != MTR_LOG_NO_REDO
 		      || space->purpose == FIL_TYPE_TEMPORARY
-		      || space->purpose == FIL_TYPE_IMPORT
-		      || space->redo_skipped_count > 0);
+		      || space->purpose == FIL_TYPE_IMPORT);
 	}
 
 	ut_ad(space);
@@ -623,59 +589,36 @@ inline ulint mtr_t::prepare_write()
 		ut_ad(m_log_mode == MTR_LOG_NO_REDO);
 		ut_ad(m_log.size() == 0);
 		log_mutex_enter();
-		m_commit_lsn = log_sys.lsn;
+		m_commit_lsn = log_sys.get_lsn();
 		return 0;
 	}
 
 	ulint	len	= m_log.size();
-	ulint	n_recs	= m_n_log_recs;
 	ut_ad(len > 0);
-	ut_ad(n_recs > 0);
 
 	if (len > srv_log_buffer_size / 2) {
 		log_buffer_extend(ulong((len + 1) * 2));
 	}
 
-	ut_ad(m_n_log_recs == n_recs);
-
 	fil_space_t*	space = m_user_space;
 
 	if (space != NULL && is_predefined_tablespace(space->id)) {
-		/* Omit MLOG_FILE_NAME for predefined tablespaces. */
+		/* Omit FILE_MODIFY for predefined tablespaces. */
 		space = NULL;
 	}
 
 	log_mutex_enter();
 
-	if (fil_names_write_if_was_clean(space, this)) {
-		/* This mini-transaction was the first one to modify
-		this tablespace since the latest checkpoint, so
-		some MLOG_FILE_NAME records were appended to m_log. */
-		ut_ad(m_n_log_recs > n_recs);
-		mlog_catenate_ulint(&m_log, MLOG_MULTI_REC_END, MLOG_1BYTE);
+	if (fil_names_write_if_was_clean(space)) {
 		len = m_log.size();
 	} else {
 		/* This was not the first time of dirtying a
 		tablespace since the latest checkpoint. */
-
-		ut_ad(n_recs == m_n_log_recs);
-
-		if (n_recs <= 1) {
-			ut_ad(n_recs == 1);
-
-			/* Flag the single log record as the
-			only record in this mini-transaction. */
-			*m_log.front()->begin() |= MLOG_SINGLE_REC_FLAG;
-		} else {
-			/* Because this mini-transaction comprises
-			multiple log records, append MLOG_MULTI_REC_END
-			at the end. */
-
-			mlog_catenate_ulint(&m_log, MLOG_MULTI_REC_END,
-					    MLOG_1BYTE);
-			len++;
-		}
+		ut_ad(len == m_log.size());
 	}
+
+	*m_log.push<byte*>(1) = 0;
+	len++;
 
 	/* check and attempt a checkpoint if exceeding capacity */
 	log_margin_checkpoint_age(len);
@@ -837,18 +780,31 @@ mtr_t::memo_contains_page_flagged(
 		? NULL : iteration.functor.get_block();
 }
 
-/** Mark the given latched page as modified.
-@param[in]	ptr	pointer to within buffer frame */
-void
-mtr_t::memo_modify_page(const byte* ptr)
+/** Find a block, preferrably in MTR_MEMO_MODIFY state */
+struct FindModified
 {
-	buf_block_t*	block = memo_contains_page_flagged(
-		ptr, MTR_MEMO_PAGE_X_FIX | MTR_MEMO_PAGE_SX_FIX);
-	ut_ad(block != NULL);
+  const mtr_memo_slot_t *found= nullptr;
+  const buf_block_t& block;
 
-	if (!memo_contains(get_memo(), block, MTR_MEMO_MODIFY)) {
-		memo_push(block, MTR_MEMO_MODIFY);
-	}
+  FindModified(const buf_block_t &block) : block(block) {}
+  bool operator()(const mtr_memo_slot_t* slot)
+  {
+    if (slot->object != &block)
+      return true;
+    found= slot;
+    return slot->type != MTR_MEMO_MODIFY;
+  }
+};
+
+/** Mark the given latched page as modified.
+@param block   page that will be modified */
+void mtr_t::modify(const buf_block_t &block)
+{
+  Iterate<FindModified> iteration(block);
+  m_memo.for_each_block_in_reverse(iteration);
+  ut_ad(iteration.functor.found);
+  if (iteration.functor.found->type != MTR_MEMO_MODIFY)
+    memo_push(const_cast<buf_block_t*>(&block), MTR_MEMO_MODIFY);
 }
 
 /** Print info of an mtr handle. */

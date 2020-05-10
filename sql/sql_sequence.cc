@@ -452,10 +452,9 @@ int SEQUENCE::read_initial_values(TABLE *table)
         where we don't have a mdl lock on the table
       */
 
-      mdl_request.init(MDL_key::TABLE,
-                       table->s->db.str,
-                       table->s->table_name.str,
-                       MDL_SHARED_READ, MDL_EXPLICIT);
+      MDL_REQUEST_INIT(&mdl_request, MDL_key::TABLE, table->s->db.str,
+                       table->s->table_name.str, MDL_SHARED_READ,
+                       MDL_EXPLICIT);
       mdl_requests.push_front(&mdl_request);
       if (thd->mdl_context.acquire_locks(&mdl_requests,
                                          thd->variables.lock_wait_timeout))
@@ -581,7 +580,6 @@ void sequence_definition::adjust_values(longlong next_value)
 int sequence_definition::write_initial_sequence(TABLE *table)
 {
   int error;
-  THD *thd= table->in_use;
   MY_BITMAP *save_write_set;
 
   store_fields(table);
@@ -589,15 +587,14 @@ int sequence_definition::write_initial_sequence(TABLE *table)
   table->s->sequence->copy(this);
   /*
     Sequence values will be replicated as a statement
-    like 'create sequence'. So disable binary log temporarily
+    like 'create sequence'. So disable row logging for this table & statement
   */
-  tmp_disable_binlog(thd);
+  table->file->row_logging= table->file->row_logging_init= 0;
   save_write_set= table->write_set;
   table->write_set= &table->s->all_set;
   table->s->sequence->initialized= SEQUENCE::SEQ_IN_PREPARE;
   error= table->file->ha_write_row(table->record[0]);
   table->s->sequence->initialized= SEQUENCE::SEQ_UNINTIALIZED;
-  reenable_binlog(thd);
   table->write_set= save_write_set;
   if (unlikely(error))
     table->file->print_error(error, MYF(0));

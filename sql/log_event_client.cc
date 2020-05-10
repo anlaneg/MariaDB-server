@@ -1,6 +1,6 @@
 /*
    Copyright (c) 2000, 2018, Oracle and/or its affiliates.
-   Copyright (c) 2009, 2019, MariaDB
+   Copyright (c) 2009, 2020, MariaDB
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -1093,7 +1093,7 @@ void Rows_log_event::change_to_flashback_event(PRINT_EVENT_INFO *print_event_inf
   Table_map_log_event *map;
   table_def *td;
   DYNAMIC_ARRAY rows_arr;
-  uchar *swap_buff1, *swap_buff2;
+  uchar *swap_buff1;
   uchar *rows_pos= rows_buff + m_rows_before_size;
 
   if (!(map= print_event_info->m_table_map.get_table(m_table_id)) ||
@@ -1104,7 +1104,7 @@ void Rows_log_event::change_to_flashback_event(PRINT_EVENT_INFO *print_event_inf
   if (((get_general_type_code() == WRITE_ROWS_EVENT) && (m_rows_buf==m_rows_end)))
     goto end;
 
-  (void) my_init_dynamic_array(&rows_arr, sizeof(LEX_STRING), 8, 8, MYF(0));
+  (void) my_init_dynamic_array(PSI_NOT_INSTRUMENTED, &rows_arr, sizeof(LEX_STRING), 8, 8, MYF(0));
 
   for (uchar *value= m_rows_buf; value < m_rows_end; )
   {
@@ -1119,7 +1119,7 @@ void Rows_log_event::change_to_flashback_event(PRINT_EVENT_INFO *print_event_inf
     }
     value+= length1;
 
-    swap_buff1= (uchar *) my_malloc(length1, MYF(0));
+    swap_buff1= (uchar *) my_malloc(PSI_NOT_INSTRUMENTED, length1, MYF(0));
     if (!swap_buff1)
     {
       fprintf(stderr, "\nError: Out of memory. "
@@ -1142,7 +1142,7 @@ void Rows_log_event::change_to_flashback_event(PRINT_EVENT_INFO *print_event_inf
       }
       value+= length2;
 
-      swap_buff2= (uchar *) my_malloc(length2, MYF(0));
+      void *swap_buff2= my_malloc(PSI_NOT_INSTRUMENTED, length2, MYF(0));
       if (!swap_buff2)
       {
         fprintf(stderr, "\nError: Out of memory. "
@@ -1150,27 +1150,20 @@ void Rows_log_event::change_to_flashback_event(PRINT_EVENT_INFO *print_event_inf
         exit(1);
       }
       memcpy(swap_buff2, start_pos + length1, length2); // WHERE part
-    }
 
-    if (ev_type == UPDATE_ROWS_EVENT ||
-        ev_type == UPDATE_ROWS_EVENT_V1)
-    {
       /* Swap SET and WHERE part */
       memcpy(start_pos, swap_buff2, length2);
       memcpy(start_pos + length2, swap_buff1, length1);
+      my_free(swap_buff2);
     }
 
-    /* Free tmp buffers */
     my_free(swap_buff1);
-    if (ev_type == UPDATE_ROWS_EVENT ||
-        ev_type == UPDATE_ROWS_EVENT_V1)
-      my_free(swap_buff2);
 
     /* Copying one row into a buff, and pushing into the array */
     LEX_STRING one_row;
 
     one_row.length= length1 + length2;
-    one_row.str=    (char *) my_malloc(one_row.length, MYF(0));
+    one_row.str=    (char *) my_malloc(PSI_NOT_INSTRUMENTED, one_row.length, MYF(0));
     memcpy(one_row.str, start_pos, one_row.length);
     if (one_row.str == NULL || push_dynamic(&rows_arr, (uchar *) &one_row))
     {
@@ -1637,7 +1630,7 @@ bool Log_event::print_base64(IO_CACHE* file,
   {
     size_t const tmp_str_sz= my_base64_needed_encoded_length((int) size);
     char *tmp_str;
-    if (!(tmp_str= (char *) my_malloc(tmp_str_sz, MYF(MY_WME))))
+    if (!(tmp_str= (char *) my_malloc(PSI_NOT_INSTRUMENTED, tmp_str_sz, MYF(MY_WME))))
       goto err;
 
     if (my_base64_encode(ptr, (size_t) size, tmp_str))
@@ -1875,9 +1868,10 @@ bool Query_log_event::print_query_header(IO_CACHE* file,
   }
 
   /*
-    If flags2_inited==0, this is an event from 3.23 or 4.0; nothing to
-    print (remember we don't produce mixed relay logs so there cannot be
-    5.0 events before that one so there is nothing to reset).
+    If flags2_inited==0, this is an event from 3.23 or 4.0 or a dummy
+    event from the mtr test suite; nothing to print (remember we don't
+    produce mixed relay logs so there cannot be 5.0 events before that
+    one so there is nothing to reset).
   */
   if (likely(flags2_inited)) /* likely as this will mainly read 5.0 logs */
   {
@@ -1906,6 +1900,8 @@ bool Query_log_event::print_query_header(IO_CACHE* file,
           print_set_option(file, tmp, OPTION_NO_CHECK_CONSTRAINT_CHECKS,
                            ~flags2,
                            "@@session.check_constraint_checks", &need_comma) ||
+          print_set_option(file, tmp, OPTION_IF_EXISTS, flags2,
+                           "@@session.sql_if_exists", &need_comma)||
           my_b_printf(file,"%s\n", print_event_info->delimiter))
         goto err;
       print_event_info->flags2= flags2;
@@ -2491,7 +2487,7 @@ bool User_var_log_event::print(FILE* file, PRINT_EVENT_INFO* print_event_info)
       bool error;
 
       // 2 hex digits / byte
-      hex_str= (char *) my_malloc(2 * val_len + 1 + 3, MYF(MY_WME));
+      hex_str= (char *) my_malloc(PSI_NOT_INSTRUMENTED, 2 * val_len + 1 + 3, MYF(MY_WME));
       if (!hex_str)
         goto err;
       str_to_hex(hex_str, val, val_len);
@@ -2853,7 +2849,7 @@ bool copy_cache_to_string_wrapped(IO_CACHE *cache,
   if (reinit_io_cache(cache, READ_CACHE, 0L, FALSE, FALSE))
     goto err;
 
-  if (!(to->str= (char*) my_malloc((size_t)cache->end_of_file + fmt_size,
+  if (!(to->str= (char*) my_malloc(PSI_NOT_INSTRUMENTED, (size_t)cache->end_of_file + fmt_size,
                                    MYF(0))))
   {
     perror("Out of memory: can't allocate memory in "
@@ -3108,7 +3104,7 @@ int Table_map_log_event::rewrite_db(const char* new_db, size_t new_len,
   // Create new temp_buf
   ulong event_cur_len= uint4korr(temp_buf + EVENT_LEN_OFFSET);
   ulong event_new_len= event_cur_len + len_diff;
-  char* new_temp_buf= (char*) my_malloc(event_new_len, MYF(MY_WME));
+  char* new_temp_buf= (char*) my_malloc(PSI_NOT_INSTRUMENTED, event_new_len, MYF(MY_WME));
 
   if (!new_temp_buf)
   {
@@ -3150,7 +3146,7 @@ int Table_map_log_event::rewrite_db(const char* new_db, size_t new_len,
   char const* tblnam= m_tblnam;
   uchar* coltype= m_coltype;
 
-  m_memory= (uchar*) my_multi_malloc(MYF(MY_WME),
+  m_memory= (uchar*) my_multi_malloc(PSI_NOT_INSTRUMENTED, MYF(MY_WME),
                                      &m_dbnam, (uint) m_dblen + 1,
                                      &m_tblnam, (uint) m_tbllen + 1,
                                      &m_coltype, (uint) m_colcnt,
@@ -3766,6 +3762,7 @@ st_print_event_info::st_print_event_info()
   delimiter[0]= ';';
   delimiter[1]= 0;
   flags2_inited= 0;
+  flags2= 0;
   sql_mode_inited= 0;
   row_events= 0;
   sql_mode= 0;
@@ -3801,7 +3798,7 @@ bool copy_event_cache_to_string_and_reinit(IO_CACHE *cache, LEX_STRING *to)
 {
   reinit_io_cache(cache, READ_CACHE, 0L, FALSE, FALSE);
   if (cache->end_of_file > SIZE_T_MAX ||
-      !(to->str= (char*) my_malloc((to->length= (size_t)cache->end_of_file), MYF(0))))
+      !(to->str= (char*) my_malloc(PSI_NOT_INSTRUMENTED, (to->length= (size_t)cache->end_of_file), MYF(0))))
   {
     perror("Out of memory: can't allocate memory in copy_event_cache_to_string_and_reinit().");
     goto err;
@@ -3892,11 +3889,44 @@ Gtid_log_event::print(FILE *file, PRINT_EVENT_INFO *print_event_info)
                       buf, print_event_info->delimiter))
         goto err;
   }
-  if (!(flags2 & FL_STANDALONE))
-    if (my_b_printf(&cache, is_flashback ? "COMMIT\n%s\n" : "BEGIN\n%s\n", print_event_info->delimiter))
+  if ((flags2 & FL_PREPARED_XA) && !is_flashback)
+  {
+    my_b_write_string(&cache, "XA START ");
+    xid.serialize();
+    my_b_write(&cache, (uchar*) xid.buf, strlen(xid.buf));
+    if (my_b_printf(&cache, "%s\n", print_event_info->delimiter))
       goto err;
+  }
+  else if (!(flags2 & FL_STANDALONE))
+  {
+    if (my_b_printf(&cache, is_flashback ? "COMMIT\n%s\n" : "BEGIN\n%s\n",
+                    print_event_info->delimiter))
+      goto err;
+  }
 
   return cache.flush_data();
 err:
   return 1;
+}
+
+bool XA_prepare_log_event::print(FILE* file, PRINT_EVENT_INFO* print_event_info)
+{
+  Write_on_release_cache cache(&print_event_info->head_cache, file,
+                               Write_on_release_cache::FLUSH_F, this);
+  m_xid.serialize();
+
+  if (!print_event_info->short_form)
+  {
+    print_header(&cache, print_event_info, FALSE);
+    if (my_b_printf(&cache, "\tXID = %s\n", m_xid.buf))
+      goto error;
+  }
+
+  if (my_b_printf(&cache, "XA PREPARE %s\n%s\n",
+                   m_xid.buf, print_event_info->delimiter))
+    goto error;
+
+  return cache.flush_data();
+error:
+  return TRUE;
 }

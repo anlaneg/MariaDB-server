@@ -1,7 +1,7 @@
 /*****************************************************************************
 
 Copyright (C) 2012, 2014 Facebook, Inc. All Rights Reserved.
-Copyright (C) 2014, 2019, MariaDB Corporation.
+Copyright (C) 2014, 2020, MariaDB Corporation.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License as published by the Free Software
@@ -367,8 +367,8 @@ btr_defragment_calc_n_recs_for_size(
 {
 	page_t* page = buf_block_get_frame(block);
 	ulint n_recs = 0;
-	offset_t offsets_[REC_OFFS_NORMAL_SIZE];
-	offset_t* offsets = offsets_;
+	rec_offs offsets_[REC_OFFS_NORMAL_SIZE];
+	rec_offs* offsets = offsets_;
 	rec_offs_init(offsets_);
 	mem_heap_t* heap = NULL;
 	ulint size = 0;
@@ -444,7 +444,7 @@ btr_defragment_merge_pages(
 	// reorganizing the page, otherwise we need to reorganize the page
 	// first to release more space.
 	if (move_size > max_ins_size) {
-		if (!btr_page_reorganize_block(false, page_zip_level,
+		if (!btr_page_reorganize_block(page_zip_level,
 					       to_block, index,
 					       mtr)) {
 			if (!dict_index_is_clust(index)
@@ -666,8 +666,9 @@ btr_defragment_n_pages(
 		max_data_size = optimal_page_size;
 	}
 
-	reserved_space = ut_min((ulint)(optimal_page_size
-			      * (1 - srv_defragment_fill_factor)),
+	reserved_space = ut_min(static_cast<ulint>(
+					static_cast<double>(optimal_page_size)
+					* (1 - srv_defragment_fill_factor)),
 			     (data_size_per_rec
 			      * srv_defragment_fill_factor_n_recs));
 	optimal_page_size -= reserved_space;
@@ -770,6 +771,7 @@ static void btr_defragment_chunk(void*)
 				return;
 			}
 		}
+		log_free_check();
 		mtr_start(&mtr);
 		cursor = btr_pcur_get_btr_cur(pcur);
 		index = btr_cur_get_index(cursor);

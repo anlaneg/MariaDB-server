@@ -1,6 +1,6 @@
 /*****************************************************************************
 Copyright (C) 2013, 2015, Google Inc. All Rights Reserved.
-Copyright (c) 2015, 2019, MariaDB Corporation.
+Copyright (c) 2015, 2020, MariaDB Corporation.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License as published by the Free Software
@@ -93,11 +93,6 @@ struct fil_space_rotate_state_t
 				space */
 	bool starting;		/*!< initial write of IV */
 	bool flushing;		/*!< space is being flushed at end of rotate */
-	struct {
-		bool is_active; /*!< is scrubbing active in this space */
-		time_t last_scrub_completed; /*!< when was last scrub
-					     completed */
-	} scrubbing;
 };
 
 #ifndef UNIV_INNOCHECKSUM
@@ -226,18 +221,6 @@ struct fil_crypt_stat_t {
 	ulint estimated_iops;
 };
 
-/** Status info about scrubbing */
-struct fil_space_scrub_status_t {
-	ulint space;             /*!< tablespace id */
-	bool compressed;        /*!< is space compressed  */
-	time_t last_scrub_completed;  /*!< when was last scrub completed */
-	bool scrubbing;               /*!< is scrubbing ongoing */
-	time_t current_scrub_started; /*!< when started current scrubbing */
-	ulint current_scrub_active_threads; /*!< current scrub active threads */
-	ulint current_scrub_page_number; /*!< current scrub page no */
-	ulint current_scrub_max_page_number; /*!< current scrub max page no */
-};
-
 /*********************************************************************
 Init space crypt */
 UNIV_INTERN
@@ -290,20 +273,6 @@ UNIV_INTERN
 void
 fil_space_destroy_crypt_data(
 	fil_space_crypt_t **crypt_data);
-
-/******************************************************************
-Parse a MLOG_FILE_WRITE_CRYPT_DATA log entry
-@param[in]	ptr		Log entry start
-@param[in]	end_ptr		Log entry end
-@param[out]	err		DB_SUCCESS or DB_DECRYPTION_FAILED
-@return position on log buffer */
-UNIV_INTERN
-const byte*
-fil_parse_write_crypt_data(
-	const byte*		ptr,
-	const byte*		end_ptr,
-	dberr_t*		err)
-	MY_ATTRIBUTE((warn_unused_result));
 
 /** Amend encryption information from redo log.
 @param[in]	space	tablespace
@@ -419,10 +388,7 @@ fil_crypt_set_rotation_iops(
 /*********************************************************************
 Adjust encrypt tables
 @param[in]	val		New setting for innodb-encrypt-tables */
-UNIV_INTERN
-void
-fil_crypt_set_encrypt_tables(
-	uint val);
+void fil_crypt_set_encrypt_tables(ulong val);
 
 /*********************************************************************
 Init threads for key rotation */
@@ -462,18 +428,6 @@ UNIV_INTERN
 void
 fil_crypt_total_stat(
 	fil_crypt_stat_t *stat);
-
-/**
-Get scrub status for a space (used by information_schema)
-
-@param[in]	space		Tablespace
-@param[out]	status		Scrub status
-return 0 if data found */
-UNIV_INTERN
-void
-fil_space_get_scrub_status(
-	const fil_space_t*		space,
-	fil_space_scrub_status_t*	status);
 
 #include "fil0crypt.ic"
 #endif /* !UNIV_INNOCHECKSUM */

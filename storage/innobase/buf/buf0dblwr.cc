@@ -34,6 +34,8 @@ Created 2011/12/19
 #include "fil0crypt.h"
 #include "fil0pagecompress.h"
 
+using st_::span;
+
 /** The doublewrite buffer */
 buf_dblwr_t*	buf_dblwr = NULL;
 
@@ -242,8 +244,7 @@ too_small:
 		ut_ad(rw_lock_get_x_lock_count(&new_block->lock) == 1);
 		page_no = new_block->page.id.page_no();
 		/* We only do this in the debug build, to ensure that
-		both the check in buf_flush_init_for_writing() and
-		recv_parse_or_apply_log_rec_body() will see a valid
+		the check in buf_flush_init_for_writing() will see a valid
 		page type. The flushes of new_block are actually
 		unnecessary here.  */
 		ut_d(mtr.write<2>(*new_block,
@@ -542,7 +543,7 @@ buf_dblwr_process()
 
 		const ulint physical_size = space->physical_size();
 		const ulint zip_size = space->zip_size();
-		ut_ad(!buf_page_is_zeroes(page, physical_size));
+		ut_ad(!buf_is_zeroes(span<const byte>(page, physical_size)));
 
 		/* We want to ensure that for partial reads the
 		unread portion of the page is NUL. */
@@ -565,8 +566,8 @@ buf_dblwr_process()
 				<< "error: " << ut_strerr(err);
 		}
 
-		const bool is_all_zero = buf_page_is_zeroes(
-			read_buf, physical_size);
+		const bool is_all_zero = buf_is_zeroes(
+			span<const byte>(read_buf, physical_size));
 		const bool expect_encrypted = space->crypt_data
 			&& space->crypt_data->type != CRYPT_SCHEME_UNENCRYPTED;
 		bool is_corrupted = false;
@@ -661,7 +662,7 @@ bad:
 
 	recv_dblwr.pages.clear();
 
-	fil_flush_file_spaces(FIL_TYPE_TABLESPACE);
+	fil_flush_file_spaces();
 	aligned_free(read_buf);
 }
 
@@ -713,7 +714,7 @@ buf_dblwr_update(
 			mutex_exit(&buf_dblwr->mutex);
 			/* This will finish the batch. Sync data files
 			to the disk. */
-			fil_flush_file_spaces(FIL_TYPE_TABLESPACE);
+			fil_flush_file_spaces();
 			mutex_enter(&buf_dblwr->mutex);
 
 			/* We can now reuse the doublewrite memory buffer: */
@@ -911,7 +912,7 @@ buf_dblwr_flush_buffered_writes()
 		/* Sync the writes to the disk. */
 		buf_dblwr_sync_datafiles();
 		/* Now we flush the data to disk (for example, with fsync) */
-		fil_flush_file_spaces(FIL_TYPE_TABLESPACE);
+		fil_flush_file_spaces();
 		return;
 	}
 

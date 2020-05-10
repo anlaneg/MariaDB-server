@@ -645,6 +645,26 @@ enum enum_vio_type vio_type(Vio* vio)
   return vio->type;
 }
 
+static const LEX_CSTRING vio_type_names[] =
+{
+  { STRING_WITH_LEN("Error") }, // cannot happen
+  { STRING_WITH_LEN("TCP/IP") },
+  { STRING_WITH_LEN("Socket") },
+  { STRING_WITH_LEN("Named Pipe") },
+  { STRING_WITH_LEN("SSL/TLS") },
+  { STRING_WITH_LEN("Shared Memory") }
+};
+
+const char *vio_type_name(enum enum_vio_type vio_type, size_t *len)
+{
+  int index= vio_type >= FIRST_VIO_TYPE && vio_type <= LAST_VIO_TYPE
+             ?  vio_type : 0;
+
+  *len= vio_type_names[index].length;
+  return vio_type_names[index].str;
+}
+
+
 my_socket vio_fd(Vio* vio)
 {
   return mysql_socket_getfd(vio->mysql_socket);
@@ -914,7 +934,7 @@ static my_bool socket_peek_read(Vio *vio, uint *bytes)
   @param timeout  Interval (in milliseconds) to wait for an I/O event.
                   A negative timeout value means an infinite timeout.
 
-  @remark sock_errno is set to SOCKET_ETIMEDOUT on timeout.
+  @remark socket_errno is set to SOCKET_ETIMEDOUT on timeout.
 
   @return A three-state value which indicates the operation status.
   @retval -1  Failure, socket_errno indicates the error.

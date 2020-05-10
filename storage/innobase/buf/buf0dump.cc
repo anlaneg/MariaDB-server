@@ -1,7 +1,7 @@
 /*****************************************************************************
 
 Copyright (c) 2011, 2017, Oracle and/or its affiliates. All Rights Reserved.
-Copyright (c) 2017, 2019, MariaDB Corporation.
+Copyright (c) 2017, 2020, MariaDB Corporation.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License as published by the Free Software
@@ -25,6 +25,7 @@ Created April 08, 2011 Vasil Dimov
 *******************************************************/
 
 #include "my_global.h"
+#include "mysqld.h"
 #include "my_sys.h"
 
 #include "mysql/psi/mysql_stage.h"
@@ -175,7 +176,7 @@ get_buf_dump_dir()
 
 	/* The dump file should be created in the default data directory if
 	innodb_data_home_dir is set as an empty string. */
-	if (strcmp(srv_data_home, "") == 0) {
+	if (!*srv_data_home) {
 		dump_dir = fil_path_to_mysql_datadir;
 	} else {
 		dump_dir = srv_data_home;
@@ -187,16 +188,14 @@ get_buf_dump_dir()
 /** Generate the path to the buffer pool dump/load file.
 @param[out]	path		generated path
 @param[in]	path_size	size of 'path', used as in snprintf(3). */
-static
-void
-buf_dump_generate_path(
-	char*	path,
-	size_t	path_size)
+static void buf_dump_generate_path(char *path, size_t path_size)
 {
 	char	buf[FN_REFLEN];
 
+	mysql_mutex_lock(&LOCK_global_system_variables);
 	snprintf(buf, sizeof(buf), "%s%c%s", get_buf_dump_dir(),
 		 OS_PATH_SEPARATOR, srv_buf_dump_filename);
+	mysql_mutex_unlock(&LOCK_global_system_variables);
 
 	os_file_type_t	type;
 	bool		exists = false;
@@ -253,7 +252,6 @@ buf_dump(
 	char	tmp_filename[OS_FILE_MAX_PATH + sizeof "incomplete"];
 	char	now[32];
 	FILE*	f;
-	ulint	i;
 	int	ret;
 
 	buf_dump_generate_path(full_filename, sizeof(full_filename));
@@ -284,114 +282,99 @@ buf_dump(
 				tmp_filename, strerror(errno));
 		return;
 	}
-	/* else */
+	const buf_page_t*	bpage;
+	buf_dump_t*		dump;
+	ulint			n_pages;
+	ulint			j;
 
-	/* walk through each buffer pool */
-	for (i = 0; i < srv_buf_pool_instances && !SHOULD_QUIT(); i++) {
-		buf_pool_t*		buf_pool;
-		const buf_page_t*	bpage;
-		buf_dump_t*		dump;
-		ulint			n_pages;
-		ulint			j;
+	mutex_enter(&buf_pool.mutex);
 
-		buf_pool = buf_pool_from_array(i);
+	n_pages = UT_LIST_GET_LEN(buf_pool.LRU);
 
-		/* obtain buf_pool mutex before allocate, since
-		UT_LIST_GET_LEN(buf_pool->LRU) could change */
-		buf_pool_mutex_enter(buf_pool);
+	/* skip empty buffer pools */
+	if (n_pages == 0) {
+		mutex_exit(&buf_pool.mutex);
+		goto done;
+	}
 
-		n_pages = UT_LIST_GET_LEN(buf_pool->LRU);
+	if (srv_buf_pool_dump_pct != 100) {
+		ulint		t_pages;
 
-		/* skip empty buffer pools */
+		/* limit the number of total pages dumped to X% of the
+		total number of pages */
+		t_pages = buf_pool.curr_size * srv_buf_pool_dump_pct / 100;
+		if (n_pages > t_pages) {
+			buf_dump_status(STATUS_INFO,
+					"Restricted to " ULINTPF
+					" pages due to "
+					"innodb_buf_pool_dump_pct=%lu",
+					t_pages, srv_buf_pool_dump_pct);
+			n_pages = t_pages;
+		}
+
 		if (n_pages == 0) {
-			buf_pool_mutex_exit(buf_pool);
+			n_pages = 1;
+		}
+	}
+
+	dump = static_cast<buf_dump_t*>(ut_malloc_nokey(
+						n_pages * sizeof(*dump)));
+
+	if (dump == NULL) {
+		mutex_exit(&buf_pool.mutex);
+		fclose(f);
+		buf_dump_status(STATUS_ERR,
+				"Cannot allocate " ULINTPF " bytes: %s",
+				(ulint) (n_pages * sizeof(*dump)),
+				strerror(errno));
+		/* leave tmp_filename to exist */
+		return;
+	}
+
+	for (bpage = UT_LIST_GET_FIRST(buf_pool.LRU), j = 0;
+	     bpage != NULL && j < n_pages;
+	     bpage = UT_LIST_GET_NEXT(LRU, bpage)) {
+
+		ut_a(buf_page_in_file(bpage));
+
+		if (bpage->id.space() == SRV_TMP_SPACE_ID) {
+			/* Ignore the innodb_temporary tablespace. */
 			continue;
 		}
 
-		if (srv_buf_pool_dump_pct != 100) {
-			ulint		t_pages;
+		dump[j++] = BUF_DUMP_CREATE(bpage->id.space(),
+					    bpage->id.page_no());
+	}
 
-			ut_ad(srv_buf_pool_dump_pct < 100);
+	mutex_exit(&buf_pool.mutex);
 
-			/* limit the number of total pages dumped to X% of the
-			 * total number of pages */
-			t_pages = buf_pool->curr_size
-					*  srv_buf_pool_dump_pct / 100;
-			if (n_pages > t_pages) {
-				buf_dump_status(STATUS_INFO,
-						"Instance " ULINTPF
-						", restricted to " ULINTPF
-						" pages due to "
-						"innodb_buf_pool_dump_pct=%lu",
-						i, t_pages,
-						srv_buf_pool_dump_pct);
-				n_pages = t_pages;
-			}
+	ut_a(j <= n_pages);
+	n_pages = j;
 
-			if (n_pages == 0) {
-				n_pages = 1;
-			}
-		}
-
-		dump = static_cast<buf_dump_t*>(ut_malloc_nokey(
-				n_pages * sizeof(*dump)));
-
-		if (dump == NULL) {
-			buf_pool_mutex_exit(buf_pool);
+	for (j = 0; j < n_pages && !SHOULD_QUIT(); j++) {
+		ret = fprintf(f, ULINTPF "," ULINTPF "\n",
+			      BUF_DUMP_SPACE(dump[j]),
+			      BUF_DUMP_PAGE(dump[j]));
+		if (ret < 0) {
+			ut_free(dump);
 			fclose(f);
 			buf_dump_status(STATUS_ERR,
-					"Cannot allocate " ULINTPF " bytes: %s",
-					(ulint) (n_pages * sizeof(*dump)),
-					strerror(errno));
+					"Cannot write to '%s': %s",
+					tmp_filename, strerror(errno));
 			/* leave tmp_filename to exist */
 			return;
 		}
-
-		for (bpage = UT_LIST_GET_FIRST(buf_pool->LRU), j = 0;
-		     bpage != NULL && j < n_pages;
-		     bpage = UT_LIST_GET_NEXT(LRU, bpage)) {
-
-			ut_a(buf_page_in_file(bpage));
-			if (bpage->id.space() == SRV_TMP_SPACE_ID) {
-				/* Ignore the innodb_temporary tablespace. */
-				continue;
-			}
-
-			dump[j++] = BUF_DUMP_CREATE(bpage->id.space(),
-						    bpage->id.page_no());
+		if (SHUTTING_DOWN() && !(j & 1023)) {
+			service_manager_extend_timeout(
+				INNODB_EXTEND_TIMEOUT_INTERVAL,
+				"Dumping buffer pool page "
+				ULINTPF "/" ULINTPF, j + 1, n_pages);
 		}
-
-		buf_pool_mutex_exit(buf_pool);
-
-		ut_a(j <= n_pages);
-		n_pages = j;
-
-		for (j = 0; j < n_pages && !SHOULD_QUIT(); j++) {
-			ret = fprintf(f, ULINTPF "," ULINTPF "\n",
-				      BUF_DUMP_SPACE(dump[j]),
-				      BUF_DUMP_PAGE(dump[j]));
-			if (ret < 0) {
-				ut_free(dump);
-				fclose(f);
-				buf_dump_status(STATUS_ERR,
-						"Cannot write to '%s': %s",
-						tmp_filename, strerror(errno));
-				/* leave tmp_filename to exist */
-				return;
-			}
-			if (SHUTTING_DOWN() && !(j % 1024)) {
-				service_manager_extend_timeout(INNODB_EXTEND_TIMEOUT_INTERVAL,
-					"Dumping buffer pool "
-					ULINTPF "/%lu, "
-					"page " ULINTPF "/" ULINTPF,
-					i + 1, srv_buf_pool_instances,
-					j + 1, n_pages);
-			}
-		}
-
-		ut_free(dump);
 	}
 
+	ut_free(dump);
+
+done:
 	ret = fclose(f);
 	if (ret != 0) {
 		buf_dump_status(STATUS_ERR,
@@ -517,7 +500,6 @@ buf_load()
 	FILE*		f;
 	buf_dump_t*	dump;
 	ulint		dump_n;
-	ulint		total_buffer_pools_pages;
 	ulint		i;
 	ulint		space_id;
 	ulint		page_no;
@@ -567,13 +549,9 @@ buf_load()
 	/* If dump is larger than the buffer pool(s), then we ignore the
 	extra trailing. This could happen if a dump is made, then buffer
 	pool is shrunk and then load is attempted. */
-	total_buffer_pools_pages = buf_pool_get_n_pages()
-		* srv_buf_pool_instances;
-	if (dump_n > total_buffer_pools_pages) {
-		dump_n = total_buffer_pools_pages;
-	}
+	dump_n = std::min(dump_n, buf_pool.get_n_pages());
 
-	if(dump_n != 0) {
+	if (dump_n != 0) {
 		dump = static_cast<buf_dump_t*>(ut_malloc_nokey(
 				dump_n * sizeof(*dump)));
 	} else {
@@ -664,15 +642,10 @@ buf_load()
 	fil_space_t*	space = fil_space_acquire_silent(cur_space_id);
 	ulint		zip_size = space ? space->zip_size() : 0;
 
-	/* JAN: TODO: MySQL 5.7 PSI
-#ifdef HAVE_PSI_STAGE_INTERFACE
-	PSI_stage_progress*	pfs_stage_progress
+	PSI_stage_progress*	pfs_stage_progress __attribute__((unused))
 		= mysql_set_stage(srv_stage_buffer_pool_load.m_key);
-	#endif*/ /* HAVE_PSI_STAGE_INTERFACE */
-	/*
 	mysql_stage_set_work_estimated(pfs_stage_progress, dump_n);
 	mysql_stage_set_work_completed(pfs_stage_progress, 0);
-	*/
 
 	for (i = 0; i < dump_n && !SHUTTING_DOWN(); i++) {
 
@@ -722,14 +695,11 @@ buf_load()
 				"Buffer pool(s) load aborted on request");
 			/* Premature end, set estimated = completed = i and
 			end the current stage event. */
-			/*
+
 			mysql_stage_set_work_estimated(pfs_stage_progress, i);
-			mysql_stage_set_work_completed(pfs_stage_progress,
-			i);
-			*/
-#ifdef HAVE_PSI_STAGE_INTERFACE
-			/* mysql_end_stage(); */
-#endif /* HAVE_PSI_STAGE_INTERFACE */
+			mysql_stage_set_work_completed(pfs_stage_progress, i);
+
+			mysql_end_stage();
 			return;
 		}
 
@@ -770,11 +740,9 @@ buf_load()
 	}
 
 	/* Make sure that estimated = completed when we end. */
-	/* mysql_stage_set_work_completed(pfs_stage_progress, dump_n); */
+	mysql_stage_set_work_completed(pfs_stage_progress, dump_n);
 	/* End the stage progress event. */
-#ifdef HAVE_PSI_STAGE_INTERFACE
-	/* mysql_end_stage(); */
-#endif /* HAVE_PSI_STAGE_INTERFACE */
+	mysql_end_stage();
 }
 
 /** Abort a currently running buffer pool load. */
@@ -805,7 +773,7 @@ static void buf_dump_load_func(void *)
 	while (!SHUTTING_DOWN()) {
 		if (buf_dump_should_start) {
 			buf_dump_should_start = false;
-			buf_dump(TRUE /* quit on shutdown */);
+			buf_dump(true);
 		}
 		if (buf_load_should_start) {
 			buf_load_should_start = false;
@@ -827,7 +795,7 @@ static void buf_dump_load_func(void *)
 		} else if (get_wsrep_recovery()) {
 #endif /* WITH_WSREP */
 		} else {
-			buf_dump(FALSE/* do complete dump at shutdown */);
+			buf_dump(false/* do complete dump at shutdown */);
 		}
 	}
 }

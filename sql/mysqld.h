@@ -23,7 +23,6 @@
 #include "sql_bitmap.h"                         /* Bitmap */
 #include "my_decimal.h"                         /* my_decimal */
 #include "mysql_com.h"                     /* SERVER_VERSION_LENGTH */
-#include "my_atomic.h"
 #include "my_counter.h"
 #include "mysql/psi/mysql_file.h"          /* MYSQL_FILE */
 #include "mysql/psi/mysql_socket.h"        /* MYSQL_SOCKET */
@@ -80,8 +79,6 @@ void close_connection(THD *thd, uint sql_errno= 0);
 void handle_connection_in_main_thread(CONNECT *thd);
 void create_thread_to_handle_connection(CONNECT *connect);
 void unlink_thd(THD *thd);
-CONNECT *cache_thread(THD *thd);
-void flush_thread_cache();
 void refresh_status(THD *thd);
 bool is_secure_file_path(char *path);
 extern void init_net_server_extension(THD *thd);
@@ -118,7 +115,7 @@ extern bool opt_skip_name_resolve;
 extern bool opt_ignore_builtin_innodb;
 extern my_bool opt_character_set_client_handshake;
 extern my_bool debug_assert_on_not_freed_memory;
-extern bool volatile abort_loop;
+extern MYSQL_PLUGIN_IMPORT bool volatile abort_loop;
 extern Atomic_counter<uint> connection_count;
 extern my_bool opt_safe_user_create;
 extern my_bool opt_safe_show_db, opt_local_infile, opt_myisam_use_mmap;
@@ -134,6 +131,7 @@ extern my_bool read_only, opt_readonly;
 extern MYSQL_PLUGIN_IMPORT my_bool lower_case_file_system;
 extern my_bool opt_enable_named_pipe, opt_sync_frm, opt_allow_suspicious_udfs;
 extern my_bool opt_secure_auth;
+extern my_bool opt_require_secure_transport;
 extern const char *current_dbug_option;
 extern char* opt_secure_file_priv;
 extern char* opt_secure_backup_file_priv;
@@ -143,7 +141,7 @@ extern ulong use_stat_tables;
 extern my_bool opt_old_style_user_limits, trust_function_creators;
 extern uint opt_crash_binlog_innodb;
 extern const char *shared_memory_base_name;
-extern char *mysqld_unix_port;
+extern MYSQL_PLUGIN_IMPORT char *mysqld_unix_port;
 extern my_bool opt_enable_shared_memory;
 extern ulong opt_replicate_events_marked_for_skip;
 extern char *default_tz_name;
@@ -168,7 +166,8 @@ extern my_bool relay_log_purge, opt_innodb_safe_binlog, opt_innodb;
 extern my_bool relay_log_recovery;
 extern uint select_errors,ha_open_options;
 extern ulonglong test_flags;
-extern uint protocol_version, mysqld_port, dropping_tables;
+extern uint protocol_version, dropping_tables;
+extern MYSQL_PLUGIN_IMPORT uint mysqld_port;
 extern ulong delay_key_write_options;
 extern char *opt_logname, *opt_slow_logname, *opt_bin_logname, 
             *opt_relay_logname;
@@ -220,7 +219,7 @@ extern ulong delayed_insert_timeout;
 extern ulong delayed_insert_limit, delayed_queue_size;
 extern ulong delayed_insert_threads, delayed_insert_writes;
 extern ulong delayed_rows_in_use,delayed_insert_errors;
-extern int32 slave_open_temp_tables;
+extern Atomic_counter<uint32_t> slave_open_temp_tables;
 extern ulonglong query_cache_size;
 extern ulong query_cache_limit;
 extern ulong query_cache_min_res_unit;
@@ -236,7 +235,6 @@ extern ulong slave_trans_retries;
 extern ulong slave_trans_retry_interval;
 extern uint  slave_net_timeout;
 extern int max_user_connections;
-extern volatile ulong cached_thread_count;
 extern ulong what_to_log,flush_time;
 extern uint max_prepared_stmt_count, prepared_stmt_count;
 extern MYSQL_PLUGIN_IMPORT ulong open_files_limit;
@@ -281,7 +279,8 @@ extern handlerton *heap_hton;
 extern const char *load_default_groups[];
 extern struct my_option my_long_options[];
 int handle_early_options();
-extern int mysqld_server_started, mysqld_server_initialized;
+extern int MYSQL_PLUGIN_IMPORT mysqld_server_started;
+extern int mysqld_server_initialized;
 extern "C" MYSQL_PLUGIN_IMPORT int orig_argc;
 extern "C" MYSQL_PLUGIN_IMPORT char **orig_argv;
 extern pthread_attr_t connection_attrib;
@@ -305,7 +304,6 @@ extern my_bool disconnect_on_expired_password;
 
 enum secure_timestamp { SECTIME_NO, SECTIME_SUPER, SECTIME_REPL, SECTIME_YES };
 
-#ifdef HAVE_PSI_INTERFACE
 #ifdef HAVE_MMAP
 extern PSI_mutex_key key_PAGE_lock, key_LOCK_sync, key_LOCK_active,
        key_LOCK_pool, key_LOCK_pending_checkpoint;
@@ -372,8 +370,7 @@ extern PSI_cond_key key_BINLOG_COND_xid_list, key_BINLOG_update_cond,
   key_relay_log_info_start_cond, key_relay_log_info_stop_cond,
   key_rpl_group_info_sleep_cond,
   key_TABLE_SHARE_cond, key_user_level_lock_cond,
-  key_COND_start_thread,
-  key_COND_thread_cache, key_COND_flush_thread_cache;
+  key_COND_start_thread;
 extern PSI_cond_key key_RELAYLOG_COND_relay_log_updated,
   key_RELAYLOG_COND_bin_log_updated, key_COND_wakeup_ready,
   key_COND_wait_commit;
@@ -390,21 +387,152 @@ extern PSI_thread_key key_thread_delayed_insert,
   key_thread_one_connection, key_thread_signal_hand,
   key_thread_slave_background, key_rpl_parallel_thread;
 
-extern PSI_file_key key_file_binlog, key_file_binlog_index, key_file_casetest,
+extern PSI_file_key key_file_binlog, key_file_binlog_cache,
+       key_file_binlog_index, key_file_binlog_index_cache, key_file_casetest,
   key_file_dbopt, key_file_des_key_file, key_file_ERRMSG, key_select_to_file,
   key_file_fileparser, key_file_frm, key_file_global_ddl_log, key_file_load,
   key_file_loadfile, key_file_log_event_data, key_file_log_event_info,
-  key_file_master_info, key_file_misc, key_file_partition,
+  key_file_master_info, key_file_misc, key_file_partition_ddl_log,
   key_file_pid, key_file_relay_log_info, key_file_send_file, key_file_tclog,
   key_file_trg, key_file_trn, key_file_init;
 extern PSI_file_key key_file_query_log, key_file_slow_log;
-extern PSI_file_key key_file_relaylog, key_file_relaylog_index;
+extern PSI_file_key key_file_relaylog, key_file_relaylog_index,
+                    key_file_relaylog_cache, key_file_relaylog_index_cache;
 extern PSI_socket_key key_socket_tcpip, key_socket_unix,
   key_socket_client_connection;
 extern PSI_file_key key_file_binlog_state;
 
+#ifdef HAVE_PSI_INTERFACE
 void init_server_psi_keys();
 #endif /* HAVE_PSI_INTERFACE */
+
+extern PSI_memory_key key_memory_locked_table_list;
+extern PSI_memory_key key_memory_locked_thread_list;
+extern PSI_memory_key key_memory_thd_transactions;
+extern PSI_memory_key key_memory_delegate;
+extern PSI_memory_key key_memory_acl_mem;
+extern PSI_memory_key key_memory_acl_memex;
+extern PSI_memory_key key_memory_acl_cache;
+extern PSI_memory_key key_memory_thd_main_mem_root;
+extern PSI_memory_key key_memory_help;
+extern PSI_memory_key key_memory_frm;
+extern PSI_memory_key key_memory_table_share;
+extern PSI_memory_key key_memory_gdl;
+extern PSI_memory_key key_memory_table_triggers_list;
+extern PSI_memory_key key_memory_prepared_statement_map;
+extern PSI_memory_key key_memory_prepared_statement_main_mem_root;
+extern PSI_memory_key key_memory_protocol_rset_root;
+extern PSI_memory_key key_memory_warning_info_warn_root;
+extern PSI_memory_key key_memory_sp_cache;
+extern PSI_memory_key key_memory_sp_head_main_root;
+extern PSI_memory_key key_memory_sp_head_execute_root;
+extern PSI_memory_key key_memory_sp_head_call_root;
+extern PSI_memory_key key_memory_table_mapping_root;
+extern PSI_memory_key key_memory_quick_range_select_root;
+extern PSI_memory_key key_memory_quick_index_merge_root;
+extern PSI_memory_key key_memory_quick_ror_intersect_select_root;
+extern PSI_memory_key key_memory_quick_ror_union_select_root;
+extern PSI_memory_key key_memory_quick_group_min_max_select_root;
+extern PSI_memory_key key_memory_test_quick_select_exec;
+extern PSI_memory_key key_memory_prune_partitions_exec;
+extern PSI_memory_key key_memory_binlog_recover_exec;
+extern PSI_memory_key key_memory_blob_mem_storage;
+
+extern PSI_memory_key key_memory_Sys_var_charptr_value;
+extern PSI_memory_key key_memory_THD_db;
+extern PSI_memory_key key_memory_user_var_entry;
+extern PSI_memory_key key_memory_user_var_entry_value;
+extern PSI_memory_key key_memory_Slave_job_group_group_relay_log_name;
+extern PSI_memory_key key_memory_Relay_log_info_group_relay_log_name;
+extern PSI_memory_key key_memory_binlog_cache_mngr;
+extern PSI_memory_key key_memory_Row_data_memory_memory;
+extern PSI_memory_key key_memory_errmsgs;
+extern PSI_memory_key key_memory_Event_queue_element_for_exec_names;
+extern PSI_memory_key key_memory_Event_scheduler_scheduler_param;
+extern PSI_memory_key key_memory_Gis_read_stream_err_msg;
+extern PSI_memory_key key_memory_Geometry_objects_data;
+extern PSI_memory_key key_memory_host_cache_hostname;
+extern PSI_memory_key key_memory_User_level_lock;
+extern PSI_memory_key key_memory_Filesort_info_record_pointers;
+extern PSI_memory_key key_memory_Sort_param_tmp_buffer;
+extern PSI_memory_key key_memory_Filesort_info_merge;
+extern PSI_memory_key key_memory_Filesort_buffer_sort_keys;
+extern PSI_memory_key key_memory_handler_errmsgs;
+extern PSI_memory_key key_memory_handlerton;
+extern PSI_memory_key key_memory_XID;
+extern PSI_memory_key key_memory_MYSQL_LOCK;
+extern PSI_memory_key key_memory_MYSQL_LOG_name;
+extern PSI_memory_key key_memory_TC_LOG_MMAP_pages;
+extern PSI_memory_key key_memory_my_str_malloc;
+extern PSI_memory_key key_memory_MYSQL_BIN_LOG_basename;
+extern PSI_memory_key key_memory_MYSQL_BIN_LOG_index;
+extern PSI_memory_key key_memory_MYSQL_RELAY_LOG_basename;
+extern PSI_memory_key key_memory_MYSQL_RELAY_LOG_index;
+extern PSI_memory_key key_memory_rpl_filter;
+extern PSI_memory_key key_memory_Security_context;
+extern PSI_memory_key key_memory_NET_buff;
+extern PSI_memory_key key_memory_NET_compress_packet;
+extern PSI_memory_key key_memory_my_bitmap_map;
+extern PSI_memory_key key_memory_QUICK_RANGE_SELECT_mrr_buf_desc;
+extern PSI_memory_key key_memory_TABLE_RULE_ENT;
+extern PSI_memory_key key_memory_Mutex_cond_array_Mutex_cond;
+extern PSI_memory_key key_memory_Owned_gtids_sidno_to_hash;
+extern PSI_memory_key key_memory_Sid_map_Node;
+extern PSI_memory_key key_memory_bison_stack;
+extern PSI_memory_key key_memory_TABLE_sort_io_cache;
+extern PSI_memory_key key_memory_DATE_TIME_FORMAT;
+extern PSI_memory_key key_memory_DDL_LOG_MEMORY_ENTRY;
+extern PSI_memory_key key_memory_ST_SCHEMA_TABLE;
+extern PSI_memory_key key_memory_ignored_db;
+extern PSI_memory_key key_memory_SLAVE_INFO;
+extern PSI_memory_key key_memory_log_event_old;
+extern PSI_memory_key key_memory_HASH_ROW_ENTRY;
+extern PSI_memory_key key_memory_table_def_memory;
+extern PSI_memory_key key_memory_MPVIO_EXT_auth_info;
+extern PSI_memory_key key_memory_LOG_POS_COORD;
+extern PSI_memory_key key_memory_XID_STATE;
+extern PSI_memory_key key_memory_Rpl_info_file_buffer;
+extern PSI_memory_key key_memory_Rpl_info_table;
+extern PSI_memory_key key_memory_binlog_pos;
+extern PSI_memory_key key_memory_db_worker_hash_entry;
+extern PSI_memory_key key_memory_rpl_slave_command_buffer;
+extern PSI_memory_key key_memory_binlog_ver_1_event;
+extern PSI_memory_key key_memory_rpl_slave_check_temp_dir;
+extern PSI_memory_key key_memory_TABLE;
+extern PSI_memory_key key_memory_binlog_statement_buffer;
+extern PSI_memory_key key_memory_user_conn;
+extern PSI_memory_key key_memory_dboptions_hash;
+extern PSI_memory_key key_memory_hash_index_key_buffer;
+extern PSI_memory_key key_memory_THD_handler_tables_hash;
+extern PSI_memory_key key_memory_JOIN_CACHE;
+extern PSI_memory_key key_memory_READ_INFO;
+extern PSI_memory_key key_memory_partition_syntax_buffer;
+extern PSI_memory_key key_memory_global_system_variables;
+extern PSI_memory_key key_memory_THD_variables;
+extern PSI_memory_key key_memory_PROFILE;
+extern PSI_memory_key key_memory_LOG_name;
+extern PSI_memory_key key_memory_string_iterator;
+extern PSI_memory_key key_memory_frm_extra_segment_buff;
+extern PSI_memory_key key_memory_frm_form_pos;
+extern PSI_memory_key key_memory_frm_string;
+extern PSI_memory_key key_memory_Unique_sort_buffer;
+extern PSI_memory_key key_memory_Unique_merge_buffer;
+extern PSI_memory_key key_memory_shared_memory_name;
+extern PSI_memory_key key_memory_opt_bin_logname;
+extern PSI_memory_key key_memory_Query_cache;
+extern PSI_memory_key key_memory_READ_RECORD_cache;
+extern PSI_memory_key key_memory_Quick_ranges;
+extern PSI_memory_key key_memory_File_query_log_name;
+extern PSI_memory_key key_memory_Table_trigger_dispatcher;
+extern PSI_memory_key key_memory_show_slave_status_io_gtid_set;
+extern PSI_memory_key key_memory_write_set_extraction;
+extern PSI_memory_key key_memory_thd_timer;
+extern PSI_memory_key key_memory_THD_Session_tracker;
+extern PSI_memory_key key_memory_THD_Session_sysvar_resource_manager;
+extern PSI_memory_key key_memory_get_all_tables;
+extern PSI_memory_key key_memory_fill_schema_schemata;
+extern PSI_memory_key key_memory_native_functions;
+extern PSI_memory_key key_memory_JSON;
 
 /*
   MAINTAINER: Please keep this list in order, to limit merge collisions.
@@ -525,7 +653,6 @@ extern PSI_stage_info stage_waiting_for_table_flush;
 extern PSI_stage_info stage_waiting_for_the_next_event_in_relay_log;
 extern PSI_stage_info stage_waiting_for_the_slave_thread_to_advance_position;
 extern PSI_stage_info stage_waiting_to_finalize_termination;
-extern PSI_stage_info stage_waiting_to_get_readlock;
 extern PSI_stage_info stage_binlog_waiting_background_tasks;
 extern PSI_stage_info stage_binlog_write;
 extern PSI_stage_info stage_binlog_processing_checkpoint_notify;
@@ -544,6 +671,7 @@ extern PSI_stage_info stage_gtid_wait_other_connection;
 extern PSI_stage_info stage_slave_background_process_request;
 extern PSI_stage_info stage_slave_background_wait_request;
 extern PSI_stage_info stage_waiting_for_deadlock_kill;
+extern PSI_stage_info stage_starting;
 
 #ifdef HAVE_PSI_STATEMENT_INTERFACE
 /**
@@ -622,8 +750,8 @@ extern mysql_mutex_t LOCK_start_thread;
 extern char* des_key_file;
 extern mysql_mutex_t LOCK_des_key_file;
 #endif
-extern mysql_mutex_t LOCK_server_started;
-extern mysql_cond_t COND_server_started;
+extern MYSQL_PLUGIN_IMPORT mysql_mutex_t LOCK_server_started;
+extern MYSQL_PLUGIN_IMPORT mysql_cond_t COND_server_started;
 extern mysql_rwlock_t LOCK_grant, LOCK_sys_init_connect, LOCK_sys_init_slave;
 extern mysql_rwlock_t LOCK_ssl_refresh;
 extern mysql_prlock_t LOCK_system_variables_hash;
@@ -632,11 +760,10 @@ extern mysql_cond_t COND_manager;
 extern mysql_cond_t COND_slave_background;
 extern Atomic_counter<uint32_t> thread_count;
 
+extern my_bool opt_use_ssl;
 extern char *opt_ssl_ca, *opt_ssl_capath, *opt_ssl_cert, *opt_ssl_cipher,
   *opt_ssl_key, *opt_ssl_crl, *opt_ssl_crlpath;
 extern ulonglong tls_version;
-
-extern MYSQL_PLUGIN_IMPORT pthread_key(THD*, THR_THD);
 
 #ifdef MYSQL_SERVER
 
@@ -655,6 +782,7 @@ enum options_mysqld
   OPT_CONSOLE,
   OPT_DEBUG_SYNC_TIMEOUT,
   OPT_DEPRECATED_OPTION,
+  OPT_REMOVED_OPTION,
   OPT_IGNORE_DB_DIRECTORY,
   OPT_ISAM_LOG,
   OPT_KEY_BUFFER_SIZE,
@@ -759,17 +887,17 @@ enum enum_query_type
 
 
 /* query_id */
-extern query_id_t global_query_id;
+extern Atomic_counter<query_id_t> global_query_id;
 
 /* increment query_id and return it.  */
 inline __attribute__((warn_unused_result)) query_id_t next_query_id()
 {
-  return my_atomic_add64_explicit(&global_query_id, 1, MY_MEMORY_ORDER_RELAXED);
+  return global_query_id++;
 }
 
 inline query_id_t get_query_id()
 {
-  return my_atomic_load64_explicit(&global_query_id, MY_MEMORY_ORDER_RELAXED);
+  return global_query_id;
 }
 
 /* increment global_thread_id and return it.  */
@@ -794,11 +922,7 @@ inline void table_case_convert(char * name, uint length)
 extern void set_server_version(char *buf, size_t size);
 
 #define current_thd _current_thd()
-inline int set_current_thd(THD *thd)
-{
-  return my_pthread_setspecific_ptr(THR_THD, thd);
-}
-
+void set_current_thd(THD *thd);
 
 /*
   @todo remove, make it static in ha_maria.cc

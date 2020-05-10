@@ -114,8 +114,7 @@ HAVE_PSI_INTERFACE is defined. */
 # define UNIV_PFS_IO
 # define UNIV_PFS_THREAD
 
-// JAN: TODO: MySQL 5.7 PSI
-// # include "mysql/psi/psi.h" /* HAVE_PSI_MEMORY_INTERFACE */
+# include "mysql/psi/psi.h" /* HAVE_PSI_MEMORY_INTERFACE */
 # ifdef HAVE_PSI_MEMORY_INTERFACE
 #  define UNIV_PFS_MEMORY
 # endif /* HAVE_PSI_MEMORY_INTERFACE */
@@ -129,7 +128,6 @@ be excluded from instrumentation. */
 
 # define PFS_IS_INSTRUMENTED(key)	((key) != PFS_NOT_INSTRUMENTED)
 
-/* JAN: TODO: missing 5.7 header */
 #ifdef HAVE_PFS_THREAD_PROVIDER_H
 /* For PSI_MUTEX_CALL() and similar. */
 #include "pfs_thread_provider.h"
@@ -137,7 +135,6 @@ be excluded from instrumentation. */
 
 #include "mysql/psi/mysql_thread.h"
 /* For PSI_FILE_CALL(). */
-/* JAN: TODO: missing 5.7 header */
 #ifdef HAVE_PFS_FILE_PROVIDER_H
 #include "pfs_file_provider.h"
 #endif
@@ -173,7 +170,11 @@ using the call command. */
 #define UNIV_ENABLE_UNIT_TEST_ROW_RAW_FORMAT_INT
 */
 
+#include <my_valgrind.h>
+
 #if defined HAVE_valgrind && defined HAVE_VALGRIND_MEMCHECK_H
+# define UNIV_DEBUG_VALGRIND
+#elif __has_feature(memory_sanitizer)
 # define UNIV_DEBUG_VALGRIND
 #endif
 
@@ -576,14 +577,13 @@ typedef void* os_thread_ret_t;
 #include "ut0ut.h"
 #include "sync0types.h"
 
-#include <my_valgrind.h>
 /* define UNIV macros in terms of my_valgrind.h */
 #define UNIV_MEM_INVALID(addr, size) 	MEM_UNDEFINED(addr, size)
 #define UNIV_MEM_FREE(addr, size) 	MEM_NOACCESS(addr, size)
 #define UNIV_MEM_ALLOC(addr, size) 	UNIV_MEM_INVALID(addr, size)
 #ifdef UNIV_DEBUG_VALGRIND
 # include <valgrind/memcheck.h>
-# define UNIV_MEM_VALID(addr, size) VALGRIND_MAKE_MEM_DEFINED(addr, size)
+# define UNIV_MEM_VALID(addr, size) MEM_MAKE_DEFINED(addr, size)
 # define UNIV_MEM_DESC(addr, size) VALGRIND_CREATE_BLOCK(addr, size, #addr)
 # define UNIV_MEM_UNDESC(b) VALGRIND_DISCARD(b)
 # define UNIV_MEM_ASSERT_RW_LOW(addr, size, should_abort) do {		\

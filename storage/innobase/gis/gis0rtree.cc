@@ -51,7 +51,7 @@ rtr_page_split_initialize_nodes(
 	btr_cur_t*	cursor,	/*!< in: cursor at which to insert; when the
 				function returns, the cursor is positioned
 				on the predecessor of the inserted record */
-	offset_t**	offsets,/*!< in: offsets on inserted record */
+	rec_offs**	offsets,/*!< in: offsets on inserted record */
 	const dtuple_t*	tuple,	/*!< in: tuple to insert */
 	double**	buf_pos)/*!< in/out: current buffer position */
 {
@@ -184,89 +184,13 @@ rtr_index_build_node_ptr(
 }
 
 /**************************************************************//**
-In-place update the mbr field of a spatial index row.
-@return true if update is successful */
-static
-bool
-rtr_update_mbr_field_in_place(
-/*==========================*/
-	dict_index_t*	index,		/*!< in: spatial index. */
-	rec_t*		rec,		/*!< in/out: rec to be modified.*/
-	offset_t*	offsets,	/*!< in/out: offsets on rec. */
-	rtr_mbr_t*	mbr,		/*!< in: the new mbr. */
-	mtr_t*		mtr)		/*!< in: mtr */
-{
-	void*		new_mbr_ptr;
-	double		new_mbr[SPDIMS * 2];
-	byte*		log_ptr;
-	page_t*		page = page_align(rec);
-	ulint		len = DATA_MBR_LEN;
-	ulint		flags = BTR_NO_UNDO_LOG_FLAG
-			| BTR_NO_LOCKING_FLAG
-			| BTR_KEEP_SYS_FLAG;
-	ulint		rec_info;
-
-	rtr_write_mbr(reinterpret_cast<byte*>(&new_mbr), mbr);
-	new_mbr_ptr = static_cast<void*>(new_mbr);
-	/* Otherwise, set the mbr to the new_mbr. */
-	rec_set_nth_field(rec, offsets, 0, new_mbr_ptr, len);
-
-	rec_info = rec_get_info_bits(rec, rec_offs_comp(offsets));
-
-	/* Write redo log. */
-	/* For now, we use LOG_REC_UPDATE_IN_PLACE to log this enlarge.
-	In the future, we may need to add a new log type for this. */
-	log_ptr = mlog_open_and_write_index(mtr, rec, index, page_is_comp(page)
-					    ? MLOG_COMP_REC_UPDATE_IN_PLACE
-					    : MLOG_REC_UPDATE_IN_PLACE,
-					    1 + DATA_ROLL_PTR_LEN + 14 + 2
-					    + MLOG_BUF_MARGIN);
-
-	if (!log_ptr) {
-		/* Logging in mtr is switched off during
-		crash recovery */
-		return(false);
-	}
-
-	/* Flags */
-	mach_write_to_1(log_ptr, flags);
-	log_ptr++;
-	/* TRX_ID Position */
-	log_ptr += mach_write_compressed(log_ptr, 0);
-	/* ROLL_PTR */
-	trx_write_roll_ptr(log_ptr, 0);
-	log_ptr += DATA_ROLL_PTR_LEN;
-	/* TRX_ID */
-	log_ptr += mach_u64_write_compressed(log_ptr, 0);
-
-	/* Offset */
-	mach_write_to_2(log_ptr, page_offset(rec));
-	log_ptr += 2;
-	/* Info bits */
-	mach_write_to_1(log_ptr, rec_info);
-	log_ptr++;
-	/* N fields */
-	log_ptr += mach_write_compressed(log_ptr, 1);
-	/* Field no, len */
-	log_ptr += mach_write_compressed(log_ptr, 0);
-	log_ptr += mach_write_compressed(log_ptr, len);
-	/* Data */
-	memcpy(log_ptr, new_mbr_ptr, len);
-	log_ptr += len;
-
-	mlog_close(mtr, log_ptr);
-
-	return(true);
-}
-
-/**************************************************************//**
 Update the mbr field of a spatial index row.
 @return true if update is successful */
 bool
 rtr_update_mbr_field(
 /*=================*/
 	btr_cur_t*	cursor,		/*!< in/out: cursor pointed to rec.*/
-	offset_t*	offsets,	/*!< in/out: offsets on rec. */
+	rec_offs*	offsets,	/*!< in/out: offsets on rec. */
 	btr_cur_t*	cursor2,	/*!< in/out: cursor pointed to rec
 					that should be deleted.
 					this cursor is for btr_compress to
@@ -280,7 +204,7 @@ rtr_update_mbr_field(
 	mem_heap_t*	heap;
 	page_t*		page;
 	rec_t*		rec;
-	ulint		flags = BTR_NO_UNDO_LOG_FLAG
+	constexpr ulint flags = BTR_NO_UNDO_LOG_FLAG
 			| BTR_NO_LOCKING_FLAG
 			| BTR_KEEP_SYS_FLAG;
 	dberr_t		err;
@@ -291,11 +215,10 @@ rtr_update_mbr_field(
 	ulint		low_match = 0;
 	ulint		child;
 	ulint		rec_info;
-	page_zip_des_t*	page_zip;
 	bool		ins_suc = true;
 	ulint		cur2_pos = 0;
 	ulint		del_page_no = 0;
-	offset_t*	offsets2;
+	rec_offs*	offsets2;
 
 	rec = btr_cur_get_rec(cursor);
 	page = page_align(rec);
@@ -305,7 +228,6 @@ rtr_update_mbr_field(
 	heap = mem_heap_create(100);
 	block = btr_cur_get_block(cursor);
 	ut_ad(page == buf_block_get_frame(block));
-	page_zip = buf_block_get_page_zip(block);
 
 	child = btr_node_ptr_get_child_page_no(rec, offsets);
 	const bool is_leaf = page_is_leaf(block->frame);
@@ -330,11 +252,16 @@ rtr_update_mbr_field(
 		cur2_pos = page_rec_get_n_recs_before(btr_cur_get_rec(cursor2));
 	}
 
+	ut_ad(rec_offs_validate(rec, index, offsets));
+	ut_ad(rec_offs_base(offsets)[0 + 1] == DATA_MBR_LEN);
+	ut_ad(node_ptr->fields[0].len == DATA_MBR_LEN);
+
 	if (rec_info & REC_INFO_MIN_REC_FLAG) {
 		/* When the rec is minimal rec in this level, we do
-		 in-place update for avoiding it move to other place. */
+		in-place update for avoiding it move to other place. */
+		page_zip_des_t* page_zip = buf_block_get_page_zip(block);
 
-		if (page_zip) {
+		if (UNIV_LIKELY_NULL(page_zip)) {
 			/* Check if there's enough space for in-place
 			update the zip page. */
 			if (!btr_cur_update_alloc_zip(
@@ -370,21 +297,18 @@ rtr_update_mbr_field(
 					rec, rec_offs_comp(offsets));
 			ut_ad(rec_info & REC_INFO_MIN_REC_FLAG);
 #endif /* UNIV_DEBUG */
-		}
-
-		if (!rtr_update_mbr_field_in_place(index, rec,
-						   offsets, mbr, mtr)) {
-			return(false);
-		}
-
-		if (page_zip) {
-			page_zip_write_rec(page_zip, rec, index, offsets, 0);
+			memcpy(rec, node_ptr->fields[0].data, DATA_MBR_LEN);
+			page_zip_write_rec(block, rec, index, offsets, 0, mtr);
+		} else {
+			mtr->memcpy<mtr_t::MAYBE_NOP>(*block, rec,
+						      node_ptr->fields[0].data,
+						      DATA_MBR_LEN);
 		}
 
 		if (cursor2) {
-			offset_t* offsets2;
+			rec_offs* offsets2;
 
-			if (page_zip) {
+			if (UNIV_LIKELY_NULL(page_zip)) {
 				cursor2->page_cur.rec
 					= page_rec_get_nth(page, cur2_pos);
 			}
@@ -404,7 +328,7 @@ rtr_update_mbr_field(
 
 		page_cur_t		page_cur;
 		rec_t*			insert_rec;
-		offset_t*		insert_offsets = NULL;
+		rec_offs*		insert_offsets = NULL;
 		ulint			old_pos;
 		rec_t*			old_rec;
 
@@ -436,7 +360,7 @@ update_mbr:
 		/* When there're not only 1 rec in the page, we do delete/insert
 		to avoid page split. */
 		rec_t*			insert_rec;
-		offset_t*		insert_offsets = NULL;
+		rec_offs*		insert_offsets = NULL;
 		rec_t*			next_rec;
 
 		/* Delete the rec which cursor point to. */
@@ -632,7 +556,7 @@ rtr_adjust_upper_level(
 	ulint		new_page_no;
 	dict_index_t*	index = sea_cur->index;
 	btr_cur_t	cursor;
-	offset_t*	offsets;
+	rec_offs*	offsets;
 	mem_heap_t*	heap;
 	ulint		level;
 	dtuple_t*	node_ptr_upper;
@@ -789,8 +713,8 @@ rtr_split_page_move_rec_list(
 	page_cur_t		new_page_cursor;
 	page_t*			page;
 	page_t*			new_page;
-	offset_t		offsets_[REC_OFFS_NORMAL_SIZE];
-	offset_t*		offsets		= offsets_;
+	rec_offs		offsets_[REC_OFFS_NORMAL_SIZE];
+	rec_offs*		offsets		= offsets_;
 	page_zip_des_t*		new_page_zip
 		= buf_block_get_page_zip(new_block);
 	rec_t*			rec;
@@ -892,7 +816,8 @@ rtr_split_page_move_rec_list(
 			ret_pos == 0. */
 
 			if (UNIV_UNLIKELY
-			    (!page_zip_reorganize(new_block, index, mtr))) {
+			    (!page_zip_reorganize(new_block, index,
+						  page_zip_level, mtr))) {
 
 				if (UNIV_UNLIKELY
 				    (!page_zip_decompress(new_page_zip,
@@ -947,7 +872,7 @@ rtr_page_split_and_insert(
 	btr_cur_t*	cursor,	/*!< in/out: cursor at which to insert; when the
 				function returns, the cursor is positioned
 				on the predecessor of the inserted record */
-	offset_t**	offsets,/*!< out: offsets on inserted record */
+	rec_offs**	offsets,/*!< out: offsets on inserted record */
 	mem_heap_t**	heap,	/*!< in/out: pointer to memory heap, or NULL */
 	const dtuple_t*	tuple,	/*!< in: tuple to insert */
 	ulint		n_ext,	/*!< in: number of externally stored columns */
@@ -971,7 +896,6 @@ rtr_page_split_and_insert(
 	rtr_split_node_t*	cur_split_node;
 	rtr_split_node_t*	end_split_node;
 	double*			buf_pos;
-	ulint			page_level;
 	node_seq_t		current_ssn;
 	node_seq_t		next_ssn;
 	buf_block_t*		root_block;
@@ -1002,7 +926,6 @@ func_start:
 	block = btr_cur_get_block(cursor);
 	page = buf_block_get_frame(block);
 	page_zip = buf_block_get_page_zip(block);
-	page_level = btr_page_get_level(page);
 	current_ssn = page_get_ssn_id(page);
 
 	ut_ad(mtr_memo_contains(mtr, block, MTR_MEMO_PAGE_X_FIX));
@@ -1047,9 +970,19 @@ func_start:
 
 	/* Allocate a new page to the index */
 	hint_page_no = page_no + 1;
+	const uint16_t page_level = btr_page_get_level(page);
 	new_block = btr_page_alloc(cursor->index, hint_page_no, FSP_UP,
 				   page_level, mtr, mtr);
+	if (!new_block) {
+		return NULL;
+	}
+
 	new_page_zip = buf_block_get_page_zip(new_block);
+	if (page_level && UNIV_LIKELY_NULL(new_page_zip)) {
+		/* ROW_FORMAT=COMPRESSED non-leaf pages are not expected
+		to contain FIL_NULL in FIL_PAGE_PREV at this stage. */
+		memset_aligned<4>(new_block->frame + FIL_PAGE_PREV, 0, 4);
+	}
 	btr_page_create(new_block, new_page_zip, cursor->index,
 			page_level, mtr);
 
@@ -1296,7 +1229,7 @@ rtr_ins_enlarge_mbr(
 	mem_heap_t*		heap;
 	dict_index_t*		index = btr_cur->index;
 	page_cur_t*		page_cursor;
-	offset_t*		offsets;
+	rec_offs*		offsets;
 	node_visit_t*		node_visit;
 	btr_cur_t		cursor;
 	page_t*			page;
@@ -1380,10 +1313,10 @@ rtr_page_copy_rec_list_end_no_locks(
 	page_cur_t	page_cur;
 	page_cur_t	cur1;
 	rec_t*		cur_rec;
-	offset_t	offsets_1[REC_OFFS_NORMAL_SIZE];
-	offset_t*	offsets1 = offsets_1;
-	offset_t	offsets_2[REC_OFFS_NORMAL_SIZE];
-	offset_t*	offsets2 = offsets_2;
+	rec_offs	offsets_1[REC_OFFS_NORMAL_SIZE];
+	rec_offs*	offsets1 = offsets_1;
+	rec_offs	offsets_2[REC_OFFS_NORMAL_SIZE];
+	rec_offs*	offsets2 = offsets_2;
 	ulint		moved = 0;
 	bool		is_leaf = page_is_leaf(new_page);
 
@@ -1441,8 +1374,8 @@ rtr_page_copy_rec_list_end_no_locks(
 					/* We have two identical leaf records,
 					skip copying the undeleted one, and
 					unmark deleted on the current page */
-					btr_rec_set_deleted_flag(
-						cur_rec, NULL, FALSE);
+					btr_rec_set_deleted<false>(
+						new_block, cur_rec, mtr);
 					goto next;
 				}
 			}
@@ -1506,10 +1439,10 @@ rtr_page_copy_rec_list_start_no_locks(
 {
 	page_cur_t	cur1;
 	rec_t*		cur_rec;
-	offset_t	offsets_1[REC_OFFS_NORMAL_SIZE];
-	offset_t*	offsets1 = offsets_1;
-	offset_t	offsets_2[REC_OFFS_NORMAL_SIZE];
-	offset_t*	offsets2 = offsets_2;
+	rec_offs	offsets_1[REC_OFFS_NORMAL_SIZE];
+	rec_offs*	offsets1 = offsets_1;
+	rec_offs	offsets_2[REC_OFFS_NORMAL_SIZE];
+	rec_offs*	offsets2 = offsets_2;
 	page_cur_t	page_cur;
 	ulint		moved = 0;
 	bool		is_leaf = page_is_leaf(buf_block_get_frame(block));
@@ -1561,8 +1494,8 @@ rtr_page_copy_rec_list_start_no_locks(
 					/* We have two identical leaf records,
 					skip copying the undeleted one, and
 					unmark deleted on the current page */
-					btr_rec_set_deleted_flag(
-						cur_rec, NULL, FALSE);
+					btr_rec_set_deleted<false>(
+						new_block, cur_rec, mtr);
 					goto next;
 				}
 			}
@@ -1613,8 +1546,8 @@ rtr_merge_mbr_changed(
 /*==================*/
 	btr_cur_t*		cursor,		/*!< in/out: cursor */
 	btr_cur_t*		cursor2,	/*!< in: the other cursor */
-	offset_t*		offsets,	/*!< in: rec offsets */
-	offset_t*		offsets2,	/*!< in: rec offsets */
+	rec_offs*		offsets,	/*!< in: rec offsets */
+	rec_offs*		offsets2,	/*!< in: rec offsets */
 	rtr_mbr_t*		new_mbr)	/*!< out: MBR to update */
 {
 	double*		mbr;
@@ -1657,8 +1590,8 @@ rtr_merge_and_update_mbr(
 /*=====================*/
 	btr_cur_t*		cursor,		/*!< in/out: cursor */
 	btr_cur_t*		cursor2,	/*!< in: the other cursor */
-	offset_t*		offsets,	/*!< in: rec offsets */
-	offset_t*		offsets2,	/*!< in: rec offsets */
+	rec_offs*		offsets,	/*!< in: rec offsets */
+	rec_offs*		offsets2,	/*!< in: rec offsets */
 	page_t*			child_page,	/*!< in: the page. */
 	mtr_t*			mtr)		/*!< in: mtr */
 {
@@ -1721,7 +1654,7 @@ rtr_check_same_block(
 
 {
 	ulint		page_no = childb->page.id.page_no();
-	offset_t*	offsets;
+	rec_offs*	offsets;
 	rec_t*		rec = page_rec_get_next(page_get_infimum_rec(
 				buf_block_get_frame(parentb)));
 
@@ -1740,6 +1673,113 @@ rtr_check_same_block(
 	return(false);
 }
 
+/*************************************************************//**
+Calculates MBR_AREA(a+b) - MBR_AREA(a)
+Note: when 'a' and 'b' objects are far from each other,
+the area increase can be really big, so this function
+can return 'inf' as a result.
+Return the area increaed. */
+static double
+rtree_area_increase(
+	const uchar*	a,		/*!< in: original mbr. */
+	const uchar*	b,		/*!< in: new mbr. */
+	double*		ab_area)	/*!< out: increased area. */
+{
+	double		a_area = 1.0;
+	double		loc_ab_area = 1.0;
+	double		amin, amax, bmin, bmax;
+	double		data_round = 1.0;
+
+	static_assert(DATA_MBR_LEN == SPDIMS * 2 * sizeof(double),
+		      "compatibility");
+
+	for (auto i = SPDIMS; i--; ) {
+		double	area;
+
+		amin = mach_double_read(a);
+		bmin = mach_double_read(b);
+		amax = mach_double_read(a + sizeof(double));
+		bmax = mach_double_read(b + sizeof(double));
+
+		a += 2 * sizeof(double);
+		b += 2 * sizeof(double);
+
+		area = amax - amin;
+		if (area == 0) {
+			a_area *= LINE_MBR_WEIGHTS;
+		} else {
+			a_area *= area;
+		}
+
+		area = (double)std::max(amax, bmax) -
+		       (double)std::min(amin, bmin);
+		if (area == 0) {
+			loc_ab_area *= LINE_MBR_WEIGHTS;
+		} else {
+			loc_ab_area *= area;
+		}
+
+		/* Value of amax or bmin can be so large that small difference
+		are ignored. For example: 3.2884281489988079e+284 - 100 =
+		3.2884281489988079e+284. This results some area difference
+		are not detected */
+		if (loc_ab_area == a_area) {
+			if (bmin < amin || bmax > amax) {
+				data_round *= ((double)std::max(amax, bmax)
+					       - amax
+					       + (amin - (double)std::min(
+								amin, bmin)));
+			} else {
+				data_round *= area;
+			}
+		}
+	}
+
+	*ab_area = loc_ab_area;
+
+	if (loc_ab_area == a_area && data_round != 1.0) {
+		return(data_round);
+	}
+
+	return(loc_ab_area - a_area);
+}
+
+/** Calculates overlapping area
+@param[in]	a	mbr a
+@param[in]	b	mbr b
+@return overlapping area */
+static double rtree_area_overlapping(const byte *a, const byte *b)
+{
+	double	area = 1.0;
+	double	amin;
+	double	amax;
+	double	bmin;
+	double	bmax;
+
+	static_assert(DATA_MBR_LEN == SPDIMS * 2 * sizeof(double),
+		      "compatibility");
+
+	for (auto i = SPDIMS; i--; ) {
+		amin = mach_double_read(a);
+		bmin = mach_double_read(b);
+		amax = mach_double_read(a + sizeof(double));
+		bmax = mach_double_read(b + sizeof(double));
+		a += 2 * sizeof(double);
+		b += 2 * sizeof(double);
+
+		amin = std::max(amin, bmin);
+		amax = std::min(amax, bmax);
+
+		if (amin > amax) {
+			return(0);
+		} else {
+			area *= (amax - amin);
+		}
+	}
+
+	return(area);
+}
+
 /****************************************************************//**
 Calculate the area increased for a new record
 @return area increased */
@@ -1752,28 +1792,20 @@ rtr_rec_cal_increase(
 				dtuple in some of the common fields, or which
 				has an equal number or more fields than
 				dtuple */
-	const offset_t*	offsets,/*!< in: array returned by rec_get_offsets() */
 	double*		area)	/*!< out: increased area */
 {
 	const dfield_t*	dtuple_field;
-	ulint		dtuple_f_len;
-	ulint		rec_f_len;
-	const byte*	rec_b_ptr;
-	double		ret = 0;
 
 	ut_ad(!page_rec_is_supremum(rec));
 	ut_ad(!page_rec_is_infimum(rec));
 
 	dtuple_field = dtuple_get_nth_field(dtuple, 0);
-	dtuple_f_len = dfield_get_len(dtuple_field);
+	ut_ad(dfield_get_len(dtuple_field) == DATA_MBR_LEN);
 
-	rec_b_ptr = rec_get_nth_field(rec, offsets, 0, &rec_f_len);
-	ret = rtree_area_increase(
-		rec_b_ptr,
-		static_cast<const byte*>(dfield_get_data(dtuple_field)),
-		static_cast<int>(dtuple_f_len), area);
-
-	return(ret);
+	return rtree_area_increase(rec,
+				   static_cast<const byte*>(
+					   dfield_get_data(dtuple_field)),
+				   area);
 }
 
 /** Estimates the number of rows in a given area.
@@ -1867,10 +1899,9 @@ err_exit:
 
 			case PAGE_CUR_WITHIN:
 			case PAGE_CUR_MBR_EQUAL:
-				if (rtree_key_cmp(
+				if (!rtree_key_cmp(
 					    PAGE_CUR_WITHIN, range_mbr_ptr,
-					    DATA_MBR_LEN, rec, DATA_MBR_LEN)
-				    == 0) {
+					    rec)) {
 					area += 1;
 				}
 
@@ -1884,14 +1915,14 @@ err_exit:
 			case PAGE_CUR_CONTAIN:
 			case PAGE_CUR_INTERSECT:
 				area += rtree_area_overlapping(
-					range_mbr_ptr, rec, DATA_MBR_LEN)
+					range_mbr_ptr, rec)
 					/ rec_area;
 				break;
 
 			case PAGE_CUR_DISJOINT:
 				area += 1;
 				area -= rtree_area_overlapping(
-					range_mbr_ptr, rec, DATA_MBR_LEN)
+					range_mbr_ptr, rec)
 					/ rec_area;
 				break;
 
@@ -1899,7 +1930,7 @@ err_exit:
 			case PAGE_CUR_MBR_EQUAL:
 				if (!rtree_key_cmp(
 					    PAGE_CUR_WITHIN, range_mbr_ptr,
-					    DATA_MBR_LEN, rec, DATA_MBR_LEN)) {
+					    rec)) {
 					area += range_area / rec_area;
 				}
 
@@ -1917,5 +1948,6 @@ err_exit:
 	}
 
 	area /= n_recs;
-	return ha_rows(dict_table_get_n_rows(index->table) * area);
+	return ha_rows(static_cast<double>(dict_table_get_n_rows(index->table))
+		       * area);
 }

@@ -2,7 +2,7 @@
 #define SQL_SELECT_INCLUDED
 
 /* Copyright (c) 2000, 2013, Oracle and/or its affiliates.
-   Copyright (c) 2008, 2017, MariaDB Corporation.
+   Copyright (c) 2008, 2020, MariaDB Corporation.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -247,13 +247,13 @@ class SplM_opt_info;
 typedef struct st_join_table {
   TABLE		*table;
   TABLE_LIST    *tab_list;
-  KEYUSE	*keyuse;			/**< pointer to first used key */
+  KEYUSE	*keyuse;       /**< pointer to first used key */
   KEY           *hj_key;       /**< descriptor of the used best hash join key
-				    not supported by any index                 */
+                                    not supported by any index               */
   SQL_SELECT	*select;
   COND		*select_cond;
   COND          *on_precond;    /**< part of on condition to check before
-				     accessing the first inner table           */  
+                                     accessing the first inner table         */
   QUICK_SELECT_I *quick;
   /* 
     The value of select_cond before we've attempted to do Index Condition
@@ -634,6 +634,8 @@ typedef struct st_join_table {
   double scan_time();
   ha_rows get_examined_rows();
   bool preread_init();
+
+  bool pfs_batch_update(JOIN *join);
 
   bool is_sjm_nest() { return MY_TEST(bush_children); }
   
@@ -1095,7 +1097,7 @@ protected:
       keyuse.buffer= NULL;
       keyuse.malloc_flags= 0;
       best_positions= 0;                        /* To detect errors */
-      error= my_multi_malloc(MYF(MY_WME),
+      error= my_multi_malloc(PSI_INSTRUMENT_ME, MYF(MY_WME),
                              &best_positions,
                              sizeof(*best_positions) * (tables + 1),
                              &join_tab_keyuse,
@@ -1664,6 +1666,9 @@ public:
   void copy_ref_ptr_array(Ref_ptr_array dst_arr, Ref_ptr_array src_arr)
   {
     DBUG_ASSERT(dst_arr.size() >= src_arr.size());
+    if (src_arr.size() == 0)
+      return;
+
     void *dest= dst_arr.array();
     const void *src= src_arr.array();
     memcpy(dest, src, src_arr.size() * src_arr.element_size());

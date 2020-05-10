@@ -50,6 +50,8 @@ Created 2012-02-08 by Sunny Bains.
 #include <my_aes.h>
 #endif
 
+using st_::span;
+
 /** The size of the buffer to use for IO.
 @param n physical page size
 @return number of pages */
@@ -269,7 +271,7 @@ public:
 	@return true on success */
 	bool remove(
 		const dict_index_t*	index,
-		offset_t*		offsets) UNIV_NOTHROW
+		rec_offs*		offsets) UNIV_NOTHROW
 	{
 		ut_ad(page_is_leaf(m_cur.block->frame));
 		/* We can't end up with an empty page unless it is root. */
@@ -877,7 +879,7 @@ private:
 	@return DB_SUCCESS or error code */
 	dberr_t	adjust_cluster_index_blob_column(
 		rec_t*		rec,
-		const offset_t*	offsets,
+		const rec_offs*	offsets,
 		ulint		i) UNIV_NOTHROW;
 
 	/** Adjusts the BLOB reference in the clustered index row for all
@@ -887,7 +889,7 @@ private:
 	@return DB_SUCCESS or error code */
 	dberr_t	adjust_cluster_index_blob_columns(
 		rec_t*		rec,
-		const offset_t*	offsets) UNIV_NOTHROW;
+		const rec_offs*	offsets) UNIV_NOTHROW;
 
 	/** In the clustered index, adjist the BLOB pointers as needed.
 	Also update the BLOB reference, write the new space id.
@@ -896,7 +898,7 @@ private:
 	@return DB_SUCCESS or error code */
 	dberr_t	adjust_cluster_index_blob_ref(
 		rec_t*		rec,
-		const offset_t*	offsets) UNIV_NOTHROW;
+		const rec_offs*	offsets) UNIV_NOTHROW;
 
 	/** Purge delete-marked records, only if it is possible to do
 	so without re-organising the B+tree.
@@ -909,7 +911,7 @@ private:
 	@return DB_SUCCESS or error code. */
 	dberr_t	adjust_cluster_record(
 		rec_t*			rec,
-		const offset_t*		offsets) UNIV_NOTHROW;
+		const rec_offs*		offsets) UNIV_NOTHROW;
 
 	/** Find an index with the matching id.
 	@return row_index_t* instance or 0 */
@@ -937,10 +939,10 @@ private:
 	RecIterator		m_rec_iter;
 
 	/** Record offset */
-	offset_t		m_offsets_[REC_OFFS_NORMAL_SIZE];
+	rec_offs		m_offsets_[REC_OFFS_NORMAL_SIZE];
 
 	/** Pointer to m_offsets_ */
-	offset_t*		m_offsets;
+	rec_offs*		m_offsets;
 
 	/** Memory heap for the record offsets */
 	mem_heap_t*		m_heap;
@@ -1392,7 +1394,7 @@ row_import::set_root_by_name() UNIV_NOTHROW
 		/* We've already checked that it exists. */
 		ut_a(index != 0);
 
-		index->page = cfg_index->m_page_no;
+		index->page = static_cast<uint32_t>(cfg_index->m_page_no);
 	}
 }
 
@@ -1451,9 +1453,8 @@ row_import::set_root_by_heuristic() UNIV_NOTHROW
 
 			cfg_index[i].m_srv_index = index;
 
-			index->page = cfg_index[i].m_page_no;
-
-			++i;
+			index->page = static_cast<uint32_t>(
+				cfg_index[i++].m_page_no);
 		}
 	}
 
@@ -1666,7 +1667,7 @@ inline
 dberr_t
 PageConverter::adjust_cluster_index_blob_column(
 	rec_t*		rec,
-	const offset_t*	offsets,
+	const rec_offs*	offsets,
 	ulint		i) UNIV_NOTHROW
 {
 	ulint		len;
@@ -1711,7 +1712,7 @@ inline
 dberr_t
 PageConverter::adjust_cluster_index_blob_columns(
 	rec_t*		rec,
-	const offset_t*	offsets) UNIV_NOTHROW
+	const rec_offs*	offsets) UNIV_NOTHROW
 {
 	ut_ad(rec_offs_any_extern(offsets));
 
@@ -1744,7 +1745,7 @@ inline
 dberr_t
 PageConverter::adjust_cluster_index_blob_ref(
 	rec_t*		rec,
-	const offset_t*	offsets) UNIV_NOTHROW
+	const rec_offs*	offsets) UNIV_NOTHROW
 {
 	if (rec_offs_any_extern(offsets)) {
 		dberr_t	err;
@@ -1787,7 +1788,7 @@ inline
 dberr_t
 PageConverter::adjust_cluster_record(
 	rec_t*			rec,
-	const offset_t*		offsets) UNIV_NOTHROW
+	const rec_offs*		offsets) UNIV_NOTHROW
 {
 	dberr_t	err;
 
@@ -1801,7 +1802,7 @@ PageConverter::adjust_cluster_record(
 		if (UNIV_LIKELY_NULL(m_rec_iter.current_block()
 				     ->page.zip.data)) {
 			page_zip_write_trx_id_and_roll_ptr(
-				&m_rec_iter.current_block()->page.zip,
+				m_rec_iter.current_block(),
 				rec, m_offsets, trx_id_pos,
 				0, roll_ptr_t(1) << ROLL_PTR_INSERT_FLAG_POS,
 				&m_rec_iter.m_mtr);
@@ -1912,6 +1913,23 @@ PageConverter::update_index_page(
 	then ignore the error. */
 	if (m_cfg->m_missing && (m_index == 0 || m_index->m_srv_index == 0)) {
 		return(DB_SUCCESS);
+	}
+
+	if (m_index && block->page.id.page_no() == m_index->m_page_no) {
+		byte *b = FIL_PAGE_DATA + PAGE_BTR_SEG_LEAF + FSEG_HDR_SPACE
+			+ page;
+		mach_write_to_4(b, block->page.id.space());
+
+		memcpy(FIL_PAGE_DATA + PAGE_BTR_SEG_TOP + FSEG_HDR_SPACE
+		       + page, b, 4);
+		if (UNIV_LIKELY_NULL(block->page.zip.data)) {
+			memcpy(&block->page.zip.data[FIL_PAGE_DATA
+						     + PAGE_BTR_SEG_TOP
+						     + FSEG_HDR_SPACE], b, 4);
+			memcpy(&block->page.zip.data[FIL_PAGE_DATA
+						     + PAGE_BTR_SEG_LEAF
+						     + FSEG_HDR_SPACE], b, 4);
+		}
 	}
 
 #ifdef UNIV_ZIP_DEBUG
@@ -2122,8 +2140,7 @@ dberr_t PageConverter::operator()(buf_block_t* block) UNIV_NOTHROW
 
 	const bool full_crc32 = fil_space_t::full_crc32(get_space_flags());
 	byte* frame = get_frame(block);
-	compile_time_assert(FIL_PAGE_LSN % 8 == 0);
-	*reinterpret_cast<uint64_t*>(frame + FIL_PAGE_LSN)= 0;
+	memset_aligned<8>(frame + FIL_PAGE_LSN, 0, 8);
 
 	if (!block->page.zip.data) {
 		buf_flush_init_for_writing(
@@ -2446,7 +2463,7 @@ row_import_cfg_read_string(
 			break;
 		} else if (ch != 0) {
 			if (len < max_len) {
-				ptr[len++] = ch;
+				ptr[len++] = static_cast<byte>(ch);
 			} else {
 				break;
 			}
@@ -2512,10 +2529,10 @@ row_import_cfg_read_index_fields(
 
 		new (field) dict_field_t();
 
-		field->prefix_len = mach_read_from_4(ptr);
+		field->prefix_len = mach_read_from_4(ptr) & ((1U << 12) - 1);
 		ptr += sizeof(ib_uint32_t);
 
-		field->fixed_len = mach_read_from_4(ptr);
+		field->fixed_len = mach_read_from_4(ptr) & ((1U << 10) - 1);
 		ptr += sizeof(ib_uint32_t);
 
 		/* Include the NUL byte in the length. */
@@ -2820,24 +2837,24 @@ row_import_read_columns(
 		col->prtype = mach_read_from_4(ptr);
 		ptr += sizeof(ib_uint32_t);
 
-		col->mtype = mach_read_from_4(ptr);
+		col->mtype = static_cast<byte>(mach_read_from_4(ptr));
 		ptr += sizeof(ib_uint32_t);
 
-		col->len = mach_read_from_4(ptr);
+		col->len = static_cast<uint16_t>(mach_read_from_4(ptr));
 		ptr += sizeof(ib_uint32_t);
 
-		ulint mbminmaxlen = mach_read_from_4(ptr);
-		col->mbmaxlen = mbminmaxlen / 5;
-		col->mbminlen = mbminmaxlen % 5;
+		uint32_t mbminmaxlen = mach_read_from_4(ptr);
+		col->mbmaxlen = (mbminmaxlen / 5) & 7;
+		col->mbminlen = (mbminmaxlen % 5) & 7;
 		ptr += sizeof(ib_uint32_t);
 
-		col->ind = mach_read_from_4(ptr);
+		col->ind = mach_read_from_4(ptr) & dict_index_t::MAX_N_FIELDS;
 		ptr += sizeof(ib_uint32_t);
 
-		col->ord_part = mach_read_from_4(ptr);
+		col->ord_part = mach_read_from_4(ptr) & 1;
 		ptr += sizeof(ib_uint32_t);
 
-		col->max_prefix = mach_read_from_4(ptr);
+		col->max_prefix = mach_read_from_4(ptr) & ((1U << 12) - 1);
 		ptr += sizeof(ib_uint32_t);
 
 		/* Read in the column name as [len, byte array]. The len
@@ -3459,7 +3476,8 @@ fil_iterate(
 			byte*	src = readptr + i * size;
 			const ulint page_no = page_get_page_no(src);
 			if (!page_no && block->page.id.page_no()) {
-				if (!buf_page_is_zeroes(src, size)) {
+				if (!buf_is_zeroes(span<const byte>(src,
+								    size))) {
 					goto page_corrupted;
 				}
 				/* Proceed to the next page,
@@ -3482,14 +3500,15 @@ page_corrupted:
 					src + FIL_PAGE_SPACE_ID);
 			}
 
+			const uint16_t type = fil_page_get_type(src);
 			const bool page_compressed =
 				(full_crc32
 				 && fil_space_t::is_compressed(
 					callback.get_space_flags())
 				 && buf_page_is_compressed(
 					src, callback.get_space_flags()))
-				|| (fil_page_is_compressed_encrypted(src)
-				    || fil_page_is_compressed(src));
+				|| type == FIL_PAGE_PAGE_COMPRESSED_ENCRYPTED
+				|| type == FIL_PAGE_PAGE_COMPRESSED;
 
 			if (page_compressed && block->page.zip.data) {
 				goto page_corrupted;
@@ -4192,18 +4211,7 @@ row_import_for_mysql(
 	/* Ensure that all pages dirtied during the IMPORT make it to disk.
 	The only dirty pages generated should be from the pessimistic purge
 	of delete marked records that couldn't be purged in Phase I. */
-
-	{
-		FlushObserver observer(prebuilt->table->space, trx, NULL);
-		buf_LRU_flush_or_remove_pages(prebuilt->table->space_id,
-					      &observer);
-
-		if (observer.is_interrupted()) {
-			ib::info() << "Phase III - Flush interrupted";
-			return(row_import_error(prebuilt, trx,
-						DB_INTERRUPTED));
-		}
-	}
+	buf_LRU_flush_or_remove_pages(prebuilt->table->space_id, true);
 
 	ib::info() << "Phase IV - Flush complete";
 	prebuilt->table->space->set_imported();
@@ -4227,7 +4235,7 @@ row_import_for_mysql(
 	}
 
 	table->file_unreadable = false;
-	table->flags2 &= ~DICT_TF2_DISCARDED;
+	table->flags2 &= ~DICT_TF2_DISCARDED & ((1U << DICT_TF2_BITS) - 1);
 
 	/* Set autoinc value read from .cfg file, if one was specified.
 	Otherwise, keep the PAGE_ROOT_AUTO_INC as is. */

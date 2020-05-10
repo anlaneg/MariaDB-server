@@ -142,7 +142,8 @@ int main(int argc, char **argv)
   maria_block_size= 0;                 /* Use block size from control file */
   if (!opt_ignore_control_file &&
       (ma_control_file_open(FALSE, opt_require_control_file ||
-                            !(check_param.testflag & T_SILENT)) &&
+                            !(check_param.testflag & T_SILENT),
+                            TRUE) &&
        (opt_require_control_file ||
         (opt_transaction_logging && (check_param.testflag & T_REP_ANY)))))
   {
@@ -1900,8 +1901,8 @@ static int maria_sort_records(HA_CHECK *param,
     goto err;
   }
 
-  if (!(sort_param.record=
-        (uchar*) my_malloc((uint) share->base.default_rec_buff_size, MYF(0))))
+  if (!(sort_param.record= (uchar*) my_malloc(PSI_INSTRUMENT_ME,
+                           (uint) share->base.default_rec_buff_size, MYF(0))))
   {
     _ma_check_print_error(param,"Not enough memory for record");
     goto err;

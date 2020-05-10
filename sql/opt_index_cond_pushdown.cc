@@ -353,13 +353,11 @@ void push_index_cond(JOIN_TAB *tab, uint keyno)
   */
   if ((tab->table->file->index_flags(keyno, 0, 1) &
       HA_DO_INDEX_COND_PUSHDOWN) &&
-     optimizer_flag(tab->join->thd, OPTIMIZER_SWITCH_INDEX_COND_PUSHDOWN) &&
-     tab->join->thd->lex->sql_command != SQLCOM_UPDATE_MULTI &&
-     tab->join->thd->lex->sql_command != SQLCOM_DELETE_MULTI &&
-     tab->type != JT_CONST && tab->type != JT_SYSTEM &&
-     !(keyno == tab->table->s->primary_key &&             // (6)
-       tab->table->file->primary_key_is_clustered()))     // (6)
-
+      optimizer_flag(tab->join->thd, OPTIMIZER_SWITCH_INDEX_COND_PUSHDOWN) &&
+      tab->join->thd->lex->sql_command != SQLCOM_UPDATE_MULTI &&
+      tab->join->thd->lex->sql_command != SQLCOM_DELETE_MULTI &&
+      tab->type != JT_CONST && tab->type != JT_SYSTEM &&
+      !tab->table->file->is_clustering_key(keyno)) // 6
   {
     DBUG_EXECUTE("where",
                  print_where(tab->select_cond, "full cond", QT_ORDINARY););
@@ -390,7 +388,22 @@ void push_index_cond(JOIN_TAB *tab, uint keyno)
            ~(tab->table->map | tab->join->const_table_map)))
         tab->cache_idx_cond= idx_cond;
       else
+      {
         idx_remainder_cond= tab->table->file->idx_cond_push(keyno, idx_cond);
+
+        /*
+          If (1) there is an index condition that we couldn't push using ICP,
+             (2) we are using Join Buffering
+             (3) and we are using BKA
+          then use BKA's Index Condition Pushdown mechanism to check it.
+        */
+        if (idx_remainder_cond && tab->use_join_cache &&   // (1) && (2)
+            tab->icp_other_tables_ok)                      // (3)
+        {
+          tab->cache_idx_cond= idx_remainder_cond;
+          idx_remainder_cond= NULL;
+        }
+      }
 
       /*
         Disable eq_ref's "lookup cache" if we've pushed down an index

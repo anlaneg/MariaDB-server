@@ -156,7 +156,7 @@ struct st_pagecache_hash_link
 
 /* simple states of a block */
 #define PCBLOCK_ERROR       1 /* an error occurred when performing disk i/o  */
-#define PCBLOCK_READ        2 /* the is page in the block buffer             */
+#define PCBLOCK_READ        2 /* there is an active page in the block buffer */
 
 /*
   A tread is reading the data to the page.
@@ -681,6 +681,10 @@ static my_bool pagecache_fwrite(PAGECACHE *pagecache,
     DBUG_PRINT("error", ("write callback problem"));
     DBUG_RETURN(1);
   }
+#if __has_feature(memory_sanitizer) /* FIXME: encryption.aria_tiny etc. fail */
+  /* FIXME: ENGINE=Aria occasionally writes uninitialized data */
+  __msan_unpoison(args.page, pagecache->block_size);
+#endif
   res= (int)my_pwrite(filedesc->file, args.page, pagecache->block_size,
                  ((my_off_t) pageno << pagecache->shift), flags);
   (*filedesc->post_write_hook)(res, &args);
@@ -789,8 +793,8 @@ size_t init_pagecache(PAGECACHE *pagecache, size_t use_mem,
   {
     if (mysql_mutex_init(key_PAGECACHE_cache_lock,
                          &pagecache->cache_lock, MY_MUTEX_INIT_FAST) ||
-        my_hash_init(&pagecache->files_in_flush, &my_charset_bin, 32,
-                     offsetof(struct st_file_in_flush, file),
+        my_hash_init(PSI_INSTRUMENT_ME, &pagecache->files_in_flush,
+                     &my_charset_bin, 32, offsetof(struct st_file_in_flush, file),
                      sizeof(((struct st_file_in_flush *)NULL)->file),
                      NULL, NULL, 0))
       goto err;
@@ -801,7 +805,7 @@ size_t init_pagecache(PAGECACHE *pagecache, size_t use_mem,
 
   pagecache->mem_size= use_mem;
   pagecache->block_size= block_size;
-  pagecache->shift= my_bit_log2(block_size);
+  pagecache->shift= my_bit_log2_uint64(block_size);
   pagecache->readwrite_flags= my_readwrite_flags | MY_NABP | MY_WAIT_IF_FULL;
   pagecache->org_readwrite_flags= pagecache->readwrite_flags;
   DBUG_PRINT("info", ("block_size: %u", block_size));
@@ -845,15 +849,15 @@ size_t init_pagecache(PAGECACHE *pagecache, size_t use_mem,
            (blocks << pagecache->shift) > use_mem && blocks > 8)
       blocks--;
     /* Allocate memory for cache page buffers */
+    pagecache->mem_size= blocks * pagecache->block_size;
     if ((pagecache->block_mem=
-      my_large_malloc(blocks * pagecache->block_size,
-                         MYF(MY_WME))))
+      my_large_malloc(&pagecache->mem_size, MYF(MY_WME))))
     {
       /*
         Allocate memory for blocks, hash_links and hash entries;
         For each block 2 hash links are allocated
       */
-      if (my_multi_malloc_large(MYF(MY_ZEROFILL),
+      if (my_multi_malloc_large(PSI_INSTRUMENT_ME, MYF(MY_ZEROFILL),
                                 &pagecache->block_root,
                                 (ulonglong) (blocks *
                                              sizeof(PAGECACHE_BLOCK_LINK)),
@@ -871,7 +875,7 @@ size_t init_pagecache(PAGECACHE *pagecache, size_t use_mem,
                                              changed_blocks_hash_size),
                                 NullS))
         break;
-      my_large_free(pagecache->block_mem);
+      my_large_free(pagecache->block_mem, pagecache->mem_size);
       pagecache->block_mem= 0;
     }
     blocks= blocks / 4*3;
@@ -922,7 +926,7 @@ err:
   pagecache->blocks=  0;
   if (pagecache->block_mem)
   {
-    my_large_free(pagecache->block_mem);
+    my_large_free(pagecache->block_mem, pagecache->mem_size);
     pagecache->block_mem= NULL;
   }
   if (pagecache->block_root)
@@ -1196,7 +1200,7 @@ void end_pagecache(PAGECACHE *pagecache, my_bool cleanup)
 
     if (pagecache->block_mem)
     {
-      my_large_free(pagecache->block_mem);
+      my_large_free(pagecache->block_mem, pagecache->mem_size);
       pagecache->block_mem= NULL;
       my_free(pagecache->block_root);
       pagecache->block_root= NULL;
@@ -2330,7 +2334,7 @@ static void add_pin(PAGECACHE_BLOCK_LINK *block)
 #ifndef DBUG_OFF
   {
     PAGECACHE_PIN_INFO *info=
-      (PAGECACHE_PIN_INFO *)my_malloc(sizeof(PAGECACHE_PIN_INFO), MYF(0));
+      (PAGECACHE_PIN_INFO *)my_malloc(PSI_INSTRUMENT_ME, sizeof(PAGECACHE_PIN_INFO), MYF(0));
     info->thread= my_thread_var;
     info_link(&block->pin_list, info);
   }
@@ -2364,7 +2368,7 @@ static void remove_pin(PAGECACHE_BLOCK_LINK *block, my_bool any
 static void info_add_lock(PAGECACHE_BLOCK_LINK *block, my_bool wl)
 {
   PAGECACHE_LOCK_INFO *info=
-    (PAGECACHE_LOCK_INFO *)my_malloc(sizeof(PAGECACHE_LOCK_INFO), MYF(0));
+    (PAGECACHE_LOCK_INFO *)my_malloc(PSI_INSTRUMENT_ME, sizeof(PAGECACHE_LOCK_INFO), MYF(0));
   info->thread= my_thread_var;
   info->write_lock= wl;
   info_link((PAGECACHE_PIN_INFO **)&block->lock_list,
@@ -3748,6 +3752,7 @@ restart:
       */
       if (reg_request)
         unreg_request(pagecache, block, 1);
+      dec_counter_for_resize_op(pagecache);
       pagecache_pthread_mutex_unlock(&pagecache->cache_lock);
       DBUG_PRINT("info", ("restarting..."));
       goto restart;
@@ -4024,6 +4029,7 @@ my_bool pagecache_delete_by_link(PAGECACHE *pagecache,
     DBUG_ASSERT((block->status &
                  (PCBLOCK_IN_SWITCH | PCBLOCK_REASSIGNED)) == 0);
 
+    /* This lock is deleted in pagecache_delete_internal() called below */
     inc_counter_for_resize_op(pagecache);
     /*
       make_lock_and_pin() can't fail here, because we are keeping pin on the
@@ -4168,6 +4174,7 @@ restart:
       */
       if (pin == PAGECACHE_PIN)
         unreg_request(pagecache, block, 1);
+      dec_counter_for_resize_op(pagecache);
       pagecache_pthread_mutex_unlock(&pagecache->cache_lock);
       DBUG_PRINT("info", ("restarting..."));
       goto restart;
@@ -4939,7 +4946,7 @@ static int flush_pagecache_blocks_int(PAGECACHE *pagecache,
       if (count > FLUSH_CACHE &&
           !(cache=
             (PAGECACHE_BLOCK_LINK**)
-            my_malloc(sizeof(PAGECACHE_BLOCK_LINK*)*count, MYF(0))))
+            my_malloc(PSI_INSTRUMENT_ME, sizeof(PAGECACHE_BLOCK_LINK*)*count, MYF(0))))
       {
         cache= cache_buff;
         count= FLUSH_CACHE;
@@ -5295,7 +5302,7 @@ my_bool pagecache_collect_changed_blocks_with_lsn(PAGECACHE *pagecache,
      5 + /* pageno */
      LSN_STORE_SIZE /* rec_lsn */
      ) * stored_list_size;
-  if (NULL == (str->str= my_malloc(str->length, MYF(MY_WME))))
+  if (NULL == (str->str= my_malloc(PSI_INSTRUMENT_ME, str->length, MYF(MY_WME))))
     goto err;
   ptr= str->str;
   int8store(ptr, (ulonglong)stored_list_size);

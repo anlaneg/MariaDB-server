@@ -1,5 +1,5 @@
 # Copyright (c) 2006, 2017, Oracle and/or its affiliates.
-# Copyright (c) 2008, 2019, MariaDB Corporation.
+# Copyright (c) 2008, 2020, MariaDB Corporation.
 # 
 # This program is free software; you can redistribute it and/or modify
 # it under the terms of the GNU General Public License as published by
@@ -29,6 +29,9 @@ IF(POLICY CMP0054)
 ENDIF()
 IF(POLICY CMP0075)
   CMAKE_POLICY(SET CMP0075 NEW)
+ENDIF()
+IF(POLICY CMP0069)
+ CMAKE_POLICY(SET CMP0069 NEW)
 ENDIF()
 
 MESSAGE(STATUS "Running cmake version ${CMAKE_VERSION}")
@@ -228,7 +231,7 @@ ENDIF()
 
 OPTION(WITH_UBSAN "Enable undefined behavior sanitizer" OFF)
 IF (WITH_UBSAN)
-  MY_CHECK_AND_SET_COMPILER_FLAG("-fsanitize=undefined -fno-sanitize=alignment -U_FORTIFY_SOURCE" DEBUG RELWITHDEBINFO)
+  MY_CHECK_AND_SET_COMPILER_FLAG("-fsanitize=undefined -fno-sanitize=alignment -U_FORTIFY_SOURCE -DWITH_UBSAN" DEBUG RELWITHDEBINFO)
 ENDIF()
 
 OPTION(WITH_MSAN "Enable memory sanitizer" OFF)
@@ -251,6 +254,11 @@ INCLUDE(wsrep)
 INCLUDE(cpack_rpm)
 INCLUDE(cpack_deb)
 
+OPTION(WITH_DBUG_TRACE "Enable DBUG_ENTER()/DBUG_EXIT()" ON)
+IF(WITH_DBUG_TRACE)
+  ADD_DEFINITIONS(-DDBUG_TRACE)
+ENDIF()
+
 # Always enable debug sync for debug builds.
 SET(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -DENABLED_DEBUG_SYNC")
 SET(CMAKE_C_FLAGS_DEBUG "${CMAKE_C_FLAGS_DEBUG} -DENABLED_DEBUG_SYNC")
@@ -258,6 +266,11 @@ SET(CMAKE_C_FLAGS_DEBUG "${CMAKE_C_FLAGS_DEBUG} -DENABLED_DEBUG_SYNC")
 OPTION(ENABLE_GCOV "Enable gcov (debug, Linux builds only)" OFF)
 IF (ENABLE_GCOV)
   MY_CHECK_AND_SET_COMPILER_FLAG("-fprofile-arcs -ftest-coverage -lgcov" DEBUG)
+ENDIF()
+
+OPTION(WITHOUT_PACKED_SORT_KEYS "disable packed sort keys"  OFF)
+IF(WITHOUT_PACKED_SORT_KEYS)
+  ADD_DEFINITIONS(-DWITHOUT_PACKED_SORT_KEYS)
 ENDIF()
 
 MY_CHECK_AND_SET_COMPILER_FLAG(-ggdb3 DEBUG)

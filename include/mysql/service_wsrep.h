@@ -13,7 +13,7 @@ enum Wsrep_service_key_type
 
 #else
 
-/* Copyright (c) 2015 MariaDB Corporation Ab
+/* Copyright (c) 2015, 2020, MariaDB Corporation Ab
                  2018 Codership Oy <info@codership.com>
 
    This program is free software; you can redistribute it and/or modify
@@ -84,6 +84,7 @@ extern struct wsrep_service_st {
   my_bool                     (*wsrep_get_debug_func)();
   void                        (*wsrep_commit_ordered_func)(MYSQL_THD thd);
   my_bool                     (*wsrep_thd_is_applying_func)(const MYSQL_THD thd);
+  ulong                       (*wsrep_OSU_method_get_func)(const MYSQL_THD thd);
   my_bool                     (*wsrep_thd_has_ignored_error_func)(const MYSQL_THD thd);
   void                        (*wsrep_thd_set_ignored_error_func)(MYSQL_THD thd, my_bool val);
 } *wsrep_service;
@@ -99,7 +100,7 @@ extern struct wsrep_service_st {
 #define wsrep_is_wsrep_xid(X) wsrep_service->wsrep_is_wsrep_xid_func(X)
 #define wsrep_xid_seqno(X) wsrep_service->wsrep_xid_seqno_func(X)
 #define wsrep_xid_uuid(X) wsrep_service->wsrep_xid_uuid_func(X)
-#define wsrep_on(X) wsrep_service->wsrep_on_func(X)
+#define wsrep_on(thd) (thd) && WSREP_ON && wsrep_service->wsrep_on_func(thd)
 #define wsrep_prepare_key_for_innodb(A,B,C,D,E,F,G) wsrep_service->wsrep_prepare_key_for_innodb_func(A,B,C,D,E,F,G)
 #define wsrep_thd_LOCK(T) wsrep_service->wsrep_thd_LOCK_func(T)
 #define wsrep_thd_UNLOCK(T) wsrep_service->wsrep_thd_UNLOCK_func(T)
@@ -126,9 +127,9 @@ extern struct wsrep_service_st {
 #define wsrep_get_debug() wsrep_service->wsrep_get_debug_func()
 #define wsrep_commit_ordered(T) wsrep_service->wsrep_commit_ordered_func(T)
 #define wsrep_thd_is_applying(T) wsrep_service->wsrep_thd_is_applying_func(T)
+#define wsrep_OSU_method_get(T) wsrep_service->wsrep_OSU_method_get_func(T)
 #define wsrep_thd_has_ignored_error(T) wsrep_service->wsrep_thd_has_ignored_error_func(T)
 #define wsrep_thd_set_ignored_error(T,V) wsrep_service->wsrep_thd_set_ignored_error_func(T,V)
-
 #else
 
 #define MYSQL_SERVICE_WSREP_STATIC_INCLUDED
@@ -220,9 +221,8 @@ extern "C" my_bool wsrep_get_debug();
 
 extern "C" void wsrep_commit_ordered(MYSQL_THD thd);
 extern "C" my_bool wsrep_thd_is_applying(const MYSQL_THD thd);
-
+extern "C" ulong wsrep_OSU_method_get(const MYSQL_THD thd);
 extern "C" my_bool wsrep_thd_has_ignored_error(const MYSQL_THD thd);
 extern "C" void wsrep_thd_set_ignored_error(MYSQL_THD thd, my_bool val);
-
 #endif
 #endif /* MYSQL_SERVICE_WSREP_INCLUDED */

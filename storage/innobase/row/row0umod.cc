@@ -76,7 +76,7 @@ dberr_t
 row_undo_mod_clust_low(
 /*===================*/
 	undo_node_t*	node,	/*!< in: row undo node */
-	offset_t**	offsets,/*!< out: rec_get_offsets() on the record */
+	rec_offs**	offsets,/*!< out: rec_get_offsets() on the record */
 	mem_heap_t**	offsets_heap,
 				/*!< in/out: memory heap that can be emptied */
 	mem_heap_t*	heap,	/*!< in/out: memory heap */
@@ -148,37 +148,12 @@ row_undo_mod_clust_low(
 
 		ut_a(!dummy_big_rec);
 
-		static const byte
-			INFIMUM[8] = {'i','n','f','i','m','u','m',0},
-			SUPREMUM[8] = {'s','u','p','r','e','m','u','m'};
-
 		if (err == DB_SUCCESS
 		    && node->ref == &trx_undo_metadata
 		    && btr_cur_get_index(btr_cur)->table->instant
 		    && node->update->info_bits == REC_INFO_METADATA_ADD) {
-			if (buf_block_t* root = btr_root_block_get(
-				    btr_cur_get_index(btr_cur), RW_SX_LATCH,
-				    mtr)) {
-				uint16_t infimum, supremum;
-				if (page_is_comp(root->frame)) {
-					infimum = PAGE_NEW_INFIMUM;
-					supremum = PAGE_NEW_SUPREMUM;
-				} else {
-					infimum = PAGE_OLD_INFIMUM;
-					supremum = PAGE_OLD_SUPREMUM;
-				}
-
-				ut_ad(!memcmp(root->frame + infimum,
-					      INFIMUM, 8)
-				      == !memcmp(root->frame + supremum,
-						 SUPREMUM, 8));
-
-				if (memcmp(root->frame + infimum, INFIMUM, 8)) {
-					mtr->memcpy(root, infimum, INFIMUM, 8);
-					mtr->memcpy(root, supremum, SUPREMUM,
-						    8);
-				}
-			}
+			btr_reset_instant(*btr_cur_get_index(btr_cur), false,
+					  mtr);
 		}
 	}
 
@@ -210,11 +185,11 @@ static ulint row_trx_id_offset(const rec_t* rec, const dict_index_t* index)
 	if (!trx_id_offset) {
 		/* Reserve enough offsets for the PRIMARY KEY and 2 columns
 		so that we can access DB_TRX_ID, DB_ROLL_PTR. */
-		offset_t offsets_[REC_OFFS_HEADER_SIZE + MAX_REF_PARTS + 2];
+		rec_offs offsets_[REC_OFFS_HEADER_SIZE + MAX_REF_PARTS + 2];
 		rec_offs_init(offsets_);
 		mem_heap_t* heap = NULL;
 		const ulint trx_id_pos = index->n_uniq ? index->n_uniq : 1;
-		offset_t* offsets = rec_get_offsets(rec, index, offsets_, true,
+		rec_offs* offsets = rec_get_offsets(rec, index, offsets_, true,
 						 trx_id_pos + 1, &heap);
 		ut_ad(!heap);
 		ulint len;
@@ -295,7 +270,7 @@ row_undo_mod_clust(
 
 	mem_heap_t*	heap		= mem_heap_create(1024);
 	mem_heap_t*	offsets_heap	= NULL;
-	offset_t*	offsets		= NULL;
+	rec_offs*	offsets		= NULL;
 	const dtuple_t*	rebuilt_old_pk;
 	byte		sys[DATA_TRX_ID_LEN + DATA_ROLL_PTR_LEN];
 
@@ -456,7 +431,7 @@ row_undo_mod_clust(
 		ulint trx_id_pos = index->n_uniq ? index->n_uniq : 1;
 		/* Reserve enough offsets for the PRIMARY KEY and
 		2 columns so that we can access DB_TRX_ID, DB_ROLL_PTR. */
-		offset_t offsets_[REC_OFFS_HEADER_SIZE + MAX_REF_PARTS + 2];
+		rec_offs offsets_[REC_OFFS_HEADER_SIZE + MAX_REF_PARTS + 2];
 		if (trx_id_offset) {
 #ifdef UNIV_DEBUG
 			ut_ad(rec_offs_validate(NULL, index, offsets));
@@ -496,20 +471,19 @@ row_undo_mod_clust(
 				      rec, dict_table_is_comp(node->table))
 			      || rec_is_alter_metadata(rec, *index));
 			index->set_modified(mtr);
-			if (page_zip_des_t* page_zip = buf_block_get_page_zip(
-				    btr_pcur_get_block(pcur))) {
+			buf_block_t* block = btr_pcur_get_block(pcur);
+			if (UNIV_LIKELY_NULL(block->page.zip.data)) {
 				page_zip_write_trx_id_and_roll_ptr(
-					page_zip, rec, offsets, trx_id_pos,
+					block, rec, offsets, trx_id_pos,
 					0, 1ULL << ROLL_PTR_INSERT_FLAG_POS,
 					&mtr);
 			} else {
-				buf_block_t* block = btr_pcur_get_block(pcur);
-				uint16_t offs = page_offset(rec
-							    + trx_id_offset);
+				size_t offs = page_offset(rec + trx_id_offset);
 				mtr.memset(block, offs, DATA_TRX_ID_LEN, 0);
 				offs += DATA_TRX_ID_LEN;
-				mtr.write<1,mtr_t::OPT>(*block, block->frame
-							+ offs, 0x80U);
+				mtr.write<1,mtr_t::MAYBE_NOP>(*block,
+							      block->frame
+							      + offs, 0x80U);
 				mtr.memset(block, offs + 1,
 					   DATA_ROLL_PTR_LEN - 1, 0);
 			}
@@ -627,9 +601,8 @@ row_undo_mod_del_mark_or_remove_sec_low(
 	    || row_vers_old_has_index_entry(
 		    false, btr_pcur_get_rec(&node->pcur),
 		    &mtr_vers, index, entry, 0, 0)) {
-		err = btr_cur_del_mark_set_sec_rec(BTR_NO_LOCKING_FLAG,
-						   btr_cur, TRUE, thr, &mtr);
-		ut_ad(err == DB_SUCCESS);
+		btr_rec_set_deleted<true>(btr_cur_get_block(btr_cur),
+					  btr_cur_get_rec(btr_cur), &mtr);
 	} else {
 		/* Remove the index record */
 
@@ -780,7 +753,7 @@ try_again:
 	switch (search_result) {
 		mem_heap_t*	heap;
 		mem_heap_t*	offsets_heap;
-		offset_t*	offsets;
+		rec_offs*	offsets;
 	case ROW_BUFFERED:
 	case ROW_NOT_DELETED_REF:
 		/* These are invalid outcomes, because the mode passed
@@ -864,11 +837,8 @@ try_again:
 
 		break;
 	case ROW_FOUND:
-		err = btr_cur_del_mark_set_sec_rec(
-			BTR_NO_LOCKING_FLAG,
-			btr_cur, FALSE, thr, &mtr);
-
-		ut_a(err == DB_SUCCESS);
+		btr_rec_set_deleted<false>(btr_cur_get_block(btr_cur),
+					   btr_cur_get_rec(btr_cur), &mtr);
 		heap = mem_heap_create(
 			sizeof(upd_t)
 			+ dtuple_get_n_fields(entry) * sizeof(upd_field_t));
@@ -1234,7 +1204,7 @@ static bool row_undo_mod_parse_undo_rec(undo_node_t* node, bool dict_locked)
 	table_id_t	table_id;
 	trx_id_t	trx_id;
 	roll_ptr_t	roll_ptr;
-	ulint		info_bits;
+	byte		info_bits;
 	ulint		type;
 	ulint		cmpl_info;
 	bool		dummy_extern;
@@ -1299,7 +1269,7 @@ close_table:
 	if (node->update->info_bits & REC_INFO_MIN_REC_FLAG) {
 		if ((node->update->info_bits & ~REC_INFO_DELETED_FLAG)
 		    != REC_INFO_MIN_REC_FLAG) {
-			ut_ad(!"wrong info_bits in undo log record");
+			ut_ad("wrong info_bits in undo log record" == 0);
 			goto close_table;
 		}
 		/* This must be an undo log record for a subsequent
@@ -1429,8 +1399,8 @@ rollback_clust:
 			already be holding dict_sys.mutex, which
 			would be acquired when updating statistics. */
 			if (update_statistics && !dict_locked) {
-				dict_stats_update_if_needed(
-					node->table, node->trx->mysql_thd);
+				dict_stats_update_if_needed(node->table,
+							    *node->trx);
 			} else {
 				node->table->stat_modified_counter++;
 			}

@@ -18,6 +18,7 @@
 #include "my_static.h"
 #include <errno.h>
 #include "mysys_err.h"
+#include "my_atomic.h"
 
 static void make_ftype(char * to,int flag);
 
@@ -64,7 +65,7 @@ FILE *my_fopen(const char *filename, int flags, myf MyFlags)
       statistic_increment(my_stream_opened,&THR_LOCK_open);
       DBUG_RETURN(fd);				/* safeguard */
     }
-    my_file_info[filedesc].name= (char*) my_strdup(filename,MyFlags);
+    my_file_info[filedesc].name= my_strdup(key_memory_my_file_info, filename, MyFlags);
     statistic_increment(my_stream_opened, &THR_LOCK_open);
     statistic_increment(my_file_total_opened, &THR_LOCK_open);
     my_file_info[filedesc].type= STREAM_BY_FOPEN;
@@ -222,13 +223,15 @@ FILE *my_fdopen(File Filedes, const char *name, int Flags, myf MyFlags)
     {
       if (my_file_info[Filedes].type != UNOPEN)
       {
-        thread_safe_decrement32(&my_file_opened);       /* File is opened with my_open ! */
+        /* File is opened with my_open ! */
+        my_atomic_add32_explicit(&my_file_opened, -1, MY_MEMORY_ORDER_RELAXED);
       }
       else
       {
-        my_file_info[Filedes].name=  my_strdup(name,MyFlags);
+        my_file_info[Filedes].name= my_strdup(key_memory_my_file_info,
+                                              name, MyFlags);
       }
-      my_file_info[Filedes].type = STREAM_BY_FDOPEN;
+      my_file_info[Filedes].type= STREAM_BY_FDOPEN;
     }
   }
 

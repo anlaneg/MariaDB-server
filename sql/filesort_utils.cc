@@ -20,6 +20,8 @@
 #include "table.h"
 
 
+PSI_memory_key key_memory_Filesort_buffer_sort_keys;
+
 namespace {
 /**
   A local helper function. See comments for get_merge_buffers_cost().
@@ -50,9 +52,9 @@ double get_merge_many_buffs_cost_fast(ha_rows num_rows,
 
   // Calculate CPU cost of sorting buffers.
   total_cost=
-    ( num_buffers * num_keys_per_buffer * log(1.0 + num_keys_per_buffer) +
-      last_n_elems * log(1.0 + last_n_elems) )
-    / TIME_FOR_COMPARE_ROWID;
+    ((num_buffers * num_keys_per_buffer * log(1.0 + num_keys_per_buffer) +
+      last_n_elems * log(1.0 + last_n_elems)) /
+     TIME_FOR_COMPARE_ROWID);
   
   // Simulate behavior of merge_many_buff().
   while (num_buffers >= MERGEBUFF2)
@@ -111,7 +113,8 @@ uchar *Filesort_buffer::alloc_sort_buffer(uint num_records,
     one key.
     TODO varun: move this to the place where min_sort_memory is used.
   */
-  set_if_bigger(buff_size, (record_length +sizeof(uchar*)) * MERGEBUFF2);
+  set_if_bigger(buff_size,
+               ALIGN_SIZE((record_length +sizeof(uchar*)) * MERGEBUFF2));
 
   if (m_rawmem)
   {
@@ -127,7 +130,8 @@ uchar *Filesort_buffer::alloc_sort_buffer(uint num_records,
         the old values
       */
       my_free(m_rawmem);
-      if (!(m_rawmem= (uchar*) my_malloc(buff_size, MYF(MY_THREAD_SPECIFIC))))
+      if (!(m_rawmem= (uchar*) my_malloc(key_memory_Filesort_buffer_sort_keys,
+                                         buff_size, MYF(MY_THREAD_SPECIFIC))))
       {
         m_size_in_bytes= 0;
         DBUG_RETURN(0);
@@ -136,7 +140,8 @@ uchar *Filesort_buffer::alloc_sort_buffer(uint num_records,
   }
   else
   {
-    if (!(m_rawmem= (uchar*) my_malloc(buff_size, MYF(MY_THREAD_SPECIFIC))))
+    if (!(m_rawmem= (uchar*) my_malloc(key_memory_Filesort_buffer_sort_keys,
+                                       buff_size, MYF(MY_THREAD_SPECIFIC))))
     {
       m_size_in_bytes= 0;
       DBUG_RETURN(0);
@@ -169,19 +174,22 @@ void Filesort_buffer::sort_buffer(const Sort_param *param, uint count)
   if (count <= 1 || size == 0)
     return;
 
-  // dont reverse for PQ, it is already done
+  // don't reverse for PQ, it is already done
   if (!param->using_pq)
     reverse_record_pointers();
 
   uchar **buffer= NULL;
-  if (radixsort_is_appliccable(count, param->sort_length) &&
-      (buffer= (uchar**) my_malloc(count*sizeof(char*),
+  if (!param->using_packed_sortkeys() &&
+      radixsort_is_appliccable(count, param->sort_length) &&
+      (buffer= (uchar**) my_malloc(PSI_INSTRUMENT_ME, count*sizeof(char*),
                                    MYF(MY_THREAD_SPECIFIC))))
   {
     radixsort_for_str_ptr(m_sort_keys, count, param->sort_length, buffer);
     my_free(buffer);
     return;
   }
-  
-  my_qsort2(m_sort_keys, count, sizeof(uchar*), get_ptr_compare(size), &size);
+
+  my_qsort2(m_sort_keys, count, sizeof(uchar*),
+            param->get_compare_function(),
+            param->get_compare_argument(&size));
 }

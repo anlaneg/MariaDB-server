@@ -319,7 +319,7 @@ dict_stats_exec_sql(
 	} else {
 		trx->op_info = "rollback of internal trx on stats tables";
 		trx->dict_operation_lock_mode = RW_X_LATCH;
-		trx_rollback_to_savepoint(trx, NULL);
+		trx->rollback();
 		trx->dict_operation_lock_mode = 0;
 		trx->op_info = "";
 		ut_a(trx->error_state == DB_SUCCESS);
@@ -1010,8 +1010,8 @@ dict_stats_analyze_index_level(
 	bool		prev_rec_is_copied;
 	byte*		prev_rec_buf = NULL;
 	ulint		prev_rec_buf_size = 0;
-	offset_t*	rec_offsets;
-	offset_t*	prev_rec_offsets;
+	rec_offs*	rec_offsets;
+	rec_offs*	prev_rec_offsets;
 	ulint		i;
 
 	DEBUG_PRINTF("    %s(table=%s, index=%s, level=" ULINTPF ")\n",
@@ -1032,9 +1032,9 @@ dict_stats_analyze_index_level(
 	i = (REC_OFFS_HEADER_SIZE + 1 + 1) + n_uniq;
 
 	heap = mem_heap_create((2 * sizeof *rec_offsets) * i);
-	rec_offsets = static_cast<offset_t*>(
+	rec_offsets = static_cast<rec_offs*>(
 		mem_heap_alloc(heap, i * sizeof *rec_offsets));
-	prev_rec_offsets = static_cast<offset_t*>(
+	prev_rec_offsets = static_cast<rec_offs*>(
 		mem_heap_alloc(heap, i * sizeof *prev_rec_offsets));
 	rec_offs_set_n_alloc(rec_offsets, i);
 	rec_offs_set_n_alloc(prev_rec_offsets, i);
@@ -1323,11 +1323,11 @@ to the number of externally stored pages which were encountered
 @return offsets1 or offsets2 (the offsets of *out_rec),
 or NULL if the page is empty and does not contain user records. */
 UNIV_INLINE
-offset_t*
+rec_offs*
 dict_stats_scan_page(
 	const rec_t**		out_rec,
-	offset_t*		offsets1,
-	offset_t*		offsets2,
+	rec_offs*		offsets1,
+	rec_offs*		offsets2,
 	const dict_index_t*	index,
 	const page_t*		page,
 	ulint			n_prefix,
@@ -1335,8 +1335,8 @@ dict_stats_scan_page(
 	ib_uint64_t*		n_diff,
 	ib_uint64_t*		n_external_pages)
 {
-	offset_t*	offsets_rec		= offsets1;
-	offset_t*	offsets_next_rec	= offsets2;
+	rec_offs*	offsets_rec		= offsets1;
+	rec_offs*	offsets_next_rec	= offsets2;
 	const rec_t*	rec;
 	const rec_t*	next_rec;
 	/* A dummy heap, to be passed to rec_get_offsets().
@@ -1449,9 +1449,9 @@ dict_stats_analyze_index_below_cur(
 	const page_t*	page;
 	mem_heap_t*	heap;
 	const rec_t*	rec;
-	offset_t*	offsets1;
-	offset_t*	offsets2;
-	offset_t*	offsets_rec;
+	rec_offs*	offsets1;
+	rec_offs*	offsets2;
+	rec_offs*	offsets_rec;
 	ulint		size;
 	mtr_t		mtr;
 
@@ -1469,10 +1469,10 @@ dict_stats_analyze_index_below_cur(
 
 	heap = mem_heap_create(size * (sizeof *offsets1 + sizeof *offsets2));
 
-	offsets1 = static_cast<offset_t*>(mem_heap_alloc(
+	offsets1 = static_cast<rec_offs*>(mem_heap_alloc(
 			heap, size * sizeof *offsets1));
 
-	offsets2 = static_cast<offset_t*>(mem_heap_alloc(
+	offsets2 = static_cast<rec_offs*>(mem_heap_alloc(
 			heap, size * sizeof *offsets2));
 
 	rec_offs_set_n_alloc(offsets1, size);
@@ -3332,16 +3332,18 @@ transient:
 	return(DB_SUCCESS);
 }
 
-/*********************************************************************//**
-Removes the information for a particular index's stats from the persistent
+/** Remove the information for a particular index's stats from the persistent
 storage if it exists and if there is data stored for this index.
 This function creates its own trx and commits it.
-A note from Marko why we cannot edit user and sys_* tables in one trx:
-marko: The problem is that ibuf merges should be disabled while we are
-rolling back dict transactions.
-marko: If ibuf merges are not disabled, we need to scan the *.ibd files.
-But we shouldn't open *.ibd files before we have rolled back dict
-transactions and opened the SYS_* records for the *.ibd files.
+
+We must modify system tables in a separate transaction in order to
+adhere to the InnoDB design constraint that dict_sys.latch prevents
+lock waits on system tables. If we modified system and user tables in
+the same transaction, we should exclusively hold dict_sys.latch until
+the transaction is committed, and effectively block other transactions
+that will attempt to open any InnoDB tables. Because we have no
+guarantee that user transactions will be committed fast, we cannot
+afford to keep the system tables locked in a user transaction.
 @return DB_SUCCESS or error code */
 dberr_t
 dict_stats_drop_index(

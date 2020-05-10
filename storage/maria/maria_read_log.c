@@ -67,7 +67,7 @@ int main(int argc, char **argv)
     goto end;
   }
   /* we don't want to create a control file, it MUST exist */
-  if (ma_control_file_open(FALSE, TRUE))
+  if (ma_control_file_open(FALSE, TRUE, TRUE))
   {
     fprintf(stderr, "Can't open control file (%d)\n", errno);
     goto err;
@@ -317,7 +317,7 @@ get_one_option(const struct my_option *opt,
     char *pos;
     if (!my_hash_inited(&tables_to_redo))
     {
-      my_hash_init2(&tables_to_redo, 16, &my_charset_bin,
+      my_hash_init2(PSI_INSTRUMENT_ME, &tables_to_redo, 16, &my_charset_bin,
                     16, 0, 0, my_hash_get_string, 0, 0, HASH_UNIQUE);
     }
     do

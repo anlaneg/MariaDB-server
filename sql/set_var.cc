@@ -33,7 +33,6 @@
                         // date_time_format_make
 #include "derror.h"
 #include "tztime.h"     // my_tz_find, my_tz_SYSTEM, struct Time_zone
-#include "sql_acl.h"    // SUPER_ACL
 #include "sql_select.h" // free_underlaid_joins
 #include "sql_i_s.h"
 #include "sql_view.h"   // updatable_views_with_limit_typelib
@@ -43,6 +42,7 @@
 
 static HASH system_variable_hash;
 static PolyLock_mutex PLock_global_system_variables(&LOCK_global_system_variables);
+static ulonglong system_variable_hash_version= 0;
 
 /**
   Return variable name and length for hashing of variables.
@@ -64,7 +64,7 @@ int sys_var_init()
   /* Must be already initialized. */
   DBUG_ASSERT(system_charset_info != NULL);
 
-  if (my_hash_init(&system_variable_hash, system_charset_info, 700, 0,
+  if (my_hash_init(PSI_INSTRUMENT_ME, &system_variable_hash, system_charset_info, 700, 0,
                    0, (my_hash_get_key) get_sys_var_length, 0, HASH_UNIQUE))
     goto error;
 
@@ -154,8 +154,7 @@ sys_var::sys_var(sys_var_chain *chain, const char *name_arg,
   next(0), binlog_status(binlog_status_arg), value_origin(COMPILE_TIME),
   flags(flags_arg), show_val_type(show_val_type_arg),
   guard(lock), offset(off), on_check(on_check_func), on_update(on_update_func),
-  deprecation_substitute(substitute),
-  is_os_charset(FALSE)
+  deprecation_substitute(substitute)
 {
   /*
     There is a limitation in handle_options() related to short options:
@@ -509,12 +508,6 @@ bool throw_bounds_warning(THD *thd, const char *name, bool fixed, double v)
   return false;
 }
 
-CHARSET_INFO *sys_var::charset(THD *thd)
-{
-  return is_os_charset ? thd->variables.character_set_filesystem :
-    system_charset_info;
-}
-
 
 typedef struct old_names_map_st
 {
@@ -583,6 +576,8 @@ int mysql_add_sys_var_chain(sys_var *first)
       goto error;
     }
   }
+  /* Update system_variable_hash version. */
+  system_variable_hash_version++;
   return 0;
 
 error:
@@ -613,6 +608,8 @@ int mysql_del_sys_var_chain(sys_var *first)
     result|= my_hash_delete(&system_variable_hash, (uchar*) var);
   mysql_prlock_unlock(&LOCK_system_variables_hash);
 
+  /* Update system_variable_hash version. */
+  system_variable_hash_version++;
   return result;
 }
 
@@ -620,6 +617,16 @@ int mysql_del_sys_var_chain(sys_var *first)
 static int show_cmp(SHOW_VAR *a, SHOW_VAR *b)
 {
   return strcmp(a->name, b->name);
+}
+
+
+/*
+  Number of records in the system_variable_hash.
+  Requires lock on LOCK_system_variables_hash.
+*/
+ulong get_system_variable_hash_records(void)
+{
+  return system_variable_hash.records;
 }
 
 
@@ -749,6 +756,11 @@ err:
   Functions to handle SET mysql_internal_variable=const_expr
 *****************************************************************************/
 
+bool sys_var::on_check_access_global(THD *thd) const
+{
+  return check_global_access(thd, PRIV_SET_GLOBAL_SYSTEM_VARIABLE);
+}
+
 /**
   Verify that the supplied value is correct.
 
@@ -773,7 +785,7 @@ int set_var::check(THD *thd)
     my_error(err, MYF(0), var->name.str);
     return -1;
   }
-  if ((type == OPT_GLOBAL && check_global_access(thd, SUPER_ACL)))
+  if (type == OPT_GLOBAL && var->on_check_access_global(thd))
     return 1;
   /* value is a NULL pointer if we are using SET ... = DEFAULT */
   if (!value)
@@ -785,6 +797,16 @@ int set_var::check(THD *thd)
   {
     my_error(ER_WRONG_TYPE_FOR_VAR, MYF(0), var->name.str);
     return -1;
+  }
+  switch (type) {
+  case SHOW_OPT_DEFAULT:
+  case SHOW_OPT_SESSION:
+    DBUG_ASSERT(var->scope() != sys_var::GLOBAL);
+    if (var->on_check_access_session(thd))
+      return -1;
+    break;
+  case SHOW_OPT_GLOBAL:  // Checked earlier
+    break;
   }
   return var->check(thd, this) ? -1 : 0;
 }
@@ -810,7 +832,8 @@ int set_var::light_check(THD *thd)
     my_error(err, MYF(0), var->name.str);
     return -1;
   }
-  if (type == OPT_GLOBAL && check_global_access(thd, SUPER_ACL))
+  if (type == OPT_GLOBAL &&
+      check_global_access(thd, PRIV_SET_GLOBAL_SYSTEM_VARIABLE))
     return 1;
 
   if (value && value->fix_fields_if_needed_for_scalar(thd, &value))
@@ -1377,7 +1400,7 @@ resolve_engine_list(THD *thd, const char *str_arg, size_t str_arg_len,
   if (temp_copy)
     res= (plugin_ref *)thd->calloc((count+1)*sizeof(*res));
   else
-    res= (plugin_ref *)my_malloc((count+1)*sizeof(*res), MYF(MY_ZEROFILL|MY_WME));
+    res= (plugin_ref *)my_malloc(PSI_INSTRUMENT_ME, (count+1)*sizeof(*res), MYF(MY_ZEROFILL|MY_WME));
   if (!res)
   {
     my_error(ER_OUTOFMEMORY, MYF(0), (int)((count+1)*sizeof(*res)));
@@ -1428,7 +1451,7 @@ copy_engine_list(plugin_ref *list)
 
   for (p= list, count= 0; *p; ++p, ++count)
     ;
-  p= (plugin_ref *)my_malloc((count+1)*sizeof(*p), MYF(0));
+  p= (plugin_ref *)my_malloc(PSI_INSTRUMENT_ME, (count+1)*sizeof(*p), MYF(0));
   if (!p)
   {
     my_error(ER_OUTOFMEMORY, MYF(0), (int)((count+1)*sizeof(*p)));
@@ -1503,3 +1526,13 @@ pretty_print_engine_list(THD *thd, plugin_ref *list)
   *pos= '\0';
   return buf;
 }
+
+/*
+  Current version of the system_variable_hash.
+  Requires lock on LOCK_system_variables_hash.
+*/
+ulonglong get_system_variable_hash_version(void)
+{
+  return system_variable_hash_version;
+}
+

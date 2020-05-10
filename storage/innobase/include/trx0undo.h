@@ -1,7 +1,7 @@
 /*****************************************************************************
 
 Copyright (c) 1996, 2016, Oracle and/or its affiliates. All Rights Reserved.
-Copyright (c) 2017, 2019, MariaDB Corporation.
+Copyright (c) 2017, 2020, MariaDB Corporation.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License as published by the Free Software
@@ -156,6 +156,13 @@ trx_undo_get_first_rec(const fil_space_t &space, uint32_t page_no,
                        uint16_t offset, ulint mode, buf_block_t*& block,
                        mtr_t *mtr);
 
+/** Initialize an undo log page.
+NOTE: This corresponds to a redo log record and must not be changed!
+@see mtr_t::undo_create()
+@param[in,out]	block	undo log page */
+void trx_undo_page_init(const buf_block_t &block)
+	MY_ATTRIBUTE((nonnull));
+
 /** Allocate an undo log page.
 @param[in,out]	undo	undo log
 @param[in,out]	mtr	mini-transaction that does not hold any page latch
@@ -250,38 +257,6 @@ trx_undo_commit_cleanup(trx_undo_t* undo, bool is_temp);
 void
 trx_undo_free_at_shutdown(trx_t *trx);
 
-/** Parse MLOG_UNDO_INIT.
-@param[in]	ptr	log record
-@param[in]	end_ptr	end of log record buffer
-@param[in,out]	page	page or NULL
-@param[in,out]	mtr	mini-transaction
-@return	end of log record
-@retval	NULL	if the log record is incomplete */
-byte*
-trx_undo_parse_page_init(const byte* ptr, const byte* end_ptr, page_t* page);
-/** Parse MLOG_UNDO_HDR_REUSE for crash-upgrade from MariaDB 10.2.
-@param[in]	ptr	redo log record
-@param[in]	end_ptr	end of log buffer
-@param[in,out]	page	undo page or NULL
-@return end of log record or NULL */
-byte*
-trx_undo_parse_page_header_reuse(
-	const byte*	ptr,
-	const byte*	end_ptr,
-	page_t*		page);
-
-/** Parse the redo log entry of an undo log page header create.
-@param[in]	ptr	redo log record
-@param[in]	end_ptr	end of log buffer
-@param[in,out]	block	page frame or NULL
-@param[in,out]	mtr	mini-transaction or NULL
-@return end of log record or NULL */
-byte*
-trx_undo_parse_page_header(
-	const byte*	ptr,
-	const byte*	end_ptr,
-	buf_block_t*	block,
-	mtr_t*		mtr);
 /** Read an undo log when starting up the database.
 @param[in,out]	rseg		rollback segment
 @param[in]	id		rollback segment slot
@@ -476,14 +451,6 @@ which purge would not result in removing delete-marked records. */
 /*-------------------------------------------------------------*/
 /** Size of the undo log header without XID information */
 #define TRX_UNDO_LOG_OLD_HDR_SIZE (34 + FLST_NODE_SIZE)
-
-/* Note: the writing of the undo log old header is coded by a log record
-MLOG_UNDO_HDR_CREATE. The appending of an XID to the
-header is logged separately. In this sense, the XID is not really a member
-of the undo log header. TODO: do not append the XID to the log header if XA
-is not needed by the user. The XID wastes about 150 bytes of space in every
-undo log. In the history list we may have millions of undo logs, which means
-quite a large overhead. */
 
 /** X/Open XA Transaction Identification (XID) */
 /* @{ */

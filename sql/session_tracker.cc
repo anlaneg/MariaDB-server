@@ -1,5 +1,5 @@
 /* Copyright (c) 2015, Oracle and/or its affiliates. All rights reserved.
-   Copyright (c) 2016, MariaDB
+   Copyright (c) 2016, 2020, MariaDB
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -72,7 +72,8 @@ void Session_sysvars_tracker::vars_list::copy(vars_list* from, THD *thd)
 bool Session_sysvars_tracker::vars_list::insert(const sys_var *svar)
 {
   sysvar_node_st *node;
-  if (!(node= (sysvar_node_st *) my_malloc(sizeof(sysvar_node_st),
+  if (!(node= (sysvar_node_st *) my_malloc(PSI_INSTRUMENT_ME,
+                                           sizeof(sysvar_node_st),
                                            MYF(MY_WME |
                                                (mysqld_server_initialized ?
                                                 MY_THREAD_SPECIFIC : 0)))))
@@ -326,7 +327,8 @@ void Session_sysvars_tracker::init(THD *thd)
               global_system_variables.session_track_system_variables);
   DBUG_ASSERT(global_system_variables.session_track_system_variables);
   thd->variables.session_track_system_variables=
-    my_strdup(global_system_variables.session_track_system_variables,
+    my_strdup(PSI_INSTRUMENT_ME,
+              global_system_variables.session_track_system_variables,
               MYF(MY_WME | MY_THREAD_SPECIFIC));
 }
 
@@ -383,11 +385,11 @@ bool Session_sysvars_tracker::update(THD *thd, set_var *var)
   size_t length= 1;
 
   if (var->save_result.string_value.str)
-    copy= my_memdup(var->save_result.string_value.str,
+    copy= my_memdup(PSI_INSTRUMENT_ME, var->save_result.string_value.str,
                     (length= var->save_result.string_value.length + 1),
                     MYF(MY_WME | MY_THREAD_SPECIFIC));
     else
-      copy= my_strdup("", MYF(MY_WME | MY_THREAD_SPECIFIC));
+      copy= my_strdup(PSI_INSTRUMENT_ME, "", MYF(MY_WME | MY_THREAD_SPECIFIC));
 
   if (!copy)
     return true;
@@ -1198,10 +1200,15 @@ bool User_variables_tracker::store(THD *thd, String *buf)
     bool null_value;
 
     var->val_str(&null_value, &value_str, DECIMAL_MAX_SCALE);
-    buf->q_append(static_cast<char>(SESSION_TRACK_USER_VARIABLES));
-    ulonglong length= net_length_size(var->name.length) + var->name.length;
+
+    size_t length= net_length_size(var->name.length) + var->name.length;
     if (!null_value)
       length+= net_length_size(value_str.length()) + value_str.length();
+
+    if (buf->reserve(sizeof(char) + length + net_length_size(length)))
+      return true;
+
+    buf->q_append(static_cast<char>(SESSION_TRACK_USER_VARIABLES));
     buf->q_net_store_length(length);
     buf->q_net_store_data(reinterpret_cast<const uchar*>(var->name.str),
                           var->name.length);
@@ -1257,7 +1264,7 @@ void Session_tracker::store(THD *thd, String *buf)
   }
 
   size_t length= buf->length() - start;
-  uchar *data= (uchar *)(buf->ptr() + start);
+  uchar *data;
   uint size;
 
   if ((size= net_length_size(length)) != 1)
@@ -1267,8 +1274,16 @@ void Session_tracker::store(THD *thd, String *buf)
       buf->length(start); // it is safer to have 0-length block in case of error
       return;
     }
+
+    /*
+      The 'buf->reserve()' can change the buf->ptr() so we cannot
+      calculate the 'data' earlier.
+    */
+    data= (uchar *)(buf->ptr() + start);
     memmove(data + (size - 1), data, length);
   }
+  else
+    data= (uchar *)(buf->ptr() + start);
 
   net_store_length(data - 1, length);
 }

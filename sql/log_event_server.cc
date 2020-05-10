@@ -1,6 +1,6 @@
 /*
    Copyright (c) 2000, 2019, Oracle and/or its affiliates.
-   Copyright (c) 2009, 2019, MariaDB
+   Copyright (c) 2009, 2020, MariaDB
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -798,8 +798,12 @@ my_bool Log_event::need_checksum()
 
 int Log_event_writer::write_internal(const uchar *pos, size_t len)
 {
+  DBUG_ASSERT(!ctx || encrypt_or_write == &Log_event_writer::encrypt_and_write);
   if (my_b_safe_write(file, pos, len))
+  {
+    DBUG_PRINT("error", ("write to log failed: %d", my_errno));
     return 1;
+  }
   bytes_written+= len;
   return 0;
 }
@@ -823,35 +827,37 @@ int Log_event_writer::maybe_write_event_len(uchar *pos, size_t len)
 
 int Log_event_writer::encrypt_and_write(const uchar *pos, size_t len)
 {
-  uchar *dst= 0;
-  size_t dstsize= 0;
+  uchar *dst;
+  size_t dstsize;
+  uint dstlen;
+  int res;                                      // Safe as res is always set
+  DBUG_ASSERT(ctx);
 
-  if (ctx)
+  if (!len)
+    return 0;
+
+  dstsize= encryption_encrypted_length((uint)len, ENCRYPTION_KEY_SYSTEM_DATA,
+                                       crypto->key_version);
+  if (!(dst= (uchar*)my_safe_alloca(dstsize)))
+    return 1;
+
+  if (encryption_ctx_update(ctx, pos, (uint)len, dst, &dstlen))
   {
-    dstsize= encryption_encrypted_length((uint)len, ENCRYPTION_KEY_SYSTEM_DATA,
-                                         crypto->key_version);
-    if (!(dst= (uchar*)my_safe_alloca(dstsize)))
-      return 1;
-
-    uint dstlen;
-    if (len == 0)
-      dstlen= 0;
-    else if (encryption_ctx_update(ctx, pos, (uint)len, dst, &dstlen))
-      goto err;
-
-    if (maybe_write_event_len(dst, dstlen))
-      return 1;
-    pos= dst;
-    len= dstlen;
-  }
-  if (write_internal(pos, len))
+    res= 1;
     goto err;
+  }
 
-  my_safe_afree(dst, dstsize);
-  return 0;
+  if (maybe_write_event_len(dst, dstlen))
+  {
+    res= 1;
+    goto err;
+  }
+
+  res= write_internal(dst, dstlen);
+
 err:
   my_safe_afree(dst, dstsize);
-  return 1;
+  return res;
 }
 
 int Log_event_writer::write_header(uchar *pos, size_t len)
@@ -887,7 +893,7 @@ int Log_event_writer::write_header(uchar *pos, size_t len)
     pos+= 4;
     len-= 4;
   }
-  DBUG_RETURN(encrypt_and_write(pos, len));
+  DBUG_RETURN((this->*encrypt_or_write)(pos, len));
 }
 
 int Log_event_writer::write_data(const uchar *pos, size_t len)
@@ -896,7 +902,7 @@ int Log_event_writer::write_data(const uchar *pos, size_t len)
   if (checksum_len)
     crc= my_checksum(crc, pos, len);
 
-  DBUG_RETURN(encrypt_and_write(pos, len));
+  DBUG_RETURN((this->*encrypt_or_write)(pos, len));
 }
 
 int Log_event_writer::write_footer()
@@ -906,7 +912,7 @@ int Log_event_writer::write_footer()
   {
     uchar checksum_buf[BINLOG_CHECKSUM_LEN];
     int4store(checksum_buf, crc);
-    if (encrypt_and_write(checksum_buf, BINLOG_CHECKSUM_LEN))
+    if ((this->*encrypt_or_write)(checksum_buf, BINLOG_CHECKSUM_LEN))
       DBUG_RETURN(ER_ERROR_ON_WRITE);
   }
   if (ctx)
@@ -1023,6 +1029,24 @@ void Query_log_event::pack_info(Protocol *protocol)
     buf.append(STRING_WITH_LEN("use "));
     append_identifier(protocol->thd, &buf, db, db_len);
     buf.append(STRING_WITH_LEN("; "));
+  }
+  if (flags2 & (OPTION_NO_FOREIGN_KEY_CHECKS | OPTION_AUTO_IS_NULL |
+                OPTION_RELAXED_UNIQUE_CHECKS |
+                OPTION_NO_CHECK_CONSTRAINT_CHECKS |
+                OPTION_IF_EXISTS))
+  {
+    buf.append(STRING_WITH_LEN("set "));
+    if (flags2 & OPTION_NO_FOREIGN_KEY_CHECKS)
+      buf.append(STRING_WITH_LEN("foreign_key_checks=1, "));
+    if (flags2 & OPTION_AUTO_IS_NULL)
+      buf.append(STRING_WITH_LEN("sql_auto_is_null, "));
+    if (flags2 & OPTION_RELAXED_UNIQUE_CHECKS)
+      buf.append(STRING_WITH_LEN("unique_checks=1, "));
+    if (flags2 & OPTION_NO_CHECK_CONSTRAINT_CHECKS)
+      buf.append(STRING_WITH_LEN("check_constraint_checks=1, "));
+    if (flags2 & OPTION_IF_EXISTS)
+      buf.append(STRING_WITH_LEN("@@sql_if_exists=1, "));
+    buf[buf.length()-2]=';';
   }
   if (query && q_len)
     buf.append(query, q_len);
@@ -1343,7 +1367,8 @@ Query_log_event::Query_log_event()
   Creates an event for binlogging
   The value for `errcode' should be supplied by caller.
 */
-Query_log_event::Query_log_event(THD* thd_arg, const char* query_arg, size_t query_length, bool using_trans,
+Query_log_event::Query_log_event(THD* thd_arg, const char* query_arg,
+                                 size_t query_length, bool using_trans,
 				 bool direct, bool suppress_use, int errcode)
 
   :Log_event(thd_arg,
@@ -1356,7 +1381,7 @@ Query_log_event::Query_log_event(THD* thd_arg, const char* query_arg, size_t que
    thread_id(thd_arg->thread_id),
    /* save the original thread id; we already know the server id */
    slave_proxy_id((ulong)thd_arg->variables.pseudo_thread_id),
-   flags2_inited(1), sql_mode_inited(1), charset_inited(1),
+   flags2_inited(1), sql_mode_inited(1), charset_inited(1), flags2(0),
    sql_mode(thd_arg->variables.sql_mode),
    auto_increment_increment(thd_arg->variables.auto_increment_increment),
    auto_increment_offset(thd_arg->variables.auto_increment_offset),
@@ -1371,9 +1396,14 @@ Query_log_event::Query_log_event(THD* thd_arg, const char* query_arg, size_t que
   /*
     If Query_log_event will contain non trans keyword (not BEGIN, COMMIT,
     SAVEPOINT or ROLLBACK) we disable PA for this transaction.
+    Note that here WSREP(thd) might not be true e.g. when wsrep_shcema
+    is created we create tables with thd->variables.wsrep_on=false
+    to avoid replicating wsrep_schema tables to other nodes.
    */
   if (WSREP_ON && !is_trans_keyword())
+  {
     thd->wsrep_PA_safe= false;
+  }
 #endif /* WITH_WSREP */
 
   memset(&user, 0, sizeof(user));
@@ -1487,6 +1517,7 @@ Query_log_event::Query_log_event(THD* thd_arg, const char* query_arg, size_t que
       case SQLCOM_RELEASE_SAVEPOINT:
       case SQLCOM_ROLLBACK_TO_SAVEPOINT:
       case SQLCOM_SAVEPOINT:
+      case SQLCOM_XA_END:
         use_cache= trx_cache= TRUE;
         break;
       default:
@@ -1660,15 +1691,18 @@ int Query_log_event::do_apply_event(rpl_group_info *rgi,
     {
       thd->slave_expected_error= expected_error;
       if (flags2_inited)
+      {
         /*
-          all bits of thd->variables.option_bits which are 1 in OPTIONS_WRITTEN_TO_BIN_LOG
-          must take their value from flags2.
+          all bits of thd->variables.option_bits which are 1 in
+          OPTIONS_WRITTEN_TO_BIN_LOG must take their value from
+          flags2.
         */
         thd->variables.option_bits= flags2|(thd->variables.option_bits & ~OPTIONS_WRITTEN_TO_BIN_LOG);
+      }
       /*
         else, we are in a 3.23/4.0 binlog; we previously received a
-        Rotate_log_event which reset thd->variables.option_bits and sql_mode etc, so
-        nothing to do.
+        Rotate_log_event which reset thd->variables.option_bits and
+        sql_mode etc, so nothing to do.
       */
       /*
         We do not replicate MODE_NO_DIR_IN_CREATE. That is, if the master is a
@@ -1833,8 +1867,8 @@ int Query_log_event::do_apply_event(rpl_group_info *rgi,
         thd->m_statement_psi= MYSQL_START_STATEMENT(&thd->m_statement_state,
                                                     stmt_info_rpl.m_key,
                                                     thd->db.str, thd->db.length,
-                                                    thd->charset());
-        THD_STAGE_INFO(thd, stage_init);
+                                                    thd->charset(), NULL);
+        THD_STAGE_INFO(thd, stage_starting);
         MYSQL_SET_STATEMENT_TEXT(thd->m_statement_psi, thd->query(), thd->query_length());
         if (thd->m_digest != NULL)
           thd->m_digest->reset(thd->m_token_array, max_digest_length);
@@ -2086,7 +2120,8 @@ Query_log_event::do_shall_skip(rpl_group_info *rgi)
     }
   }
 #ifdef WITH_WSREP
-  else if (WSREP_ON && wsrep_mysql_replication_bundle && opt_slave_domain_parallel_threads == 0 &&
+  else if (WSREP(thd) && wsrep_mysql_replication_bundle &&
+           opt_slave_domain_parallel_threads == 0 &&
            thd->wsrep_mysql_replicated > 0 &&
            (is_begin() || is_commit()))
   {
@@ -2100,7 +2135,7 @@ Query_log_event::do_shall_skip(rpl_group_info *rgi)
       thd->wsrep_mysql_replicated = 0;
     }
   }
-#endif
+#endif /* WITH_WSREP */
   DBUG_RETURN(Log_event::do_shall_skip(rgi));
 }
 
@@ -3014,7 +3049,7 @@ Rotate_log_event::Rotate_log_event(const char* new_log_ident_arg,
                       pos_arg, (ulong) flags));
   cache_type= EVENT_NO_CACHE;
   if (flags & DUP_NAME)
-    new_log_ident= my_strndup(new_log_ident_arg, ident_len, MYF(MY_WME));
+    new_log_ident= my_strndup(PSI_INSTRUMENT_ME, new_log_ident_arg, ident_len, MYF(MY_WME));
   if (flags & RELAY_LOG)
     set_relay_log_event();
   DBUG_VOID_RETURN;
@@ -3170,7 +3205,7 @@ Binlog_checkpoint_log_event::Binlog_checkpoint_log_event(
         const char *binlog_file_name_arg,
         uint binlog_file_len_arg)
   :Log_event(),
-   binlog_file_name(my_strndup(binlog_file_name_arg, binlog_file_len_arg,
+   binlog_file_name(my_strndup(PSI_INSTRUMENT_ME, binlog_file_name_arg, binlog_file_len_arg,
                                MYF(MY_WME))),
    binlog_file_len(binlog_file_len_arg)
 {
@@ -3218,6 +3253,18 @@ Gtid_log_event::Gtid_log_event(THD *thd_arg, uint64 seq_no_arg,
   /* Preserve any DDL or WAITED flag in the slave's binlog. */
   if (thd_arg->rgi_slave)
     flags2|= (thd_arg->rgi_slave->gtid_ev_flags2 & (FL_DDL|FL_WAITED));
+
+  XID_STATE &xid_state= thd->transaction.xid_state;
+  if (is_transactional && xid_state.is_explicit_XA() &&
+      (thd->lex->sql_command == SQLCOM_XA_PREPARE ||
+       xid_state.get_state_code() == XA_PREPARED))
+  {
+    DBUG_ASSERT(thd->lex->xa_opt != XA_ONE_PHASE);
+
+    flags2|= thd->lex->sql_command == SQLCOM_XA_PREPARE ?
+      FL_PREPARED_XA : FL_COMPLETED_XA;
+    xid.set(xid_state.get_xid());
+  }
 }
 
 
@@ -3260,7 +3307,7 @@ Gtid_log_event::peek(const char *event_start, size_t event_len,
 bool
 Gtid_log_event::write()
 {
-  uchar buf[GTID_HEADER_LEN+2];
+  uchar buf[GTID_HEADER_LEN+2+sizeof(XID)];
   size_t write_len;
 
   int8store(buf, seq_no);
@@ -3272,8 +3319,22 @@ Gtid_log_event::write()
     write_len= GTID_HEADER_LEN + 2;
   }
   else
+    write_len= 13;
+
+  if (flags2 & (FL_PREPARED_XA | FL_COMPLETED_XA))
   {
-    bzero(buf+13, GTID_HEADER_LEN-13);
+    int4store(&buf[write_len],   xid.formatID);
+    buf[write_len +4]=   (uchar) xid.gtrid_length;
+    buf[write_len +4+1]= (uchar) xid.bqual_length;
+    write_len+= 6;
+    long data_length= xid.bqual_length + xid.gtrid_length;
+    memcpy(buf+write_len, xid.data, data_length);
+    write_len+= data_length;
+  }
+
+  if (write_len < GTID_HEADER_LEN)
+  {
+    bzero(buf+write_len, GTID_HEADER_LEN-write_len);
     write_len= GTID_HEADER_LEN;
   }
   return write_header(write_len) ||
@@ -3316,9 +3377,14 @@ Gtid_log_event::make_compatible_event(String *packet, bool *need_dummy_event,
 void
 Gtid_log_event::pack_info(Protocol *protocol)
 {
-  char buf[6+5+10+1+10+1+20+1+4+20+1];
+  char buf[6+5+10+1+10+1+20+1+4+20+1+ ser_buf_size+5 /* sprintf */];
   char *p;
-  p = strmov(buf, (flags2 & FL_STANDALONE ? "GTID " : "BEGIN GTID "));
+  p = strmov(buf, (flags2 & FL_STANDALONE  ? "GTID " :
+                   flags2 & FL_PREPARED_XA ? "XA START " : "BEGIN GTID "));
+  if (flags2 & FL_PREPARED_XA)
+  {
+    p+= sprintf(p, "%s GTID ", xid.serialize());
+  }
   p= longlong10_to_str(domain_id, p, 10);
   *p++= '-';
   p= longlong10_to_str(server_id, p, 10);
@@ -3378,16 +3444,37 @@ Gtid_log_event::do_apply_event(rpl_group_info *rgi)
     bits|= (ulonglong)OPTION_RPL_SKIP_PARALLEL;
   thd->variables.option_bits= bits;
   DBUG_PRINT("info", ("Set OPTION_GTID_BEGIN"));
-  thd->set_query_and_id(gtid_begin_string, sizeof(gtid_begin_string)-1,
-                        &my_charset_bin, next_query_id());
-  thd->lex->sql_command= SQLCOM_BEGIN;
   thd->is_slave_error= 0;
-  status_var_increment(thd->status_var.com_stat[thd->lex->sql_command]);
-  if (trans_begin(thd, 0))
+
+  char buf_xa[sizeof("XA START") + 1 + ser_buf_size];
+  if (flags2 & FL_PREPARED_XA)
   {
-    DBUG_PRINT("error", ("trans_begin() failed"));
-    thd->is_slave_error= 1;
+    const char fmt[]= "XA START %s";
+
+    thd->lex->xid= &xid;
+    thd->lex->xa_opt= XA_NONE;
+    sprintf(buf_xa, fmt, xid.serialize());
+    thd->set_query_and_id(buf_xa, static_cast<uint32>(strlen(buf_xa)),
+                          &my_charset_bin, next_query_id());
+    thd->lex->sql_command= SQLCOM_XA_START;
+    if (trans_xa_start(thd))
+    {
+      DBUG_PRINT("error", ("trans_xa_start() failed"));
+      thd->is_slave_error= 1;
+    }
   }
+  else
+  {
+    thd->set_query_and_id(gtid_begin_string, sizeof(gtid_begin_string)-1,
+                          &my_charset_bin, next_query_id());
+    thd->lex->sql_command= SQLCOM_BEGIN;
+    if (trans_begin(thd, 0))
+    {
+      DBUG_PRINT("error", ("trans_begin() failed"));
+      thd->is_slave_error= 1;
+    }
+  }
+  status_var_increment(thd->status_var.com_stat[thd->lex->sql_command]);
   thd->update_stats();
 
   if (likely(!thd->is_slave_error))
@@ -3443,8 +3530,8 @@ Gtid_list_log_event::Gtid_list_log_event(rpl_binlog_state *gtid_set,
   cache_type= EVENT_NO_CACHE;
   /* Failure to allocate memory will be caught by is_valid() returning false. */
   if (count < (1<<28) &&
-      (list = (rpl_gtid *)my_malloc(count * sizeof(*list) + (count == 0),
-                                    MYF(MY_WME))))
+      (list = (rpl_gtid *)my_malloc(PSI_INSTRUMENT_ME,
+                           count * sizeof(*list) + (count == 0), MYF(MY_WME))))
     gtid_set->get_gtid_list(list, count);
 }
 
@@ -3456,8 +3543,8 @@ Gtid_list_log_event::Gtid_list_log_event(slave_connection_state *gtid_set,
   cache_type= EVENT_NO_CACHE;
   /* Failure to allocate memory will be caught by is_valid() returning false. */
   if (count < (1<<28) &&
-      (list = (rpl_gtid *)my_malloc(count * sizeof(*list) + (count == 0),
-                                    MYF(MY_WME))))
+      (list = (rpl_gtid *)my_malloc(PSI_INSTRUMENT_ME,
+                          count * sizeof(*list) + (count == 0), MYF(MY_WME))))
   {
     gtid_set->get_gtid_list(list, count);
 #if defined(HAVE_REPLICATION)
@@ -3465,8 +3552,8 @@ Gtid_list_log_event::Gtid_list_log_event(slave_connection_state *gtid_set,
     {
       uint32 i;
 
-      if (!(sub_id_list= (uint64 *)my_malloc(count * sizeof(uint64),
-                                             MYF(MY_WME))))
+      if (!(sub_id_list= (uint64 *)my_malloc(PSI_INSTRUMENT_ME,
+                                         count * sizeof(uint64), MYF(MY_WME))))
       {
         my_free(list);
         list= NULL;
@@ -3771,46 +3858,58 @@ bool slave_execute_deferred_events(THD *thd)
 
 
 /**************************************************************************
-  Xid_log_event methods
+  Xid_apply_log_event methods
 **************************************************************************/
 
 #if defined(HAVE_REPLICATION)
-void Xid_log_event::pack_info(Protocol *protocol)
+
+int Xid_apply_log_event::do_record_gtid(THD *thd, rpl_group_info *rgi,
+                                        bool in_trans, void **out_hton)
 {
-  char buf[128], *pos;
-  pos= strmov(buf, "COMMIT /* xid=");
-  pos= longlong10_to_str(xid, pos, 10);
-  pos= strmov(pos, " */");
-  protocol->store(buf, (uint) (pos-buf), &my_charset_bin);
+  int err= 0;
+  Relay_log_info const *rli= rgi->rli;
+
+  rgi->gtid_pending= false;
+  err= rpl_global_gtid_slave_state->record_gtid(thd, &rgi->current_gtid,
+                                                rgi->gtid_sub_id,
+                                                in_trans, false, out_hton);
+
+  if (unlikely(err))
+  {
+    int ec= thd->get_stmt_da()->sql_errno();
+    /*
+      Do not report an error if this is really a kill due to a deadlock.
+      In this case, the transaction will be re-tried instead.
+    */
+    if (!is_parallel_retry_error(rgi, ec))
+      rli->report(ERROR_LEVEL, ER_CANNOT_UPDATE_GTID_STATE, rgi->gtid_info(),
+                  "Error during XID COMMIT: failed to update GTID state in "
+                  "%s.%s: %d: %s",
+                  "mysql", rpl_gtid_slave_state_table_name.str, ec,
+                  thd->get_stmt_da()->message());
+    thd->is_slave_error= 1;
+  }
+
+  return err;
 }
-#endif
 
-
-bool Xid_log_event::write()
-{
-  DBUG_EXECUTE_IF("do_not_write_xid", return 0;);
-  return write_header(sizeof(xid)) ||
-         write_data((uchar*)&xid, sizeof(xid)) ||
-         write_footer();
-}
-
-
-#if defined(HAVE_REPLICATION)
-int Xid_log_event::do_apply_event(rpl_group_info *rgi)
+int Xid_apply_log_event::do_apply_event(rpl_group_info *rgi)
 {
   bool res;
   int err;
-  rpl_gtid gtid;
   uint64 sub_id= 0;
-  Relay_log_info const *rli= rgi->rli;
   void *hton= NULL;
+  rpl_gtid gtid;
 
   /*
-    XID_EVENT works like a COMMIT statement. And it also updates the
-    mysql.gtid_slave_pos table with the GTID of the current transaction.
-
+    An instance of this class such as XID_EVENT works like a COMMIT
+    statement. It updates mysql.gtid_slave_pos with the GTID of the
+    current transaction.
     Therefore, it acts much like a normal SQL statement, so we need to do
     THD::reset_for_next_command() as if starting a new statement.
+
+    XA_PREPARE_LOG_EVENT also updates the gtid table *but* the update gets
+    committed as separate "autocommit" transaction.
   */
   thd->reset_for_next_command();
   /*
@@ -3824,57 +3923,58 @@ int Xid_log_event::do_apply_event(rpl_group_info *rgi)
   if (rgi->gtid_pending)
   {
     sub_id= rgi->gtid_sub_id;
-    rgi->gtid_pending= false;
-
     gtid= rgi->current_gtid;
-    err= rpl_global_gtid_slave_state->record_gtid(thd, &gtid, sub_id, true,
-                                                  false, &hton);
-    if (unlikely(err))
-    {
-      int ec= thd->get_stmt_da()->sql_errno();
-      /*
-        Do not report an error if this is really a kill due to a deadlock.
-        In this case, the transaction will be re-tried instead.
-      */
-      if (!is_parallel_retry_error(rgi, ec))
-        rli->report(ERROR_LEVEL, ER_CANNOT_UPDATE_GTID_STATE, rgi->gtid_info(),
-                    "Error during XID COMMIT: failed to update GTID state in "
-                    "%s.%s: %d: %s",
-                    "mysql", rpl_gtid_slave_state_table_name.str, ec,
-                    thd->get_stmt_da()->message());
-      thd->is_slave_error= 1;
-      return err;
-    }
 
-    DBUG_EXECUTE_IF("gtid_fail_after_record_gtid",
-        { my_error(ER_ERROR_DURING_COMMIT, MYF(0), HA_ERR_WRONG_COMMAND);
-          thd->is_slave_error= 1;
-          return 1;
-        });
+    if (!thd->transaction.xid_state.is_explicit_XA())
+    {
+      if ((err= do_record_gtid(thd, rgi, true /* in_trans */, &hton)))
+        return err;
+
+      DBUG_EXECUTE_IF("gtid_fail_after_record_gtid",
+                      {
+                        my_error(ER_ERROR_DURING_COMMIT, MYF(0),
+                                 HA_ERR_WRONG_COMMAND);
+                        thd->is_slave_error= 1;
+                        return 1;
+                      });
+    }
   }
 
-  /* For a slave Xid_log_event is COMMIT */
-  general_log_print(thd, COM_QUERY,
-                    "COMMIT /* implicit, from Xid_log_event */");
+  general_log_print(thd, COM_QUERY, get_query());
   thd->variables.option_bits&= ~OPTION_GTID_BEGIN;
-  res= trans_commit(thd); /* Automatically rolls back on error. */
-  thd->mdl_context.release_transactional_locks();
+  res= do_commit();
+  if (!res && rgi->gtid_pending)
+  {
+    DBUG_ASSERT(!thd->transaction.xid_state.is_explicit_XA());
 
+    if ((err= do_record_gtid(thd, rgi, false, &hton)))
+      return err;
+  }
+
+#ifdef WITH_WSREP
+  if (WSREP(thd)) mysql_mutex_lock(&thd->LOCK_thd_data);
+  if ((!res || (WSREP(thd) && thd->wsrep_trx().state() == wsrep::transaction::s_must_replay )) && sub_id)
+#else
   if (likely(!res) && sub_id)
+#endif /* WITH_WSREP */
     rpl_global_gtid_slave_state->update_state_hash(sub_id, &gtid, hton, rgi);
-
+#ifdef WITH_WSREP
+  if (WSREP(thd)) mysql_mutex_unlock(&thd->LOCK_thd_data);
+#endif /* WITH_WSREP */
   /*
     Increment the global status commit count variable
   */
-  status_var_increment(thd->status_var.com_stat[SQLCOM_COMMIT]);
+  enum enum_sql_command cmd= !thd->transaction.xid_state.is_explicit_XA() ?
+    SQLCOM_COMMIT : SQLCOM_XA_PREPARE;
+  status_var_increment(thd->status_var.com_stat[cmd]);
 
   return res;
 }
 
 Log_event::enum_skip_reason
-Xid_log_event::do_shall_skip(rpl_group_info *rgi)
+Xid_apply_log_event::do_shall_skip(rpl_group_info *rgi)
 {
-  DBUG_ENTER("Xid_log_event::do_shall_skip");
+  DBUG_ENTER("Xid_apply_log_event::do_shall_skip");
   if (rgi->rli->slave_skip_counter > 0)
   {
     DBUG_ASSERT(!rgi->rli->get_flag(Relay_log_info::IN_TRANSACTION));
@@ -3882,7 +3982,7 @@ Xid_log_event::do_shall_skip(rpl_group_info *rgi)
     DBUG_RETURN(Log_event::EVENT_SKIP_COUNT);
   }
 #ifdef WITH_WSREP
-  else if (wsrep_mysql_replication_bundle && WSREP_ON &&
+  else if (wsrep_mysql_replication_bundle && WSREP(thd) &&
            opt_slave_domain_parallel_threads == 0)
   {
     if (++thd->wsrep_mysql_replicated < (int)wsrep_mysql_replication_bundle)
@@ -3898,7 +3998,106 @@ Xid_log_event::do_shall_skip(rpl_group_info *rgi)
 #endif
   DBUG_RETURN(Log_event::do_shall_skip(rgi));
 }
+#endif /* HAVE_REPLICATION */
+
+/**************************************************************************
+  Xid_log_event methods
+**************************************************************************/
+
+#if defined(HAVE_REPLICATION)
+void Xid_log_event::pack_info(Protocol *protocol)
+{
+  char buf[128], *pos;
+  pos= strmov(buf, "COMMIT /* xid=");
+  pos= longlong10_to_str(xid, pos, 10);
+  pos= strmov(pos, " */");
+  protocol->store(buf, (uint) (pos-buf), &my_charset_bin);
+}
+
+
+int Xid_log_event::do_commit()
+{
+  bool res;
+  res= trans_commit(thd); /* Automatically rolls back on error. */
+  thd->mdl_context.release_transactional_locks();
+  return res;
+}
+#endif
+
+
+bool Xid_log_event::write()
+{
+  DBUG_EXECUTE_IF("do_not_write_xid", return 0;);
+  return write_header(sizeof(xid)) ||
+         write_data((uchar*)&xid, sizeof(xid)) ||
+         write_footer();
+}
+
+/**************************************************************************
+  XA_prepare_log_event methods
+**************************************************************************/
+
+#if defined(HAVE_REPLICATION)
+void XA_prepare_log_event::pack_info(Protocol *protocol)
+{
+  char query[sizeof("XA COMMIT ONE PHASE") + 1 + ser_buf_size];
+
+  sprintf(query,
+          (one_phase ? "XA COMMIT %s ONE PHASE" :  "XA PREPARE %s"),
+          m_xid.serialize());
+
+  protocol->store(query, strlen(query), &my_charset_bin);
+}
+
+
+int XA_prepare_log_event::do_commit()
+{
+  int res;
+  xid_t xid;
+  xid.set(m_xid.formatID,
+          m_xid.data, m_xid.gtrid_length,
+          m_xid.data + m_xid.gtrid_length, m_xid.bqual_length);
+
+  thd->lex->xid= &xid;
+  if (!one_phase)
+  {
+    if ((res= thd->wait_for_prior_commit()))
+      return res;
+
+    thd->lex->sql_command= SQLCOM_XA_PREPARE;
+    res= trans_xa_prepare(thd);
+  }
+  else
+  {
+    res= trans_xa_commit(thd);
+    thd->mdl_context.release_transactional_locks();
+  }
+
+  return res;
+}
 #endif // HAVE_REPLICATION
+
+
+bool XA_prepare_log_event::write()
+{
+  uchar data[1 + 4 + 4 + 4]= {one_phase,};
+  uint8 one_phase_byte= one_phase;
+
+  int4store(data+1, static_cast<XID*>(xid)->formatID);
+  int4store(data+(1+4), static_cast<XID*>(xid)->gtrid_length);
+  int4store(data+(1+4+4), static_cast<XID*>(xid)->bqual_length);
+
+  DBUG_ASSERT(xid_subheader_no_data == sizeof(data) - 1);
+
+  return write_header(sizeof(one_phase_byte) + xid_subheader_no_data +
+                      static_cast<XID*>(xid)->gtrid_length +
+                      static_cast<XID*>(xid)->bqual_length) ||
+         write_data(data, sizeof(data)) ||
+         write_data((uchar*) static_cast<XID*>(xid)->data,
+                     static_cast<XID*>(xid)->gtrid_length +
+                     static_cast<XID*>(xid)->bqual_length) ||
+         write_footer();
+}
 
 
 /**************************************************************************
@@ -4691,7 +4890,7 @@ int Execute_load_log_event::do_apply_event(rpl_group_info *rgi)
       don't want to overwrite it with the filename.
       What we want instead is add the filename to the current error message.
     */
-    char *tmp= my_strdup(rli->last_error().message, MYF(MY_WME));
+    char *tmp= my_strdup(PSI_INSTRUMENT_ME, rli->last_error().message, MYF(MY_WME));
     if (tmp)
     {
       rli->report(ERROR_LEVEL, rli->last_error().number, rgi->gtid_info(),
@@ -4823,8 +5022,8 @@ Execute_load_query_log_event::do_apply_event(rpl_group_info *rgi)
   int error;
   Relay_log_info const *rli= rgi->rli;
 
-  buf= (char*) my_malloc(q_len + 1 - (fn_pos_end - fn_pos_start) +
-                         (FN_REFLEN + 10) + 10 + 8 + 5, MYF(MY_WME));
+  buf= (char*) my_malloc(PSI_INSTRUMENT_ME, q_len + 1 -
+     (fn_pos_end - fn_pos_start) + (FN_REFLEN + 10) + 10 + 8 + 5, MYF(MY_WME));
 
   DBUG_EXECUTE_IF("LOAD_DATA_INFILE_has_fatal_error", my_free(buf); buf= NULL;);
 
@@ -5036,8 +5235,8 @@ int Rows_log_event::do_add_row_data(uchar *row_data, size_t length)
     size_t const new_alloc= 
         block_size * ((cur_size + length + block_size - 1) / block_size);
 
-    uchar* const new_buf= (uchar*)my_realloc((uchar*)m_rows_buf, new_alloc,
-                                           MYF(MY_ALLOW_ZERO_PTR|MY_WME));
+    uchar* const new_buf= (uchar*)my_realloc(PSI_INSTRUMENT_ME, m_rows_buf,
+                                    new_alloc, MYF(MY_ALLOW_ZERO_PTR|MY_WME));
     if (unlikely(!new_buf))
       DBUG_RETURN(HA_ERR_OUT_OF_MEM);
 
@@ -5970,13 +6169,10 @@ Table_map_log_event::Table_map_log_event(THD *thd, TABLE *tbl, ulong tid,
               (tbl->s->db.str[tbl->s->db.length] == 0));
   DBUG_ASSERT(tbl->s->table_name.str[tbl->s->table_name.length] == 0);
 
-#ifdef MYSQL_SERVER
   binlog_type_info_array= (Binlog_type_info *)thd->alloc(m_table->s->fields *
                                                    sizeof(Binlog_type_info));
   for (uint i= 0; i <  m_table->s->fields; i++)
     binlog_type_info_array[i]= m_table->field[i]->binlog_type_info();
-#endif
-
 
   m_data_size=  TABLE_MAP_HEADER_LEN;
   DBUG_EXECUTE_IF("old_row_based_repl_4_byte_map_id_master", m_data_size= 6;);
@@ -5990,7 +6186,7 @@ Table_map_log_event::Table_map_log_event(THD *thd, TABLE *tbl, ulong tid,
     m_flags|= TM_BIT_HAS_TRIGGERS_F;
 
   /* If malloc fails, caught in is_valid() */
-  if ((m_memory= (uchar*) my_malloc(m_colcnt, MYF(MY_WME))))
+  if ((m_memory= (uchar*) my_malloc(PSI_INSTRUMENT_ME, m_colcnt, MYF(MY_WME))))
   {
     m_coltype= reinterpret_cast<uchar*>(m_memory);
     for (unsigned int i= 0 ; i < m_table->s->fields ; ++i)
@@ -6006,7 +6202,7 @@ Table_map_log_event::Table_map_log_event(THD *thd, TABLE *tbl, ulong tid,
   */
   uint num_null_bytes= (m_table->s->fields + 7) / 8;
   m_data_size+= num_null_bytes;
-  m_meta_memory= (uchar *)my_multi_malloc(MYF(MY_WME),
+  m_meta_memory= (uchar *)my_multi_malloc(PSI_INSTRUMENT_ME, MYF(MY_WME),
                                  &m_null_bits, num_null_bytes,
                                  &m_field_metadata, (m_colcnt * 2),
                                  NULL);
@@ -6158,7 +6354,7 @@ int Table_map_log_event::do_apply_event(rpl_group_info *rgi)
   /* Step the query id to mark what columns that are actually used. */
   thd->set_query_id(next_query_id());
 
-  if (!(memory= my_multi_malloc(MYF(MY_WME),
+  if (!(memory= my_multi_malloc(PSI_INSTRUMENT_ME, MYF(MY_WME),
                                 &table_list, (uint) sizeof(RPL_TABLE_LIST),
                                 &db_mem, (uint) NAME_LEN + 1,
                                 &tname_mem, (uint) NAME_LEN + 1,
@@ -6809,7 +7005,7 @@ Write_rows_log_event::do_before_row_operations(const Slave_reporting_capability 
     m_table->file->extra(HA_EXTRA_WRITE_CAN_REPLACE);
     m_table->file->extra(HA_EXTRA_IGNORE_NO_KEY);
   }
-  if (slave_run_triggers_for_rbr && !master_had_triggers && m_table->triggers )
+  if (m_table->triggers && do_invoke_trigger())
     m_table->prepare_triggers_for_insert_stmt_or_event();
 
   /* Honor next number column if present */
@@ -6896,14 +7092,14 @@ bool Rows_log_event::process_triggers(trg_event_type event,
   m_table->triggers->mark_fields_used(event);
   if (slave_run_triggers_for_rbr == SLAVE_RUN_TRIGGERS_FOR_RBR_YES)
   {
-    tmp_disable_binlog(thd); /* Do not replicate the low-level changes. */
     result= m_table->triggers->process_triggers(thd, event,
-                                              time_type, old_row_is_record1);
-    reenable_binlog(thd);
+                                                time_type,
+                                                old_row_is_record1);
   }
   else
     result= m_table->triggers->process_triggers(thd, event,
-                                              time_type, old_row_is_record1);
+                                                time_type,
+                                                old_row_is_record1);
 
   DBUG_RETURN(result);
 }
@@ -6989,8 +7185,7 @@ Rows_log_event::write_row(rpl_group_info *rgi,
   TABLE *table= m_table;  // pointer to event's table
   int error;
   int UNINIT_VAR(keynum);
-  const bool invoke_triggers=
-    slave_run_triggers_for_rbr && !master_had_triggers && table->triggers;
+  const bool invoke_triggers= (m_table->triggers && do_invoke_trigger());
   auto_afree_ptr<char> key(NULL);
 
   prepare_record(table, m_width, true);
@@ -7439,7 +7634,7 @@ int Rows_log_event::find_key()
   }
 
   // Allocate buffer for key searches
-  m_key= (uchar *) my_malloc(best_key->key_length, MYF(MY_WME));
+  m_key= (uchar *) my_malloc(PSI_INSTRUMENT_ME, best_key->key_length, MYF(MY_WME));
   if (m_key == NULL)
     DBUG_RETURN(HA_ERR_OUT_OF_MEM);
   m_key_info= best_key;
@@ -7866,7 +8061,7 @@ Delete_rows_log_event::do_before_row_operations(const Slave_reporting_capability
     */
     return 0;
   }
-  if (slave_run_triggers_for_rbr && !master_had_triggers)
+  if (do_invoke_trigger())
     m_table->prepare_triggers_for_delete_stmt_or_event();
 
   return find_key();
@@ -7889,8 +8084,7 @@ int Delete_rows_log_event::do_exec_row(rpl_group_info *rgi)
   int error;
   const char *tmp= thd->get_proc_info();
   const char *message= "Delete_rows_log_event::find_row()";
-  const bool invoke_triggers=
-    slave_run_triggers_for_rbr && !master_had_triggers && m_table->triggers;
+  const bool invoke_triggers= (m_table->triggers && do_invoke_trigger());
   DBUG_ASSERT(m_table != NULL);
 
 #ifdef WSREP_PROC_INFO
@@ -8016,7 +8210,7 @@ Update_rows_log_event::do_before_row_operations(const Slave_reporting_capability
   if ((err= find_key()))
     return err;
 
-  if (slave_run_triggers_for_rbr && !master_had_triggers)
+  if (do_invoke_trigger())
     m_table->prepare_triggers_for_update_stmt_or_event();
 
   return 0;
@@ -8035,11 +8229,10 @@ Update_rows_log_event::do_after_row_operations(const Slave_reporting_capability 
   return error;
 }
 
-int 
+int
 Update_rows_log_event::do_exec_row(rpl_group_info *rgi)
 {
-  const bool invoke_triggers=
-    slave_run_triggers_for_rbr && !master_had_triggers && m_table->triggers;
+  const bool invoke_triggers= (m_table->triggers && do_invoke_trigger());
   const char *tmp= thd->get_proc_info();
   const char *message= "Update_rows_log_event::find_row()";
   DBUG_ASSERT(m_table != NULL);
@@ -8303,7 +8496,6 @@ bool event_that_should_be_ignored(const char *buf)
       event_type == PREVIOUS_GTIDS_LOG_EVENT ||
       event_type == TRANSACTION_CONTEXT_EVENT ||
       event_type == VIEW_CHANGE_EVENT ||
-      event_type == XA_PREPARE_LOG_EVENT ||
       (uint2korr(buf + FLAGS_OFFSET) & LOG_EVENT_IGNORABLE_F))
     return 1;
   return 0;

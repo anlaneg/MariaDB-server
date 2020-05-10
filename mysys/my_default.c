@@ -410,13 +410,14 @@ int my_load_defaults(const char *conf_file, const char **groups, int *argc,
   const char **dirs;
   DBUG_ENTER("my_load_defaults");
 
-  init_alloc_root(&alloc, "my_load_defaults", 512, 0, MYF(0));
+  init_alloc_root(key_memory_defaults, &alloc, 512, 0, MYF(0));
   if ((dirs= init_default_directories(&alloc)) == NULL)
     goto err;
 
   args_used= get_defaults_options(*argv);
 
-  if (my_init_dynamic_array(&args, sizeof(char*), 128, 64, MYF(0)))
+  if (my_init_dynamic_array(key_memory_defaults, &args, sizeof(char*), 128, 64,
+                            MYF(0)))
     goto err;
 
   insert_dynamic(&args, *argv);/* Name MUST be set, even by embedded library */
@@ -872,6 +873,11 @@ void my_print_default_files(const char *conf_file)
   char name[FN_REFLEN], **ext;
 
   puts("\nDefault options are read from the following files in the given order:");
+  if (my_defaults_file)
+  {
+    puts(my_defaults_file);
+    return;
+  }
 
   if (dirname_length(conf_file))
     fputs(conf_file,stdout);
@@ -879,7 +885,7 @@ void my_print_default_files(const char *conf_file)
   {
     const char **dirs;
     MEM_ROOT alloc;
-    init_alloc_root(&alloc, "my_print_defaults", 512, 0, MYF(0));
+    init_alloc_root(key_memory_defaults, &alloc, 512, 0, MYF(0));
 
     if ((dirs= init_default_directories(&alloc)) == NULL)
     {
@@ -896,7 +902,12 @@ void my_print_default_files(const char *conf_file)
           if (**dirs)
             pos= *dirs;
           else if (my_defaults_extra_file)
+          {
             pos= my_defaults_extra_file;
+            fputs(pos, stdout);
+            fputs(" ", stdout);
+            continue;
+          }
           else
             continue;
           end= convert_dirname(name, pos, NullS);

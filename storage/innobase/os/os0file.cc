@@ -78,6 +78,9 @@ Created 10/21/1995 Heikki Tuuri
 #include <my_sys.h>
 #endif
 
+#include <thread>
+#include <chrono>
+
 /* Per-IO operation environment*/
 class io_slots
 {
@@ -879,55 +882,53 @@ os_file_get_last_error_low(
 	return(OS_FILE_ERROR_MAX + err);
 }
 
-/** Wrapper to fsync(2) that retries the call on some errors.
+/** Wrapper to fsync() or fdatasync() that retries the call on some errors.
 Returns the value 0 if successful; otherwise the value -1 is returned and
 the global variable errno is set to indicate the error.
 @param[in]	file		open file handle
 @return 0 if success, -1 otherwise */
-static
-int
-os_file_fsync_posix(
-	os_file_t	file)
+static int os_file_sync_posix(os_file_t file)
 {
-	ulint		failures = 0;
+#if !defined(HAVE_FDATASYNC) || HAVE_DECL_FDATASYNC == 0
+  auto func= fsync;
+  auto func_name= "fsync()";
+#else
+  auto func= fdatasync;
+  auto func_name= "fdatasync()";
+#endif
 
-	for (;;) {
+  ulint failures= 0;
 
-		++os_n_fsyncs;
+  for (;;)
+  {
+    ++os_n_fsyncs;
 
-		int	ret = fsync(file);
+    int ret= func(file);
 
-		if (ret == 0) {
-			return(ret);
-		}
+    if (ret == 0)
+      return ret;
 
-		switch(errno) {
-		case ENOLCK:
+    switch (errno)
+    {
+    case ENOLCK:
+      ++failures;
+      ut_a(failures < 1000);
 
-			++failures;
-			ut_a(failures < 1000);
+      if (!(failures % 100))
+        ib::warn() << func_name << ": No locks available; retrying";
 
-			if (!(failures % 100)) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(200));
+      break;
 
-				ib::warn()
-					<< "fsync(): "
-					<< "No locks available; retrying";
-			}
+    case EINTR:
+      ++failures;
+      ut_a(failures < 2000);
+      break;
 
-			/* 0.2 sec */
-			os_thread_sleep(200000);
-			break;
-
-		case EINTR:
-
-			++failures;
-			ut_a(failures < 2000);
-			break;
-
-		default:
-			ib::fatal() << "fsync() returned " << errno;
-		}
-	}
+    default:
+      ib::fatal() << func_name << " returned " << errno;
+    }
+  }
 }
 
 /** Check the existence and type of the given file.
@@ -988,7 +989,7 @@ os_file_flush_func(
 	int	ret;
 
 	WAIT_ALLOW_WRITES();
-	ret = os_file_fsync_posix(file);
+	ret = os_file_sync_posix(file);
 
 	if (ret == 0) {
 		return(true);
@@ -1390,18 +1391,17 @@ os_file_create_func(
 
 	ut_a(purpose == OS_FILE_AIO || purpose == OS_FILE_NORMAL);
 
-#ifdef O_SYNC
-	/* We let O_SYNC only affect log files; note that we map O_DSYNC to
-	O_SYNC because the datasync options seemed to corrupt files in 2001
-	in both Linux and Solaris */
+	/* We let O_DSYNC only affect log files */
 
 	if (!read_only
 	    && type == OS_LOG_FILE
 	    && srv_file_flush_method == SRV_O_DSYNC) {
-
+#ifdef O_DSYNC
+		create_flag |= O_DSYNC;
+#else
 		create_flag |= O_SYNC;
+#endif
 	}
-#endif /* O_SYNC */
 
 	os_file_t	file;
 	bool		retry;
@@ -1929,12 +1929,12 @@ os_file_flush_func(
 /** Retrieves the last error number if an error occurs in a file io function.
 The number should be retrieved before any other OS calls (because they may
 overwrite the error number). If the number is not known to this program,
-the OS error number + 100 is returned.
+then OS error number + OS_FILE_ERROR_MAX is returned.
 @param[in]	report_all_errors	true if we want an error message printed
 					of all errors
 @param[in]	on_error_silent		true then don't print any diagnostic
 					to the log
-@return error number, or OS error number + 100 */
+@return error number, or OS error number + OS_FILE_ERROR_MAX */
 static
 ulint
 os_file_get_last_error_low(
@@ -2136,8 +2136,8 @@ os_file_create_simple_func(
 
 		file = CreateFile(
 			(LPCTSTR) name, access,
-			FILE_SHARE_READ | FILE_SHARE_DELETE, NULL,
-			create_flag, attributes, NULL);
+			FILE_SHARE_READ | FILE_SHARE_DELETE,
+			NULL, create_flag, attributes, NULL);
 
 		if (file == INVALID_HANDLE_VALUE) {
 
@@ -2404,7 +2404,7 @@ os_file_create_func(
 	);
 
 	DWORD		create_flag;
-	DWORD		share_mode = srv_operation != SRV_OPERATION_NORMAL
+	DWORD		share_mode = read_only
 		? FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE
 		: FILE_SHARE_READ | FILE_SHARE_DELETE;
 
@@ -2424,13 +2424,13 @@ os_file_create_func(
 
 		ut_a(!read_only);
 
-		create_flag = OPEN_EXISTING;
-
 		/* On Windows Physical devices require admin privileges and
 		have to have the write-share mode set. See the remarks
 		section for the CreateFile() function documentation in MSDN. */
 
 		share_mode |= FILE_SHARE_WRITE;
+
+		create_flag = OPEN_EXISTING;
 
 	} else if (create_mode == OS_FILE_OPEN
 		   || create_mode == OS_FILE_OPEN_RETRY) {
@@ -2492,7 +2492,7 @@ os_file_create_func(
 	{
 	case SRV_O_DSYNC:
 		if (type == OS_LOG_FILE) {
-			/* Map O_SYNC to FILE_WRITE_THROUGH */
+			/* Map O_DSYNC to FILE_WRITE_THROUGH */
 			attributes |= FILE_FLAG_WRITE_THROUGH;
 		}
 		break;
@@ -2612,7 +2612,7 @@ os_file_create_simple_no_error_handling_func(
 	DWORD		access;
 	DWORD		create_flag;
 	DWORD		attributes	= 0;
-	DWORD		share_mode = srv_operation != SRV_OPERATION_NORMAL
+	DWORD		share_mode = read_only
 		? FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE
 		: FILE_SHARE_READ | FILE_SHARE_DELETE;
 
@@ -2665,6 +2665,7 @@ os_file_create_simple_no_error_handling_func(
 
 		share_mode |= FILE_SHARE_DELETE | FILE_SHARE_WRITE
 			| FILE_SHARE_READ;
+
 	} else {
 
 		ib::error()
@@ -3883,7 +3884,7 @@ extern void fil_aio_callback(os_aio_userdata_t *data);
 static void io_callback(tpool::aiocb* cb)
 {
 	ut_a(cb->m_err == DB_SUCCESS);
-	os_aio_userdata_t data = *(os_aio_userdata_t*)cb->m_userdata;
+	os_aio_userdata_t data(cb->m_userdata);
 	/* Return cb back to cache*/
 	if (cb->m_opcode == tpool::aio_opcode::AIO_PREAD) {
 		if (read_slots->contains(cb)) {
@@ -3911,7 +3912,7 @@ static bool is_linux_native_aio_supported()
 {
 	File		fd;
 	io_context_t	io_ctx;
-	char		name[1000];
+	std::string log_file_path = get_log_file_path();
 
 	memset(&io_ctx, 0, sizeof(io_ctx));
 	if (io_setup(1, &io_ctx)) {
@@ -3939,31 +3940,14 @@ static bool is_linux_native_aio_supported()
 		}
 	}
 	else {
-
-		os_normalize_path(srv_log_group_home_dir);
-
-		ulint	dirnamelen = strlen(srv_log_group_home_dir);
-
-		ut_a(dirnamelen < (sizeof name) - 10 - sizeof "ib_logfile");
-
-		memcpy(name, srv_log_group_home_dir, dirnamelen);
-
-		/* Add a path separator if needed. */
-		if (dirnamelen && name[dirnamelen - 1] != OS_PATH_SEPARATOR) {
-
-			name[dirnamelen++] = OS_PATH_SEPARATOR;
-		}
-
-		strcpy(name + dirnamelen, "ib_logfile0");
-
-		fd = my_open(name, O_RDONLY | O_CLOEXEC, MYF(0));
+		fd = my_open(log_file_path.c_str(), O_RDONLY | O_CLOEXEC,
+			     MYF(0));
 
 		if (fd == -1) {
 
-			ib::warn()
-				<< "Unable to open"
-				<< " \"" << name << "\" to check native"
-				<< " AIO read support.";
+			ib::warn() << "Unable to open \"" << log_file_path
+				   << "\" to check native"
+				   << " AIO read support.";
 
 			int ret = io_destroy(io_ctx);
 			ut_a(ret != EINVAL);
@@ -4024,7 +4008,7 @@ static bool is_linux_native_aio_supported()
 		ib::error()
 			<< "Linux Native AIO not supported. You can either"
 			" move "
-			<< (srv_read_only_mode ? name : "tmpdir")
+			<< (srv_read_only_mode ? log_file_path : "tmpdir")
 			<< " to a file system that supports native"
 			" AIO or you can set innodb_use_native_aio to"
 			" FALSE to avoid this message.";
@@ -4033,7 +4017,7 @@ static bool is_linux_native_aio_supported()
 	default:
 		ib::error()
 			<< "Linux Native AIO check on "
-			<< (srv_read_only_mode ? name : "tmpdir")
+			<< (srv_read_only_mode ? log_file_path : "tmpdir")
 			<< "returned error[" << -err << "]";
 	}
 
@@ -4049,8 +4033,8 @@ static bool is_linux_native_aio_supported()
 
 bool os_aio_init(ulint n_reader_threads, ulint n_writer_threads, ulint)
 {
-	int max_write_events = (int)n_writer_threads * OS_AIO_N_PENDING_IOS_PER_THREAD;
-	int max_read_events = (int)n_reader_threads * OS_AIO_N_PENDING_IOS_PER_THREAD;
+  int max_write_events= int(n_writer_threads * OS_AIO_N_PENDING_IOS_PER_THREAD);
+  int max_read_events= int(n_reader_threads * OS_AIO_N_PENDING_IOS_PER_THREAD);
 	int max_ibuf_events = 1 * OS_AIO_N_PENDING_IOS_PER_THREAD;
 	int max_events = max_read_events + max_write_events + max_ibuf_events;
 	int ret;
@@ -4206,7 +4190,6 @@ os_aio_print(FILE*	file)
 {
 	time_t		current_time;
 	double		time_elapsed;
-	double		avg_bytes_read;
 
 	for (ulint i = 0; i < srv_n_file_io_threads; ++i) {
 		fprintf(file, "I/O thread " ULINTPF " state: %s (%s)",
@@ -4245,22 +4228,20 @@ os_aio_print(FILE*	file)
 			n_reads, n_writes);
 	}
 
-	if (os_n_file_reads == os_n_file_reads_old) {
-		avg_bytes_read = 0.0;
-	} else {
-		avg_bytes_read = (double) os_bytes_read_since_printout
-			/ (os_n_file_reads - os_n_file_reads_old);
-	}
+	ulint avg_bytes_read = (os_n_file_reads == os_n_file_reads_old)
+		? 0
+		: os_bytes_read_since_printout
+		/ (os_n_file_reads - os_n_file_reads_old);
 
 	fprintf(file,
 		"%.2f reads/s, " ULINTPF " avg bytes/read,"
 		" %.2f writes/s, %.2f fsyncs/s\n",
-		(os_n_file_reads - os_n_file_reads_old)
+		static_cast<double>(os_n_file_reads - os_n_file_reads_old)
 		/ time_elapsed,
-		(ulint) avg_bytes_read,
-		(os_n_file_writes - os_n_file_writes_old)
+		avg_bytes_read,
+		static_cast<double>(os_n_file_writes - os_n_file_writes_old)
 		/ time_elapsed,
-		(os_n_fsyncs - os_n_fsyncs_old)
+		static_cast<double>(os_n_fsyncs - os_n_fsyncs_old)
 		/ time_elapsed);
 
 	os_n_file_reads_old = os_n_file_reads;
@@ -4624,32 +4605,3 @@ os_normalize_path(
 		}
 	}
 }
-
-bool os_file_flush_data_func(os_file_t file) {
-#if defined(_WIN32) || !defined(HAVE_FDATASYNC) || HAVE_DECL_FDATASYNC == 0
-  return os_file_flush_func(file);
-#else
-  bool success= fdatasync(file) != -1;
-  if (!success) {
-    ib::error() << "fdatasync() errno: " << errno;
-  }
-  return success;
-#endif
-}
-
-#ifdef UNIV_PFS_IO
-bool pfs_os_file_flush_data_func(pfs_os_file_t file, const char *src_file,
-                                 uint src_line)
-{
-  PSI_file_locker_state state;
-  struct PSI_file_locker *locker= NULL;
-
-  register_pfs_file_io_begin(&state, locker, file, 0, PSI_FILE_SYNC, src_file,
-                             src_line);
-
-  bool success= os_file_flush_data_func(file);
-
-  register_pfs_file_io_end(locker, 0);
-  return success;
-}
-#endif

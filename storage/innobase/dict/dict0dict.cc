@@ -40,9 +40,6 @@ Created 1/8/1996 Heikki Tuuri
 #include "sql_table.h"
 #include <mysql/service_thd_mdl.h>
 
-/** dummy index for ROW_FORMAT=REDUNDANT supremum and infimum records */
-dict_index_t*	dict_ind_redundant;
-
 #if defined UNIV_DEBUG || defined UNIV_IBUF_DEBUG
 /** Flag to control insert buffer debugging. */
 extern uint	ibuf_debug;
@@ -348,7 +345,10 @@ dict_table_close(
 
 		mutex_exit(&dict_sys.mutex);
 
-		if (drop_aborted) {
+		/* dict_table_try_drop_aborted() can generate undo logs.
+		So it should be avoided after shutdown of background
+		threads */
+		if (drop_aborted && !srv_undo_sources) {
 			dict_table_try_drop_aborted(NULL, table_id, 0);
 		}
 	}
@@ -753,9 +753,8 @@ bool dict_table_t::parse_name(char (&db_name)[NAME_LEN + 1],
   if (!dict_locked)
     mutex_exit(&dict_sys.mutex);
 
-  *db_name_len= db_len;
-
-  filename_to_tablename(db_buf, db_name, MAX_DATABASE_NAME_LEN + 1, true);
+  *db_name_len= filename_to_tablename(db_buf, db_name,
+                                      MAX_DATABASE_NAME_LEN + 1, true);
 
   if (tbl_len > TEMP_FILE_PREFIX_LENGTH
       && !strncmp(tbl_buf, TEMP_FILE_PREFIX, TEMP_FILE_PREFIX_LENGTH))
@@ -764,8 +763,8 @@ bool dict_table_t::parse_name(char (&db_name)[NAME_LEN + 1],
   if (char* is_part= strchr(tbl_buf, '#'))
     *is_part= '\0';
 
-  filename_to_tablename(tbl_buf, tbl_name, MAX_TABLE_NAME_LEN + 1, true);
-  *tbl_name_len= strlen(tbl_name);
+  *tbl_name_len= filename_to_tablename(tbl_buf, tbl_name,
+                                       MAX_TABLE_NAME_LEN + 1, true);
   return true;
 }
 
@@ -844,11 +843,14 @@ is_unaccessible:
     mutex_exit(&dict_sys.mutex);
   {
     MDL_request request;
-    request.init(MDL_key::TABLE, db_buf, tbl_buf, MDL_SHARED, MDL_EXPLICIT);
+    MDL_REQUEST_INIT(&request,MDL_key::TABLE, db_buf, tbl_buf, MDL_SHARED, MDL_EXPLICIT);
     if (trylock
         ? mdl_context->try_acquire_lock(&request)
         : mdl_context->acquire_lock(&request,
-                                    global_system_variables.lock_wait_timeout))
+                                    /* FIXME: use compatible type, and maybe
+                                    remove this parameter altogether! */
+                                    static_cast<double>(global_system_variables
+                                                        .lock_wait_timeout)))
     {
       *mdl= nullptr;
       if (trylock)
@@ -955,15 +957,17 @@ dict_table_open_on_id(table_id_t table_id, bool dict_locked,
 /********************************************************************//**
 Looks for column n position in the clustered index.
 @return position in internal representation of the clustered index */
-ulint
+unsigned
 dict_table_get_nth_col_pos(
 /*=======================*/
 	const dict_table_t*	table,	/*!< in: table */
 	ulint			n,	/*!< in: column number */
 	ulint*			prefix_col_pos)
 {
-	return(dict_index_get_nth_col_pos(dict_table_get_first_index(table),
-					  n, prefix_col_pos));
+  ulint pos= dict_index_get_nth_col_pos(dict_table_get_first_index(table),
+					n, prefix_col_pos);
+  DBUG_ASSERT(pos <= dict_index_t::MAX_N_FIELDS);
+  return static_cast<unsigned>(pos);
 }
 
 /********************************************************************//**
@@ -1490,7 +1494,7 @@ dict_table_rename_in_cache(
 			return(DB_OUT_OF_MEMORY);
 		}
 
-		fil_delete_tablespace(table->space_id);
+		fil_delete_tablespace(table->space_id, !table->space);
 
 		/* Delete any temp file hanging around. */
 		if (os_file_status(filepath, &exists, &ftype)
@@ -1989,8 +1993,8 @@ dict_index_add_to_cache(
 		new_index = (index->type & DICT_FTS)
 			? dict_index_build_internal_fts(index)
 			: dict_index_build_internal_non_clust(index);
-		new_index->n_core_null_bytes = UT_BITS_IN_BYTES(
-			unsigned(new_index->n_nullable));
+		new_index->n_core_null_bytes = static_cast<uint8_t>(
+			UT_BITS_IN_BYTES(unsigned(new_index->n_nullable)));
 	}
 
 	/* Set the n_fields value in new_index to the actual defined
@@ -2027,6 +2031,8 @@ dict_index_add_to_cache(
 			   > field->col->max_prefix) {
 			/* Set the max_prefix value based on the
 			prefix_len. */
+			ut_ad(field->col->is_binary()
+			      || field->prefix_len % field->col->mbmaxlen == 0);
 			field->col->max_prefix = field->prefix_len;
 		}
 		ut_ad(field->col->ord_part == 1);
@@ -2286,12 +2292,14 @@ dict_index_add_col(
 	field = dict_index_get_nth_field(index, unsigned(index->n_def) - 1);
 
 	field->col = col;
-	field->fixed_len = static_cast<unsigned int>(
+	field->fixed_len = static_cast<uint16_t>(
 		dict_col_get_fixed_size(
-			col, dict_table_is_comp(table)));
+			col, dict_table_is_comp(table)))
+		& ((1U << 10) - 1);
 
 	if (prefix_len && field->fixed_len > prefix_len) {
-		field->fixed_len = (unsigned int) prefix_len;
+		field->fixed_len = static_cast<uint16_t>(prefix_len)
+			& ((1U << 10) - 1);
 	}
 
 	/* Long fixed-length fields that need external storage are treated as
@@ -2467,7 +2475,8 @@ dict_index_build_internal_clust(
 		new_index->n_uniq = new_index->n_def;
 	} else {
 		/* Also the row id is needed to identify the entry */
-		new_index->n_uniq = 1 + unsigned(new_index->n_def);
+		new_index->n_uniq = unsigned(new_index->n_def + 1)
+			& dict_index_t::MAX_N_FIELDS;
 	}
 
 	new_index->trx_id_offset = 0;
@@ -2517,7 +2526,8 @@ dict_index_build_internal_clust(
 		can theoretically occur. Check for it. */
 		fixed_size += new_index->trx_id_offset;
 
-		new_index->trx_id_offset = unsigned(fixed_size);
+		new_index->trx_id_offset = static_cast<unsigned>(fixed_size)
+			& ((1U << 12) - 1);
 
 		if (new_index->trx_id_offset != fixed_size) {
 			/* Overflow. Pretend that this is a
@@ -2567,7 +2577,8 @@ dict_index_build_internal_clust(
 
 	new_index->n_core_null_bytes = table->supports_instant()
 		? dict_index_t::NO_CORE_NULL_BYTES
-		: UT_BITS_IN_BYTES(unsigned(new_index->n_nullable));
+		: static_cast<uint8_t>(
+			UT_BITS_IN_BYTES(unsigned(new_index->n_nullable)));
 	new_index->cached = TRUE;
 
 	return(new_index);
@@ -4304,8 +4315,8 @@ dict_index_set_merge_threshold(
 			DICT_FLD__SYS_INDEXES__MERGE_THRESHOLD, &len);
 
 		ut_ad(len == 4);
-		mtr.write<4,mtr_t::OPT>(*btr_cur_get_block(&cursor), field,
-					merge_threshold);
+		mtr.write<4,mtr_t::MAYBE_NOP>(*btr_cur_get_block(&cursor),
+					      field, merge_threshold);
 	}
 
 	mtr_commit(&mtr);
@@ -4330,7 +4341,8 @@ dict_set_merge_threshold_list_debug(
 		     index != NULL;
 		     index = UT_LIST_GET_NEXT(indexes, index)) {
 			rw_lock_x_lock(dict_index_get_lock(index));
-			index->merge_threshold = merge_threshold_all;
+			index->merge_threshold = merge_threshold_all
+				& ((1U << 6) - 1);
 			rw_lock_x_unlock(dict_index_get_lock(index));
 		}
 	}
@@ -4353,34 +4365,6 @@ dict_set_merge_threshold_all_debug(
 }
 
 #endif /* UNIV_DEBUG */
-
-/** Initialize dict_ind_redundant. */
-void
-dict_ind_init()
-{
-	dict_table_t*		table;
-
-	/* create dummy table and index for REDUNDANT infimum and supremum */
-	table = dict_mem_table_create("SYS_DUMMY1", NULL, 1, 0, 0, 0);
-	dict_mem_table_add_col(table, NULL, NULL, DATA_CHAR,
-			       DATA_ENGLISH | DATA_NOT_NULL, 8);
-
-	dict_ind_redundant = dict_mem_index_create(table, "SYS_DUMMY1", 0, 1);
-	dict_index_add_col(dict_ind_redundant, table,
-			   dict_table_get_nth_col(table, 0), 0);
-	/* avoid ut_ad(index->cached) in dict_index_get_n_unique_in_tree */
-	dict_ind_redundant->cached = TRUE;
-}
-
-/** Free dict_ind_redundant. */
-void
-dict_ind_free()
-{
-	dict_table_t*	table = dict_ind_redundant->table;
-	dict_mem_index_free(dict_ind_redundant);
-	dict_ind_redundant = NULL;
-	dict_mem_table_free(table);
-}
 
 /** Get an index by name.
 @param[in]	table		the table where to look for the index

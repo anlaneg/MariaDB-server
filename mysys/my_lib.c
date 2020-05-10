@@ -1,4 +1,5 @@
 /* Copyright (c) 2000, 2013, Oracle and/or its affiliates. All rights reserved.
+   Copyright (c) 2008, 2020, MariaDB Corporation.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -109,7 +110,7 @@ static char *directory_file_name (char * dst, const char *src)
 
 MY_DIR	*my_dir(const char *path, myf MyFlags)
 {
-  MY_DIR_HANDLE *dirh= 0;
+  MY_DIR_HANDLE *dirh;
   FILEINFO      finfo;
   DIR		*dirp;
   struct dirent *dp;
@@ -122,18 +123,22 @@ MY_DIR	*my_dir(const char *path, myf MyFlags)
   tmp_file= directory_file_name(tmp_path, path);
 
   if (!(dirp= opendir(tmp_path)))
-    goto error;
+  {
+    my_errno= errno;
+    goto err_open;
+  }
 
-  if (!(dirh= my_malloc(sizeof(*dirh), MyFlags | MY_ZEROFILL)))
-    goto error;
+  if (!(dirh= my_malloc(key_memory_MY_DIR, sizeof(*dirh),
+                        MYF(MyFlags | MY_ZEROFILL))))
+    goto err_alloc;
   
-  if (my_init_dynamic_array(&dirh->array, sizeof(FILEINFO),
+  if (my_init_dynamic_array(key_memory_MY_DIR, &dirh->array, sizeof(FILEINFO),
                             ENTRIES_START_SIZE, ENTRIES_INCREMENT,
                             MYF(MyFlags)))
     goto error;
   
-  init_alloc_root(&dirh->root, "dir", NAMES_START_SIZE, NAMES_START_SIZE,
-                  MYF(MyFlags));
+  init_alloc_root(key_memory_MY_DIR, &dirh->root, NAMES_START_SIZE,
+                  NAMES_START_SIZE, MYF(MyFlags));
 
   dp= (struct dirent*) dirent_tmp;
   
@@ -179,11 +184,11 @@ MY_DIR	*my_dir(const char *path, myf MyFlags)
   
   DBUG_RETURN(&dirh->dir);
 
- error:
-  my_errno=errno;
-  if (dirp)
-    (void) closedir(dirp);
+error:
   my_dirend(&dirh->dir);
+err_alloc:
+  (void) closedir(dirp);
+err_open:
   if (MyFlags & (MY_FAE | MY_WME))
     my_error(EE_DIR, MYF(ME_BELL), path, my_errno);
   DBUG_RETURN(NULL);
@@ -227,15 +232,15 @@ MY_DIR	*my_dir(const char *path, myf MyFlags)
   tmp_file[2]='*';
   tmp_file[3]='\0';
 
-  if (!(dirh= my_malloc(sizeof(*dirh), MyFlags | MY_ZEROFILL)))
+  if (!(dirh= my_malloc(PSI_INSTRUMENT_ME, sizeof(*dirh), MyFlags | MY_ZEROFILL)))
     goto error;
   
-  if (my_init_dynamic_array(&dirh->array, sizeof(FILEINFO),
+  if (my_init_dynamic_array(PSI_INSTRUMENT_ME, &dirh->array, sizeof(FILEINFO),
                             ENTRIES_START_SIZE, ENTRIES_INCREMENT,
                             MYF(MyFlags)))
     goto error;
 
-  init_alloc_root(&dirh->root, "dir", NAMES_START_SIZE, NAMES_START_SIZE,
+  init_alloc_root(PSI_INSTRUMENT_ME, &dirh->root, NAMES_START_SIZE, NAMES_START_SIZE,
                   MYF(MyFlags));
 
   if ((handle=_findfirst(tmp_path,&find)) == -1L)
@@ -341,7 +346,8 @@ MY_STAT *my_stat(const char *path, MY_STAT *stat_area, myf my_flags)
                     stat_area, my_flags));
 
   if ((m_used= (stat_area == NULL)))
-    if (!(stat_area= (MY_STAT *) my_malloc(sizeof(MY_STAT), my_flags)))
+    if (!(stat_area= (MY_STAT *) my_malloc(key_memory_MY_STAT, sizeof(MY_STAT),
+                                           my_flags)))
       goto error;
 #ifndef _WIN32
     if (! stat((char *) path, (struct stat *) stat_area) )

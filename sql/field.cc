@@ -1013,8 +1013,15 @@ CPP_UNNAMED_NS_END
   Static help functions
 *****************************************************************************/
 
+/*
+  @brief
+    Create a fixed size sort key part
 
-void Field::make_sort_key(uchar *buff,uint length)
+  @param  buff           buffer where values are written
+  @param  length         fixed size of the sort column
+*/
+
+void Field::make_sort_key_part(uchar *buff,uint length)
 {
   if (maybe_null())
   {
@@ -1026,6 +1033,62 @@ void Field::make_sort_key(uchar *buff,uint length)
     *buff++= 1;
   }
   sort_string(buff, length);
+}
+
+
+/*
+  @brief
+    Create a packed sort key part
+
+  @param  buff           buffer where values are written
+  @param  sort_field     sort column structure
+
+  @retval
+    length of the bytes written, does not include the NULL bytes
+*/
+uint
+Field::make_packed_sort_key_part(uchar *buff,
+                                 const SORT_FIELD_ATTR *sort_field)
+{
+  if (maybe_null())
+  {
+    if (is_null())
+    {
+      *buff++= 0;
+      return 0;  // For NULL values don't write any data
+    }
+    *buff++=1;
+  }
+  sort_string(buff, sort_field->original_length);
+  return sort_field->original_length;
+}
+
+
+uint
+Field_longstr::make_packed_sort_key_part(uchar *buff,
+                                         const SORT_FIELD_ATTR *sort_field)
+{
+  if (maybe_null())
+  {
+    if (is_null())
+    {
+      *buff++= 0;
+      return 0;   // For NULL values don't write any data
+    }
+    *buff++=1;
+  }
+  uchar *end= pack_sort_string(buff, sort_field);
+  return static_cast<int>(end-buff);
+}
+
+
+uchar*
+Field_longstr::pack_sort_string(uchar *to, const SORT_FIELD_ATTR *sort_field)
+{
+  String buf;
+  val_str(&buf, &buf);
+  return to + sort_field->pack_sort_string(to, buf.lex_cstring(),
+                                           field_charset());
 }
 
 
@@ -5395,29 +5458,6 @@ static longlong read_native(const uchar *from, uint bytes)
 }
 #endif
 
-static void store_lowendian(ulonglong num, uchar *to, uint bytes)
-{
-  switch(bytes) {
-  case 1: *to= (uchar)num;    break;
-  case 2: int2store(to, num); break;
-  case 3: int3store(to, num); break;
-  case 4: int4store(to, num); break;
-  case 8: int8store(to, num); break;
-  default: DBUG_ASSERT(0);
-  }
-}
-
-static longlong read_lowendian(const uchar *from, uint bytes)
-{
-  switch(bytes) {
-  case 1: return from[0];
-  case 2: return uint2korr(from);
-  case 3: return uint3korr(from);
-  case 4: return uint4korr(from);
-  case 8: return sint8korr(from);
-  default: DBUG_ASSERT(0); return 0;
-  }
-}
 
 void Field_timestamp_hires::store_TIMEVAL(const timeval &tv)
 {
@@ -7030,6 +7070,27 @@ Field_longstr::report_if_important_data(const char *pstr, const char *end,
 }
 
 
+/*
+  This is JSON specific.
+  We should eventually add Field_json_varchar and Field_json_blob
+  and move make_send_field() to the new classes.
+*/
+void Field_longstr::make_send_field(Send_field *field)
+{
+  Field_str::make_send_field(field);
+  if (check_constraint)
+  {
+    /*
+      Append the format that is implicitly implied by the CHECK CONSTRAINT.
+      For example:
+        CREATE TABLE t1 (js longtext DEFAULT NULL CHECK (json_valid(a)));
+        SELECT j FROM t1;
+      will add "format=json" to the extended type info metadata for t1.js.
+    */
+    check_constraint->expr->set_format_by_check_constraint(field);
+  }
+}
+
 	/* Copy a string and fill with space */
 
 int Field_string::store(const char *from, size_t length,CHARSET_INFO *cs)
@@ -7469,12 +7530,13 @@ uint Field_string::max_packed_col_length(uint max_length)
 }
 
 
-uint Field_string::get_key_image(uchar *buff, uint length, imagetype type_arg)
+uint Field_string::get_key_image(uchar *buff, uint length, const uchar *ptr_arg,
+                                 imagetype type_arg) const
 {
-  size_t bytes= field_charset()->charpos((char*) ptr,
-                                         (char*) ptr + field_length,
+  size_t bytes= field_charset()->charpos((char*) ptr_arg,
+                                         (char*) ptr_arg + field_length,
                                          length / mbmaxlen());
-  memcpy(buff, ptr, bytes);
+  memcpy(buff, ptr_arg, bytes);
   if (bytes < length)
     field_charset()->fill((char*) buff + bytes,
                           length - bytes,
@@ -7854,18 +7916,19 @@ uint Field_varstring::max_packed_col_length(uint max_length)
   return (max_length > 255 ? 2 : 1)+max_length;
 }
 
+void Field_varstring::val_str_from_ptr(String *val, const uchar *ptr) const
+{
+  val->set((const char*) get_data(ptr), get_length(ptr), field_charset());
+}
+
 uint Field_varstring::get_key_image(uchar *buff, uint length,
-                                    imagetype type_arg)
+                                    const uchar *ptr_arg,
+                                    imagetype type_arg) const
 {
   String val;
-  uint local_char_length;
-  my_bitmap_map *old_map;
+  val_str_from_ptr(&val, ptr_arg);
 
-  old_map= dbug_tmp_use_all_columns(table, table->read_set);
-  val_str(&val, &val);
-  dbug_tmp_restore_column_map(table->read_set, old_map);
-
-  local_char_length= val.charpos(length / mbmaxlen());
+  uint local_char_length= val.charpos(length / mbmaxlen());
   if (local_char_length < val.length())
     val.length(local_char_length);
   /* Key is always stored with 2 bytes */
@@ -8013,7 +8076,7 @@ int Field_longstr::compress(char *to, uint to_length,
       max_length < length)
   {
     set_if_smaller(max_length, static_cast<ulonglong>(mbmaxlen()) * length + 1);
-    if (!(buf= (char*) my_malloc(max_length, MYF(MY_WME))))
+    if (!(buf= (char*) my_malloc(PSI_INSTRUMENT_ME, max_length, MYF(MY_WME))))
     {
       *out_length= 0;
       return -1;
@@ -8109,6 +8172,11 @@ int Field_varstring_compressed::store(const char *from, size_t length,
                    Field_varstring_compressed::char_length());
   store_length(compressed_length);
   return rc;
+}
+
+void Field_varstring_compressed::val_str_from_ptr(String *val, const uchar *ptr) const
+{
+  uncompress(val, val, get_data(ptr), get_length(ptr));
 }
 
 
@@ -8438,10 +8506,11 @@ int Field_blob::cmp_binary(const uchar *a_ptr, const uchar *b_ptr,
 
 /* The following is used only when comparing a key */
 
-uint Field_blob::get_key_image_itRAW(uchar *buff, uint length)
+uint Field_blob::get_key_image_itRAW(const uchar *ptr_arg, uchar *buff,
+                                     uint length) const
 {
-  size_t blob_length= get_length(ptr);
-  uchar *blob= get_ptr();
+  size_t blob_length= get_length(ptr_arg);
+  const uchar *blob= get_ptr(ptr_arg);
   size_t local_char_length= length / mbmaxlen();
   local_char_length= field_charset()->charpos(blob, blob + blob_length,
                                               local_char_length);
@@ -8526,8 +8595,15 @@ Binlog_type_info Field_blob::binlog_type_info() const
 
 uint32 Field_blob::sort_length() const
 {
-  return (uint32) (get_thd()->variables.max_sort_length + 
-                   (field_charset() == &my_charset_bin ? 0 : packlength));
+  return packlength == 4 ?
+    UINT_MAX32 :
+    (uint32) field_length + sort_suffix_length();
+}
+
+
+uint32 Field_blob::sort_suffix_length() const
+{
+  return field_charset() == &my_charset_bin ?  packlength : 0;
 }
 
 
@@ -8602,9 +8678,7 @@ void Field_blob::sql_type(String &res) const
 
 uchar *Field_blob::pack(uchar *to, const uchar *from, uint max_length)
 {
-  uchar *save= ptr;
-  ptr= (uchar*) from;
-  uint32 length=get_length();			// Length of from string
+  uint32 length=get_length(from, packlength);			// Length of from string
 
   /*
     Store max length, which will occupy packlength bytes. If the max
@@ -8618,10 +8692,9 @@ uchar *Field_blob::pack(uchar *to, const uchar *from, uint max_length)
    */
   if (length > 0)
   {
-    from= get_ptr();
+    from= get_ptr(from);
     memcpy(to+packlength, from,length);
   }
-  ptr=save;					// Restore org row pointer
   return to+packlength+length;
 }
 
@@ -9638,11 +9711,12 @@ int Field_bit::cmp_offset(my_ptrdiff_t row_offset)
 }
 
 
-uint Field_bit::get_key_image(uchar *buff, uint length, imagetype type_arg)
+uint Field_bit::get_key_image(uchar *buff, uint length, const uchar *ptr_arg, imagetype type_arg) const
 {
   if (bit_len)
   {
-    uchar bits= get_rec_bits(bit_ptr, bit_ofs, bit_len);
+    const uchar *bit_ptr_for_arg= ptr_arg + (bit_ptr - ptr);
+    uchar bits= get_rec_bits(bit_ptr_for_arg, bit_ofs, bit_len);
     *buff++= bits;
     length--;
   }
@@ -11003,3 +11077,20 @@ void Field::print_key_value_binary(String *out, const uchar* key, uint32 length)
 {
   out->append_semi_hex((const char*)key, length, charset());
 }
+
+
+Virtual_column_info* Virtual_column_info::clone(THD *thd)
+{
+  Virtual_column_info* dst= new (thd->mem_root) Virtual_column_info(*this);
+  if (!dst)
+    return NULL;
+  if (expr)
+  {
+    dst->expr= expr->get_copy(thd);
+    if (!dst->expr)
+      return NULL;
+  }
+  if (!thd->make_lex_string(&dst->name, name.str, name.length))
+    return NULL;
+  return dst;
+};
