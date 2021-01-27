@@ -221,7 +221,7 @@ void *my_memdup(PSI_memory_key key, const void *from, size_t length, myf my_flag
   DBUG_RETURN(ptr);
 }
 
-
+/*字符串复制from->return*/
 char *my_strdup(PSI_memory_key key, const char *from, myf my_flags)
 {
   char *ptr;

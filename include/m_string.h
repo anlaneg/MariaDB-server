@@ -96,6 +96,7 @@ extern  char *strcend(const char *, pchar);
 extern	char *strfill(char * s,size_t len,pchar fill);
 extern	char *strmake(char *dst,const char *src,size_t length);
 
+/*将S字符串中的内容填充到D中*/
 #if !defined(__GNUC__) || (__GNUC__ < 4)
 #define strmake_buf(D,S)        strmake(D, S, sizeof(D) - 1)
 #else

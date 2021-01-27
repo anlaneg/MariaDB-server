@@ -168,14 +168,14 @@ static my_bool opt_binary_mode= FALSE;
 static my_bool opt_connect_expired_password= FALSE;
 static int interrupted_query= 0;
 static char *current_host,*current_db,*current_user=0,*opt_password=0,
-            *current_prompt=0, *delimiter_str= 0,
+            *current_prompt=0/*当前使用的命令行提示符*/, *delimiter_str= 0/*语句分隔符字符串指针*/,
             *default_charset= (char*) MYSQL_AUTODETECT_CHARSET_NAME,
             *opt_init_command= 0;
 static char *histfile;
 static char *histfile_tmp;
 static String glob_buffer,old_buffer;
 static String processed_prompt;
-static char *full_username=0,*part_username=0,*default_prompt=0;
+static char *full_username=0,*part_username=0,*default_prompt=0/*默认提示符*/;
 static int wait_time = 5;
 static STATUS status;
 static ulong select_limit,max_join_size,opt_connect_timeout=0;
@@ -198,7 +198,9 @@ static char pager[FN_REFLEN], outfile[FN_REFLEN];
 static FILE *PAGER, *OUTFILE;
 static MEM_ROOT hash_mem_root;
 static uint prompt_counter;
+/*语句分隔符，默认为分号*/
 static char delimiter[16]= DEFAULT_DELIMITER;
+/*语句分隔符长度*/
 static uint delimiter_length= 1;
 unsigned short terminal_width= 80;
 
@@ -268,6 +270,7 @@ static void report_progress_end();
 
 typedef struct {
   const char *name;		/* User printable name of the function. */
+  /*命令对应的字符*/
   char cmd_char;		/* msql command character */
   int (*func)(String *str,char *); /* Function to call to do the job. */
   bool takes_params;		/* Max parameters for command */
@@ -279,6 +282,7 @@ static COMMANDS commands[] = {
   { "clear",  'c', com_clear,  0, "Clear the current input statement."},
   { "connect",'r', com_connect,1,
     "Reconnect to the server. Optional arguments are db and host." },
+	/*设置语句对应的分隔符*/
   { "delimiter", 'd', com_delimiter,    1,
     "Set statement delimiter." },
 #ifdef USE_POPEN
@@ -311,6 +315,7 @@ static COMMANDS commands[] = {
     "Set outfile [to_outfile]. Append everything into given outfile." },
   { "use",    'u', com_use,    1,
     "Use another database. Takes database name as argument." },
+	/*字符集设置*/
   { "charset",    'C', com_charset,    1,
     "Switch to another charset. Might be needed for processing binlog with multi-byte charsets." },
   { "warnings", 'W', com_warnings,  0,
@@ -1100,6 +1105,7 @@ inline int get_command_index(char cmd_char)
   */
   for (uint i= 0; commands[i].func; i++)
     if (commands[i].cmd_char == cmd_char)
+    	  /*命令字相等，则返回对其对应的command_index*/
       return i;
   return -1;
 }
@@ -1108,7 +1114,7 @@ static int delimiter_index= -1;
 static int charset_index= -1;
 static bool real_binary_mode= FALSE;
 
-
+/*mysql命令行入口*/
 int main(int argc,char *argv[])
 {
   char buff[80];
@@ -1117,7 +1123,9 @@ int main(int argc,char *argv[])
   DBUG_ENTER("main");
   DBUG_PROCESS(argv[0]);
   
+  /*取字符集对应的cmd index*/
   charset_index= get_command_index('C');
+  /*取语句分隔符对应的cmd index*/
   delimiter_index= get_command_index('d');
   delimiter_str= delimiter;
   default_prompt = my_strdup(PSI_NOT_INSTRUMENTED, getenv("MYSQL_PS1") ?
@@ -4415,6 +4423,7 @@ static int com_source(String *buffer __attribute__((unused)),
 
 
 	/* ARGSUSED */
+/*设置语句分隔符*/
 static int
 com_delimiter(String *buffer __attribute__((unused)), char *line)
 {

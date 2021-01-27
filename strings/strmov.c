@@ -38,6 +38,7 @@
 
 #ifndef strmov
 
+/*将src中的内容填充到dst中，返回dst的尾部'\0'*/
 char *strmov(register char *dst, register const char *src)
 {
   DBUG_ASSERT(src + strlen(src) < dst || dst + strlen(src) < src);
