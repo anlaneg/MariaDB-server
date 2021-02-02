@@ -541,6 +541,7 @@ static char *get_argument(const char *keyword, size_t kwlen,
 
   /* Skip over "include / includedir keyword" and following whitespace */
 
+  /*跳过关键字后面的空格*/
   for (ptr+= kwlen - 1;
        my_isspace(&my_charset_latin1, ptr[0]);
        ptr++)
@@ -551,6 +552,7 @@ static char *get_argument(const char *keyword, size_t kwlen,
     The -1 below is for the newline added by fgets()
     Note that my_isspace() is true for \r and \n
   */
+  /*忽略字符串尾部的空格*/
   for (end= ptr + strlen(ptr) - 1;
        my_isspace(&my_charset_latin1, *(end - 1));
        end--)
@@ -560,6 +562,7 @@ static char *get_argument(const char *keyword, size_t kwlen,
   /* Print error msg if there is nothing after !include* directive */
   if (end <= ptr)
   {
+	  /*指令后，无参数*/
     fprintf(stderr,
 	    "error: Wrong '!%s' directive in config file: %s at line %d\n",
 	    keyword, name, line);
@@ -633,27 +636,33 @@ static int search_default_file_with_ext(struct handle_option_ctx *ctx,
     if ((stat_info.st_mode & S_IWOTH) &&
 	(stat_info.st_mode & S_IFMT) == S_IFREG)
     {
+    	/*忽略other模式下可写的reg文件*/
       fprintf(stderr, "Warning: World-writable config file '%s' is ignored\n",
               name);
       return 0;
     }
   }
 #endif
+  /*以只读方式打开文件$name*/
   if (!(fp= mysql_file_fopen(key_file_cnf, name, O_RDONLY, MYF(0))))
     return 1;					/* Ignore wrong files */
 
   if (my_defaults_mark_files)
+	  /*将file_marker加入到ctx->args中*/
     if (insert_dynamic(ctx->args, (uchar*) &file_marker) ||
         add_option(ctx, name))
       goto err;
 
+  /*自fp中读取一行数据*/
   while (mysql_file_fgets(buff, sizeof(buff) - 1, fp))
   {
     line++;
     /* Ignore comment and empty lines */
+    //跳过空行
     for (ptr= buff; my_isspace(&my_charset_latin1, *ptr); ptr++)
     {}
 
+    /*跳过注释符及空行*/
     if (*ptr == '#' || *ptr == ';' || !*ptr)
       continue;
 
@@ -662,11 +671,13 @@ static int search_default_file_with_ext(struct handle_option_ctx *ctx,
     {
       if (recursion_level >= max_recursion_level)
       {
+    	  	/*忽略尾部的的空格*/
         for (end= ptr + strlen(ptr) - 1; 
              my_isspace(&my_charset_latin1, *(end - 1));
              end--)
         {}
         end[0]= 0;
+        /*对此行进行告警*/
         fprintf(stderr,
                 "Warning: skipping '%s' directive as maximum include"
                 "recursion level was reached in file %s at line %d\n",
@@ -678,15 +689,18 @@ static int search_default_file_with_ext(struct handle_option_ctx *ctx,
       for (++ptr; my_isspace(&my_charset_latin1, ptr[0]); ptr++)
       {}
 
+      /*遇到了includedir关键字*/
       if ((!strncmp(ptr, includedir_keyword,
                     sizeof(includedir_keyword) - 1)) &&
           my_isspace(&my_charset_latin1, ptr[sizeof(includedir_keyword) - 1]))
       {
+    	  /*取includedir关键字对应的参数串*/
 	if (!(ptr= get_argument(includedir_keyword,
                                 sizeof(includedir_keyword),
                                 ptr, name, line)))
 	  goto err;
 
+	/*收集目录ptr下的所有子目录*/
         if (!(search_dir= my_dir(ptr, MYF(MY_WME | MY_WANT_SORT))))
           goto err;
 
@@ -696,12 +710,14 @@ static int search_default_file_with_ext(struct handle_option_ctx *ctx,
           ext= fn_ext2(search_file->name);
 
           /* check extension */
+          /*扩展名必须相等*/
           for (tmp_ext= (char**) f_extensions; *tmp_ext; tmp_ext++)
           {
             if (!strcmp(ext, *tmp_ext))
               break;
           }
 
+          /*设置tmp？？？？*/
           if (*tmp_ext)
           {
             fn_format(tmp, search_file->name, ptr, "",
@@ -716,6 +732,7 @@ static int search_default_file_with_ext(struct handle_option_ctx *ctx,
       else if ((!strncmp(ptr, include_keyword, sizeof(include_keyword) - 1)) &&
                my_isspace(&my_charset_latin1, ptr[sizeof(include_keyword)-1]))
       {
+    	  /*遇到include关键字，取它对应的参数串*/
 	if (!(ptr= get_argument(include_keyword,
                                 sizeof(include_keyword), ptr,
                                 name, line)))
@@ -730,7 +747,7 @@ static int search_default_file_with_ext(struct handle_option_ctx *ctx,
     if (*ptr == '[')				/* Group name */
     {
       if (!(end=(char *) strchr(++ptr,']')))
-      {
+      {/*有group开始，没有结束，报错*/
 	fprintf(stderr,
 		"error: Wrong group definition in config file: %s at line %d\n",
 		name,line);

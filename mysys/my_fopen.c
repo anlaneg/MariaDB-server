@@ -49,6 +49,7 @@ FILE *my_fopen(const char *filename, int flags, myf MyFlags)
 #ifdef _WIN32
   fd= my_win_fopen(filename, type);
 #else
+  /*按flags要求打开文件*/
   fd= fopen(filename, type);
 #endif
   if (fd != 0)
@@ -59,12 +60,15 @@ FILE *my_fopen(const char *filename, int flags, myf MyFlags)
       so we can ignore if this doesn't work.
     */
 
+	/*文件转fd*/
     int filedesc= my_fileno(fd);
     if ((uint)filedesc >= my_file_limit)
     {
+    	/*打开文件数量过多，不设置file_info*/
       statistic_increment(my_stream_opened,&THR_LOCK_open);
       DBUG_RETURN(fd);				/* safeguard */
     }
+    /*设置file_info*/
     my_file_info[filedesc].name= my_strdup(key_memory_my_file_info, filename, MyFlags);
     statistic_increment(my_stream_opened, &THR_LOCK_open);
     statistic_increment(my_file_total_opened, &THR_LOCK_open);
@@ -74,6 +78,7 @@ FILE *my_fopen(const char *filename, int flags, myf MyFlags)
   }
   else
     my_errno=errno;
+  /*打开fd失败*/
   DBUG_PRINT("error",("Got error %d on open",my_errno));
   if (MyFlags & (MY_FFNF | MY_FAE | MY_WME))
     my_error((flags & O_RDONLY) ? EE_FILENOTFOUND : EE_CANTCREATEFILE,

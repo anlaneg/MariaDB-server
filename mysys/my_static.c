@@ -73,6 +73,7 @@ my_bool         my_assert= 1;
 #endif
 my_bool         my_assert_on_error= 0;
 struct st_my_file_info my_file_info_default[MY_NFILE];
+/*支持的最大file数*/
 uint   my_file_limit= MY_NFILE;
 int32           my_file_opened=0;
 struct st_my_file_info *my_file_info= my_file_info_default;

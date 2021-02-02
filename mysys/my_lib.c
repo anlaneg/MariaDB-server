@@ -99,15 +99,18 @@ static char *directory_file_name (char * dst, const char *src)
 
   if (src[0] == 0)
     src= (char*) ".";                           /* Use empty as current */
+  /*将src填充到dst中*/
   end= strnmov(dst, src, FN_REFLEN + 1);
   if (end[-1] != FN_LIBCHAR)
   {
+	  /*结尾不是'/'符，填充最后一个字符为'/'*/
     *end++= FN_LIBCHAR;                          /* Add last '/' */
     *end='\0';
   }
   return end;
 }
 
+/*收集path下所有文件*/
 MY_DIR	*my_dir(const char *path, myf MyFlags)
 {
   MY_DIR_HANDLE *dirh;
@@ -122,6 +125,7 @@ MY_DIR	*my_dir(const char *path, myf MyFlags)
 
   tmp_file= directory_file_name(tmp_path, path);
 
+  /*打开临时目录*/
   if (!(dirp= opendir(tmp_path)))
   {
     my_errno= errno;
@@ -161,6 +165,7 @@ MY_DIR	*my_dir(const char *path, myf MyFlags)
         continue;
     }
 
+    /*添加文件名称*/
     if (!(finfo.name= strdup_root(&dirh->root, dp->d_name)))
       goto error;
     
@@ -176,6 +181,7 @@ MY_DIR	*my_dir(const char *path, myf MyFlags)
 
   (void) closedir(dirp);
   
+  /*对名称进行排序*/
   if (MyFlags & MY_WANT_SORT)
     sort_dynamic(&dirh->array, (qsort_cmp) comp_names);
 

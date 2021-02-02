@@ -531,6 +531,7 @@ static inline void inline_mysql_file_register(
 #endif
 }
 
+/*读取一行数据*/
 static inline char *
 inline_mysql_file_fgets(
 #ifdef HAVE_PSI_FILE_INTERFACE

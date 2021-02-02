@@ -100,6 +100,7 @@ my_bool insert_dynamic(DYNAMIC_ARRAY *array, const void * element)
     buffer=array->buffer+(array->elements * array->size_of_element);
     array->elements++;
   }
+  /*在buffer位置处填写element*/
   memcpy(buffer,element,(size_t) array->size_of_element);
   return FALSE;
 }
@@ -127,6 +128,7 @@ void *alloc_dynamic(DYNAMIC_ARRAY *array)
   DBUG_ENTER("alloc_dynamic");
   if (array->elements == array->max_element)
   {
+	  /*当前占用的元素数等于申请的元素数，扩大*/
     char *new_ptr;
     if (array->malloc_flags & MY_INIT_BUFFER_USED)
     {
@@ -155,6 +157,7 @@ void *alloc_dynamic(DYNAMIC_ARRAY *array)
     array->buffer= (uchar*) new_ptr;
     array->max_element+=array->alloc_increment;
   }
+  /*返回首个可用空间指针*/
   DBUG_RETURN(array->buffer+(array->elements++ * array->size_of_element));
 }
 

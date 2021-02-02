@@ -35,6 +35,7 @@
 
 #include "strings_def.h"
 
+/*将src字符串填充到dst中（最多填充n个字符），并返回最后一个字符位置*/
 char *strnmov(register char *dst, register const char *src, size_t n)
 {
   while (n-- != 0) {

@@ -318,7 +318,7 @@ enum file_type
 
 struct st_my_file_info
 {
-  char  *name;
+  char  *name;/*打开的文件名称*/
 #ifdef _WIN32
   HANDLE fhandle;   /* win32 file handle */
   int    oflag;     /* open flags, e.g O_APPEND */
@@ -334,9 +334,9 @@ typedef void (*FREE_FUNC)(void *);
 typedef struct st_dynamic_array
 {
   uchar *buffer;
-  uint elements,max_element;
+  uint elements/*当前元素数*/,max_element/*最大元素数*/;
   uint alloc_increment;
-  uint size_of_element;
+  uint size_of_element;/*元素大小*/
   PSI_memory_key m_psi_key;
   myf malloc_flags;
 } DYNAMIC_ARRAY;
