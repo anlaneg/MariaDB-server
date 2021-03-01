@@ -73,7 +73,7 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA
 struct st_mysql_socket
 {
   /** The real socket descriptor. */
-  my_socket fd;
+  my_socket fd;/*连接用的fd*/
 
   /**
     The instrumentation hook.
@@ -684,7 +684,7 @@ inline_mysql_socket_connect
 #ifdef HAVE_PSI_SOCKET_INTERFACE
   const char *src_file, uint src_line,
 #endif
- MYSQL_SOCKET mysql_socket, const struct sockaddr *addr, socklen_t len)
+ MYSQL_SOCKET mysql_socket, const struct sockaddr *addr/*目的地址*/, socklen_t len)
 {
   int result;
 

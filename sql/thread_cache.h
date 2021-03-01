@@ -24,13 +24,13 @@
 */
 class Thread_cache
 {
-  mutable mysql_cond_t COND_thread_cache;
+  mutable mysql_cond_t COND_thread_cache;/*连接请求加入，标记有新连接请求*/
   mutable mysql_cond_t COND_flush_thread_cache;
   mutable mysql_mutex_t LOCK_thread_cache;
   /** Queue of new connection requests. */
-  I_List<CONNECT> list;
+  I_List<CONNECT> list;/*存放新连接请求*/
   /** Number of threads parked in the cache. */
-  ulong cached_thread_count;
+  ulong cached_thread_count;/*可在cache中存放的thread数目*/
   /** Number of active flush requests. */
   uint32_t kill_cached_threads;
   /**
@@ -121,12 +121,17 @@ public:
     mysql_mutex_lock(&LOCK_thread_cache);
     if (cached_thread_count)
     {
+    		/*此connect存入list*/
       list.push_back(connect);
+      /*可cache的线程数减1*/
       cached_thread_count--;
+      /*解锁*/
       mysql_mutex_unlock(&LOCK_thread_cache);
+      /*知会工作线程，接入成功*/
       mysql_cond_signal(&COND_thread_cache);
       return true;
     }
+    /*容量不足，添加失败*/
     mysql_mutex_unlock(&LOCK_thread_cache);
     return false;
   }
@@ -173,10 +178,12 @@ public:
       cached_thread_count++;
       for (;;)
       {
+    	  	/*等待新连接增加*/
         int error= mysql_cond_timedwait(&COND_thread_cache, &LOCK_thread_cache,
                                          &abstime);
         flushed= kill_cached_threads;
         if ((connect= list.get()))
+        	/*有新连接，退出*/
           break;
         else if (flushed || error == ETIMEDOUT || error == ETIME)
         {
@@ -193,6 +200,7 @@ public:
     mysql_mutex_unlock(&LOCK_thread_cache);
     if (flushed)
       mysql_cond_signal(&COND_flush_thread_cache);
+    /*返回待接入的连接*/
     DBUG_RETURN(connect);
   }
 

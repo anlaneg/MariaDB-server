@@ -417,6 +417,7 @@ uint filename_to_tablename(const char *from, char *to, size_t to_length,
 
 bool check_mysql50_prefix(const char *name)
 {
+	/*检查name是否有"#mysql50#"前缀*/
   return (name[0] == '#' && 
          !strncmp(name, MYSQL50_TABLE_NAME_PREFIX,
                   MYSQL50_TABLE_NAME_PREFIX_LENGTH));

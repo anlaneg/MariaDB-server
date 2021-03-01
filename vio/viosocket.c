@@ -1060,7 +1060,7 @@ int vio_io_wait(Vio *vio, enum enum_vio_io_event event, int timeout)
 */
 
 my_bool
-vio_socket_connect(Vio *vio, struct sockaddr *addr, socklen_t len, int timeout)
+vio_socket_connect(Vio *vio, struct sockaddr *addr/*对端地址*/, socklen_t len, int timeout)
 {
   int ret, wait;
   my_bool not_used;
@@ -1074,7 +1074,7 @@ vio_socket_connect(Vio *vio, struct sockaddr *addr, socklen_t len, int timeout)
     DBUG_RETURN(TRUE);
 
   /* Initiate the connection. */
-  ret= mysql_socket_connect(vio->mysql_socket, addr, len);
+  ret= mysql_socket_connect(vio->mysql_socket, addr/*目的地址*/, len);
 
 #ifdef _WIN32
   wait= (ret == SOCKET_ERROR) &&

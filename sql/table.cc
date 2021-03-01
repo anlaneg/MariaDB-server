@@ -4859,12 +4859,14 @@ bool check_db_name(LEX_STRING *org_name)
   size_t name_length= org_name->length;
   bool check_for_path_chars;
 
+  //检查name是否有"#mysql50#" 前缀
   if ((check_for_path_chars= check_mysql50_prefix(name)))
   {
     name+= MYSQL50_TABLE_NAME_PREFIX_LENGTH;
     name_length-= MYSQL50_TABLE_NAME_PREFIX_LENGTH;
   }
 
+  //名称为空，或者名称过长，返回1
   if (!name_length || name_length > NAME_LEN)
     return 1;
 
@@ -4874,6 +4876,8 @@ bool check_db_name(LEX_STRING *org_name)
     if (check_for_path_chars)
       org_name->length+= MYSQL50_TABLE_NAME_PREFIX_LENGTH;
   }
+
+  /*db名称在ignore_db_dirs中*/
   if (db_name_is_in_ignore_db_dirs_list(name))
     return 1;
 

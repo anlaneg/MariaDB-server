@@ -5795,6 +5795,7 @@ void create_thread_to_handle_connection(CONNECT *connect)
   DBUG_ENTER("create_thread_to_handle_connection");
 
   if (thread_cache.enqueue(connect))
+	  /*连接入队失败，退出*/
     DBUG_VOID_RETURN;
 
   /* Create new thread to handle connection */
@@ -5802,11 +5803,13 @@ void create_thread_to_handle_connection(CONNECT *connect)
   DBUG_PRINT("info",(("creating thread %lu"), (ulong) connect->thread_id));
   connect->prior_thr_create_utime= microsecond_interval_timer();
 
+  /*为此connect创建线程*/
   pthread_t tmp;
   if (auto error= mysql_thread_create(key_thread_one_connection,
-                                      &tmp, &connection_attrib,
-                                      handle_one_connection, (void*) connect))
+                                      &tmp/*线程id*/, &connection_attrib/*线程属性*/,
+                                      handle_one_connection/*线程处理函数*/, (void*) connect/*线程参数*/))
   {
+	  /*创建线程失败*/
     char error_message_buff[MYSQL_ERRMSG_SIZE];
     /* purecov: begin inspected */
     DBUG_PRINT("error", ("Can't create thread to handle request (error %d)",

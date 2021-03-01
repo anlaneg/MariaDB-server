@@ -813,11 +813,13 @@ bool thd_init_client_charset(THD *thd, uint cs_number)
 */
 
 #ifndef EMBEDDED_LIBRARY
+/*初始化connect处理线程*/
 bool init_new_connection_handler_thread()
 {
   pthread_detach_this_thread();
   if (my_thread_init())
   {
+	  /*初始化线程失败*/
     statistic_increment(aborted_connects,&LOCK_status);
     statistic_increment(connection_errors_internal, &LOCK_status);
     return 1;
@@ -1302,13 +1304,16 @@ void prepare_new_connection_state(THD* thd)
 
 pthread_handler_t handle_one_connection(void *arg)
 {
+	/*mysql connect的处理函数*/
   CONNECT *connect= (CONNECT*) arg;
 
   mysql_thread_set_psi_id(connect->thread_id);
 
   if (init_new_connection_handler_thread())
+	  /*初始化connect处理线程失败*/
     connect->close_with_error(0, 0, ER_OUT_OF_RESOURCES);
   else
+	  /*初始化connect处理线程成功*/
     do_handle_one_connection(connect, true);
 
   DBUG_PRINT("info", ("killing thread"));
@@ -1348,10 +1353,11 @@ bool thd_is_connection_alive(THD *thd)
   return FALSE;
 }
 
-
+/*connection线程处理函数*/
 void do_handle_one_connection(CONNECT *connect, bool put_in_cache)
 {
   ulonglong thr_create_utime= microsecond_interval_timer();
+  /*通过connect创建THD*/
   THD *thd;
   if (!(thd= connect->create_thd(NULL)))
   {
@@ -1420,7 +1426,7 @@ end_thread:
 
     unlink_thd(thd);
     if (IF_WSREP(thd->wsrep_applier, false) || !put_in_cache ||
-        !(connect= thread_cache.park()))
+        !(connect= thread_cache.park())/*无新请求连接*/)
       break;
 
     /* Create new instrumentation for the new THD job */
@@ -1507,7 +1513,7 @@ void CONNECT::close_with_error(uint sql_errno,
 
 THD *CONNECT::create_thd(THD *thd)
 {
-  bool res, thd_reused= thd != 0;
+  bool res, thd_reused/*是否thd重用*/= thd != 0;
   Vio *vio;
   DBUG_ENTER("create_thd");
 
@@ -1515,6 +1521,7 @@ THD *CONNECT::create_thd(THD *thd)
 
   if (thd)
   {
+	  /*thd重用情况*/
     /* reuse old thd */
     thd->reset_for_reuse();
     /*
@@ -1525,6 +1532,7 @@ THD *CONNECT::create_thd(THD *thd)
     thd->thread_id= thd->variables.pseudo_thread_id= thread_id;
   }
   else if (!(thd= new THD(thread_id)))
+	  /*创建THD失败，退出*/
     DBUG_RETURN(0);
 
 #if _WIN32

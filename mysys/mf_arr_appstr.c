@@ -30,7 +30,6 @@
   @retval FALSE  Success
   @retval TRUE   Failure, array is full
 */
-
 my_bool array_append_string_unique(const char *str,
                                    const char **array, size_t size)
 {
@@ -39,11 +38,14 @@ my_bool array_append_string_unique(const char *str,
   const char **end= array + size - 1;
   DBUG_ASSERT(*end == NULL);
 
+  /*在array中检查str是否存在，如存在则不再添加*/
   for (p= array; *p; ++p)
   {
     if (strcmp(*p, str) == 0)
       break;
   }
+
+  /*队列满*/
   if (p >= end)
     return TRUE;                               /* Array is full */
 
@@ -55,6 +57,7 @@ my_bool array_append_string_unique(const char *str,
     ++p;
   }
 
+  /*设置p指针对应的字符串*/
   DBUG_ASSERT(p < end);
   *p= str;
 

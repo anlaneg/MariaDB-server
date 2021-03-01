@@ -3185,6 +3185,7 @@ extern LEX_CSTRING MYSQL_SCHEMA_NAME;
 /* table names */
 extern LEX_CSTRING MYSQL_PROC_NAME;
 
+//检查name是否为infoschema数据库
 inline bool is_infoschema_db(const LEX_CSTRING *name)
 {
   return lex_string_eq(&INFORMATION_SCHEMA_NAME, name);

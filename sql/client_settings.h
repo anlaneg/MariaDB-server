@@ -40,6 +40,7 @@
 #define read_user_name(A) A[0]= 0
 #undef _CUSTOMCONFIG_
 
+/*mysql client插件初始化*/
 #define mysql_server_init(a,b,c) mysql_client_plugin_init()
 #define mysql_server_end()       mysql_client_plugin_deinit()
 

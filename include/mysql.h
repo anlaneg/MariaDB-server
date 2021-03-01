@@ -207,10 +207,10 @@ struct st_mysql_options_extention;
 
 struct st_mysql_options {
   unsigned int connect_timeout, read_timeout, write_timeout;
-  unsigned int port, protocol;
+  unsigned int port/*连接到哪个port*/, protocol;
   unsigned long client_flag;
-  char *host,*user,*password,*unix_socket,*db;
-  struct st_dynamic_array *init_commands;
+  char *host/*连接哪个主机*/,*user/*使用哪个user连接*/,*password/*连接用密码*/,*unix_socket,*db/*使用哪个db*/;
+  struct st_dynamic_array *init_commands;/*与server端连接成功后，需要执行的初始化commands*/
   char *my_cnf_file,*my_cnf_group, *charset_dir, *charset_name;
   char *ssl_key;				/* PEM key file */
   char *ssl_cert;				/* PEM cert file */

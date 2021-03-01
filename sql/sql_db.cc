@@ -1606,7 +1606,7 @@ static void backup_current_db_name(THD *thd,
     @retval >0  Error
 */
 
-uint mysql_change_db(THD *thd, const LEX_CSTRING *new_db_name,
+uint mysql_change_db(THD *thd, const LEX_CSTRING *new_db_name/*要切换的db名称*/,
                      bool force_switch)
 {
   LEX_CSTRING new_db_file_name;
@@ -1640,8 +1640,10 @@ uint mysql_change_db(THD *thd, const LEX_CSTRING *new_db_name,
       DBUG_RETURN(ER_NO_DB_ERROR);
     }
   }
+  //切换到名称为$new_db_name的数据库
   DBUG_PRINT("enter",("name: '%s'", new_db_name->str));
 
+  //db名称为infoschema情况
   if (is_infoschema_db(new_db_name))
   {
     /* Switch the current database to INFORMATION_SCHEMA. */
@@ -1677,6 +1679,7 @@ uint mysql_change_db(THD *thd, const LEX_CSTRING *new_db_name,
 
   if (check_db_name((LEX_STRING*) &new_db_file_name))
   {
+	  /*db名称检查不通过*/
     my_error(ER_WRONG_DB_NAME, MYF(0), new_db_file_name.str);
     my_free(const_cast<char*>(new_db_file_name.str));
 

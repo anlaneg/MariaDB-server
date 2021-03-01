@@ -1845,7 +1845,7 @@ static auth_plugin_t old_password_client_plugin=
   old_password_auth_client
 };
 
-
+/*mysql内置插件*/
 struct st_mysql_client_plugin *mysql_client_builtins[]=
 {
   (struct st_mysql_client_plugin *)&native_password_client_plugin,
@@ -2603,7 +2603,7 @@ int run_plugin_auth(MYSQL *mysql, char *data, uint data_len,
   DBUG_RETURN (mysql->net.read_pos[0] != 0);
 }
 
-
+/*同步连接到name*/
 static int
 connect_sync(MYSQL *mysql, NET *net, my_socket fd,
                       struct sockaddr *name, uint namelen)
@@ -2689,6 +2689,7 @@ CLI_MYSQL_REAL_CONNECT(MYSQL *mysql,const char *host, const char *user,
     DBUG_RETURN(0);
   }
 
+  /*指定client对应的methods*/
   mysql->methods= &client_methods;
   mysql->client_flag=0;			/* For handshake */
 
@@ -2708,26 +2709,32 @@ CLI_MYSQL_REAL_CONNECT(MYSQL *mysql,const char *host, const char *user,
 
   /* Some empty-string-tests are done because of ODBC */
   if (!host || !host[0])
+	  /*使用默认主机*/
     host=mysql->options.host;
   if (!user || !user[0])
   {
+	  /*使用默认user*/
     user=mysql->options.user;
     if (!user)
       user= "";
   }
   if (!passwd)
   {
+	  /*使用选项中的password*/
     passwd=mysql->options.password;
 #if !defined(DONT_USE_MYSQL_PWD) && !defined(MYSQL_SERVER)
     if (!passwd)
+    	/*自env中提取password*/
       passwd=getenv("MYSQL_PWD");		/* get it from environment */
 #endif
     if (!passwd)
       passwd= "";
   }
   if (!db || !db[0])
+	  /*使用哪个db*/
     db=mysql->options.db;
   if (!port)
+	  /*使用哪个port*/
     port=mysql->options.port;
   if (!unix_socket)
     unix_socket=mysql->options.unix_socket;
@@ -2833,9 +2840,11 @@ CLI_MYSQL_REAL_CONNECT(MYSQL *mysql,const char *host, const char *user,
     unix_socket=0;				/* This is not used */
 
     if (!port)
+    	/*默认使用mysql port*/
       port= mysql_port;
 
     if (!host)
+    	/*默认用localhost*/
       host= LOCAL_HOST;
 
     my_snprintf(host_info=buff, sizeof(buff)-1, ER(CR_TCP_CONNECTION), host);
@@ -2874,6 +2883,7 @@ CLI_MYSQL_REAL_CONNECT(MYSQL *mysql,const char *host, const char *user,
       DBUG_PRINT("info", ("Create socket, family: %d  type: %d  proto: %d",
                           t_res->ai_family, t_res->ai_socktype,
                           t_res->ai_protocol));
+      /*创建socket*/
       sock= socket(t_res->ai_family, t_res->ai_socktype, t_res->ai_protocol);
       if (sock == INVALID_SOCKET)
       {
@@ -2890,6 +2900,7 @@ CLI_MYSQL_REAL_CONNECT(MYSQL *mysql,const char *host, const char *user,
         goto error;
       }
 
+      /*同步连接到t_res->ai_addr*/
       DBUG_PRINT("info", ("Connect socket"));
       status= connect_sync(mysql, net, sock,
                                     t_res->ai_addr, (uint)t_res->ai_addrlen);
@@ -3137,19 +3148,22 @@ CLI_MYSQL_REAL_CONNECT(MYSQL *mysql,const char *host, const char *user,
      server.
   */
 #ifndef MYSQL_SERVER
+  /*连接成功，执行init_commands*/
   if (mysql->options.init_commands)
   {
     DYNAMIC_ARRAY *init_commands= mysql->options.init_commands;
-    char **ptr= (char**)init_commands->buffer;
+    char **ptr= (char**)init_commands->buffer;/*字符串指针数组*/
     char **end_command= ptr + init_commands->elements;
 
     my_bool reconnect=mysql->reconnect;
     mysql->reconnect=0;
 
+    /*逐个执行每个字符串指针*/
     for (; ptr < end_command; ptr++)
     {
       int status;
 
+      /*执行init_commands查询*/
       if (mysql_real_query(mysql,*ptr, (ulong) strlen(*ptr)))
 	goto error;
 
@@ -3539,7 +3553,7 @@ get_info:
 */
 
 int STDCALL
-mysql_send_query(MYSQL* mysql, const char* query, ulong length)
+mysql_send_query(MYSQL* mysql, const char* query, ulong length/*query字符串长度*/)
 {
   DBUG_ENTER("mysql_send_query");
   if (mysql->options.client_flag & CLIENT_LOCAL_FILES &&
@@ -3549,6 +3563,7 @@ mysql_send_query(MYSQL* mysql, const char* query, ulong length)
     if (strncasecmp(query, STRING_WITH_LEN("load")) == 0)
       mysql->auto_local_infile= ACCEPT_FILE_REQUEST;
   }
+  /*发送简单命令（查询类）*/
   DBUG_RETURN(simple_command(mysql, COM_QUERY, (uchar*) query, length, 1));
 }
 
@@ -3742,6 +3757,7 @@ mysql_fetch_lengths(MYSQL_RES *res)
   return res->lengths;
 }
 
+/*设置各option对应的值*/
 int STDCALL
 mysql_options(MYSQL *mysql,enum mysql_option option, const void *arg)
 {

@@ -144,7 +144,7 @@ typedef enum enum_info_type INFO_TYPE;
 
 static MYSQL mysql;			/* The connection */
 static my_bool ignore_errors=0,wait_flag=0,quick=0,
-               connected=0,opt_raw_data=0,unbuffered=0,output_tables=0,
+               connected=0/*是否已连接*/,opt_raw_data=0,unbuffered=0,output_tables=0,
 	       opt_rehash=1,skip_updates=0,safe_updates=0,one_database=0,
 	       opt_compress=0, using_opt_local_infile=0,
 	       vertical=0, line_numbers=1, column_names=1,opt_html=0,
@@ -4669,11 +4669,12 @@ char *mysql_authentication_dialog_ask(MYSQL *mysql, int type,
 }
 
 static int
-sql_real_connect(char *host,char *database,char *user,char *password,
+sql_real_connect(char *host/*远端主机*/,char *database,char *user,char *password,
 		 uint silent)
 {
   if (connected)
   {
+	  /*已连接，则关闭*/
     connected= 0;
     mysql_close(&mysql);
   }

@@ -1150,8 +1150,10 @@ static bool wsrep_command_no_result(char command)
 }
 #endif /* WITH_WSREP */
 #ifndef EMBEDDED_LIBRARY
+/*取packet对应的command*/
 static enum enum_server_command fetch_command(THD *thd, char *packet)
 {
+	/*取server command*/
   enum enum_server_command
     command= (enum enum_server_command) (uchar) packet[0];
   DBUG_ENTER("fetch_command");
@@ -1226,6 +1228,7 @@ bool do_command(THD *thd)
   */
   DEBUG_SYNC(thd, "before_do_command_net_read");
 
+  /*读取报文长度*/
   packet_length= my_net_read_packet(net, 1);
 
   if (unlikely(packet_length == packet_error))
@@ -1362,6 +1365,7 @@ bool do_command(THD *thd)
 
   DBUG_ASSERT(packet_length);
   DBUG_ASSERT(!thd->apc_target.is_enabled());
+  /*分发command*/
   return_value= dispatch_command(command, thd, packet+1,
                                  (uint) (packet_length-1));
   DBUG_ASSERT(!thd->apc_target.is_enabled());
@@ -1614,11 +1618,14 @@ bool dispatch_command(enum enum_server_command command, THD *thd,
     goto dispatch_end;
   }
 
+  /*按command进行处理*/
   switch (command) {
   case COM_INIT_DB:
   {
+	  /*处理db初始化命令*/
     LEX_CSTRING tmp;
     status_var_increment(thd->status_var.com_stat[SQLCOM_CHANGE_DB]);
+    /*自报文中提取db名称*/
     if (unlikely(thd->copy_with_error(system_charset_info, (LEX_STRING*) &tmp,
                                       thd->charset(), packet, packet_length)))
       break;

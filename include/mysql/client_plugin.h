@@ -78,7 +78,9 @@
   unsigned int version[3];                              \
   const char *license;                                  \
   void *mysql_api;                                      \
-  int (*init)(char *, size_t, int, va_list);            \
+  /*client plugin初始化函数*/\
+  int (*init)(char */*入参buffer,用于指出出错信息*/, size_t/*入参buffer大小*/, int, va_list);            \
+  /*插件销毁函数*/\
   int (*deinit)();                                      \
   int (*options)(const char *option, const void *);
 

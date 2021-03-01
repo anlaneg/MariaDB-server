@@ -168,7 +168,7 @@ void reset_root_defaults(MEM_ROOT *mem_root, size_t block_size,
   DBUG_VOID_RETURN;
 }
 
-
+/*自mem_root中申请length长度字符串*/
 void *alloc_root(MEM_ROOT *mem_root, size_t length)
 {
 #if defined(HAVE_valgrind) && defined(EXTRA_DEBUG)
@@ -460,6 +460,7 @@ char *strdup_root(MEM_ROOT *root, const char *str)
 }
 
 
+/*申请len+1字符串，复制str到pos中*/
 char *strmake_root(MEM_ROOT *root, const char *str, size_t len)
 {
   char *pos;

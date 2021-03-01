@@ -299,24 +299,30 @@ int get_defaults_options(char **argv)
     for(; *argv; argv++)
     {
       if (!my_defaults_file && is_prefix(*argv, "--defaults-file="))
+    	  	/*设置默认文件*/
         my_defaults_file= *argv + sizeof("--defaults-file=")-1;
       else
       if (!my_defaults_extra_file && is_prefix(*argv, "--defaults-extra-file="))
+    	  	/*设置默认扩展文件*/
         my_defaults_extra_file= *argv + sizeof("--defaults-extra-file=")-1;
       else
       if (!my_defaults_group_suffix && is_prefix(*argv, "--defaults-group-suffix="))
+    	    /*设置默认组后缀*/
         my_defaults_group_suffix= *argv + sizeof("--defaults-group-suffix=")-1;
       else
+    	  	/*非认识的选项*/
         break;
     }
 
   if (*argv && !strcmp(*argv, "--print-defaults"))
   {
+	/*显示默认值*/
     my_print_defaults= 1;
     my_defaults_mark_files= FALSE;
     argv++;
   }
 
+  /*使用默认组后缀*/
   if (! my_defaults_group_suffix)
     my_defaults_group_suffix= getenv("MYSQL_GROUP_SUFFIX");
 
@@ -410,6 +416,7 @@ int my_load_defaults(const char *conf_file, const char **groups, int *argc,
   const char **dirs;
   DBUG_ENTER("my_load_defaults");
 
+  /*加载dirs*/
   init_alloc_root(key_memory_defaults, &alloc, 512, 0, MYF(0));
   if ((dirs= init_default_directories(&alloc)) == NULL)
     goto err;
@@ -973,6 +980,7 @@ The following specify which files/extra groups are read (specified before remain
 }
 
 
+/*将dir加入到dirs中，自alloc中申请内存*/
 static int add_directory(MEM_ROOT *alloc, const char *dir, const char **dirs)
 {
   char buf[FN_REFLEN];
@@ -980,6 +988,7 @@ static int add_directory(MEM_ROOT *alloc, const char *dir, const char **dirs)
   char *p;
   my_bool err __attribute__((unused));
 
+  /*将p加入到dirs*/
   len= normalize_dirname(buf, dir);
   if (!(p= strmake_root(alloc, buf, len)))
     return 1;  /* Failure */
@@ -1068,6 +1077,7 @@ static const char **init_default_directories(MEM_ROOT *alloc)
 
 #endif
 
+  /*取$MYSQL_HOME环境变量，加入到dirs中*/
   if ((env= getenv("MYSQL_HOME")))
     errors += add_directory(alloc, env, dirs);
 
@@ -1075,6 +1085,7 @@ static const char **init_default_directories(MEM_ROOT *alloc)
   errors += add_directory(alloc, "", dirs);
 
 #if !defined(__WIN__)
+  /*添加'~/'*/
   errors += add_directory(alloc, "~/", dirs);
 #endif
 

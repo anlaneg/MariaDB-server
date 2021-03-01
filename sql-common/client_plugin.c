@@ -71,7 +71,7 @@ static void init_client_plugin_psi_keys()
 struct st_client_plugin_int {
   struct st_client_plugin_int *next;
   void   *dlhandle;
-  struct st_mysql_client_plugin *plugin;
+  struct st_mysql_client_plugin *plugin;/*客户端插件*/
 };
 
 static my_bool initialized= 0;
@@ -94,7 +94,7 @@ static uint plugin_version[MYSQL_CLIENT_MAX_PLUGINS]=
   there. The main purpose of a mutex is to prevent two threads from
   loading the same plugin twice in parallel.
 */
-struct st_client_plugin_int *plugin_list[MYSQL_CLIENT_MAX_PLUGINS];
+struct st_client_plugin_int *plugin_list[MYSQL_CLIENT_MAX_PLUGINS];/*插件列表*/
 static mysql_mutex_t LOCK_load_client_plugin;
 
 static int is_not_initialized(MYSQL *mysql, const char *name)
@@ -129,8 +129,10 @@ find_plugin(const char *name, int type)
   DBUG_ASSERT(initialized);
   DBUG_ASSERT(type >= 0 && type < MYSQL_CLIENT_MAX_PLUGINS);
   if (type < 0 || type >= MYSQL_CLIENT_MAX_PLUGINS)
+	  /*对于<0的type，直接返回*/
     DBUG_RETURN(0);
 
+  /*检查name在插件列表中是否存在*/
   for (p= plugin_list[type]; p; p= p->next)
   {
     if (strcmp(p->plugin->name, name) == 0)
@@ -165,12 +167,14 @@ add_plugin(MYSQL *mysql, struct st_mysql_client_plugin *plugin, void *dlhandle,
   plugin_int.plugin= plugin;
   plugin_int.dlhandle= dlhandle;
 
+  /*插件类型检查*/
   if (plugin->type >= MYSQL_CLIENT_MAX_PLUGINS)
   {
     errmsg= "Unknown client plugin type";
     goto err1;
   }
 
+  /*插件版本检查*/
   if (plugin->interface_version < plugin_version[plugin->type] ||
       (plugin->interface_version >> 8) >
        (plugin_version[plugin->type] >> 8))
@@ -182,6 +186,7 @@ add_plugin(MYSQL *mysql, struct st_mysql_client_plugin *plugin, void *dlhandle,
   /* Call the plugin initialization function, if any */
   if (plugin->init && plugin->init(errbuf, sizeof(errbuf), argc, args))
   {
+	  /*初始化失败*/
     errmsg= errbuf;
     goto err1;
   }
@@ -237,11 +242,13 @@ static void load_env_plugins(MYSQL *mysql)
 
   /* no plugins to load */
   if (!s)
+	  /*无插件，直接返回*/
     DBUG_VOID_RETURN;
 
   free_env= plugs= my_strdup(key_memory_load_env_plugins, s, MYF(MY_WME));
 
   do {
+	  /*环境变量LIBMYSQL_PLUGINS按';'划分各个插件*/
     if ((s= strchr(plugs, ';')))
       *s= '\0';
     mysql_load_plugin(mysql, plugs, -1, 0);
@@ -269,6 +276,7 @@ int mysql_client_plugin_init()
   va_list unused;
   DBUG_ENTER("mysql_client_plugin_init");
 
+  /*如果已初始化，则直接返回*/
   if (initialized)
     DBUG_RETURN(0);
 
@@ -285,15 +293,18 @@ int mysql_client_plugin_init()
 
   bzero(&plugin_list, sizeof(plugin_list));
 
+  /*指明本函数已初始化*/
   initialized= 1;
 
   mysql_mutex_lock(&LOCK_load_client_plugin);
 
+  /*添加内置的client插件*/
   for (builtin= mysql_client_builtins; *builtin; builtin++)
     add_plugin(&mysql, *builtin, 0, 0, unused);
 
   mysql_mutex_unlock(&LOCK_load_client_plugin);
 
+  //加载环境变量指定的动态插件
   load_env_plugins(&mysql);
 
   DBUG_RETURN(0);
@@ -389,6 +400,7 @@ mysql_load_plugin_v(MYSQL *mysql, const char *name, int type,
     goto err;
   }
 
+  //获取so文件的路径
   /* Compile dll path */
   strxnmov(dlpath, sizeof(dlpath) - 1,
            mysql->options.extension && mysql->options.extension->plugin_dir ?
@@ -401,6 +413,7 @@ mysql_load_plugin_v(MYSQL *mysql, const char *name, int type,
     goto err;
   }
 
+  //打开此动态链接库
   DBUG_PRINT ("info", ("dlopeninig %s", dlpath));
   /* Open new dll handle */
   if (!(dlhandle= dlopen(dlpath, RTLD_NOW)))
@@ -410,6 +423,7 @@ mysql_load_plugin_v(MYSQL *mysql, const char *name, int type,
     goto err;
   }
 
+  /*查找插件对应的符号*/
   if (!(sym= dlsym(dlhandle, plugin_declarations_sym)))
   {
     errmsg= "not a plugin";
@@ -430,12 +444,14 @@ mysql_load_plugin_v(MYSQL *mysql, const char *name, int type,
     goto errc;
   }
 
+  /*通过plugin->type检查是否已注册*/
   if (type < 0 && find_plugin(name, plugin->type))
   {
     errmsg= "it is already loaded";
     goto errc;
   }
 
+  /*添加动态库中指明的插件*/
   plugin= add_plugin(mysql, plugin, dlhandle, argc, args);
 
   mysql_mutex_unlock(&LOCK_load_client_plugin);
@@ -455,7 +471,7 @@ err:
 
 /* see <mysql/client_plugin.h> for a full description */
 struct st_mysql_client_plugin *
-mysql_load_plugin(MYSQL *mysql, const char *name, int type, int argc, ...)
+mysql_load_plugin(MYSQL *mysql, const char *name/*插件名称*/, int type/*插件类型，-1表示任意类型*/, int argc, ...)
 {
   struct st_mysql_client_plugin *p;
   va_list args;
