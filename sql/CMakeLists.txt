@@ -334,6 +334,7 @@ IF (NOT BISON_FOUND)
     ENDFOREACH()
   ENDIF()
 
+  #sql_yacc.cc必须存在
   IF(NOT EXISTS ${CMAKE_CURRENT_BINARY_DIR}/sql_yacc.cc)
      # Output files are missing, bail out.
       SET(ERRMSG
@@ -349,6 +350,7 @@ IF (NOT BISON_FOUND)
       MESSAGE(FATAL_ERROR ${ERRMSG})
   ENDIF()
 ELSE()
+  #利用sql_yacc.yy生成sql_yacc.cc
   BISON_TARGET(gen_sql_yacc ${CMAKE_CURRENT_SOURCE_DIR}/sql_yacc.yy ${CMAKE_CURRENT_BINARY_DIR}/sql_yacc.cc
              COMPILE_FLAGS "-p MYSQL")
   BISON_TARGET(gen_sql_yacc_ora ${CMAKE_CURRENT_BINARY_DIR}/sql_yacc_ora.yy ${CMAKE_CURRENT_BINARY_DIR}/sql_yacc_ora.cc

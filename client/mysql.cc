@@ -1200,6 +1200,7 @@ int main(int argc,char *argv[])
   glob_buffer.realloc(512);
   completion_hash_init(&ht, 128);
   init_alloc_root(PSI_NOT_INSTRUMENTED, &hash_mem_root, 16384, 0, MYF(0));
+  /*与远端sql服务器建立连接*/
   if (sql_connect(current_host,current_db,current_user,opt_password,
 		  opt_silent))
   {
@@ -1223,6 +1224,7 @@ int main(int argc,char *argv[])
   window_resize(0);
 #endif
 
+  /*显示程序welcome*/
   if (!status.batch)
   {
     put_info("Welcome to the MariaDB monitor.  Commands end with ; or \\g.",
@@ -1694,7 +1696,7 @@ static struct my_option my_long_options[] =
   { 0, 0, 0, 0, 0, 0, GET_NO_ARG, NO_ARG, 0, 0, 0, 0, 0, 0}
 };
 
-
+/*显示程序用法*/
 static void usage(int version)
 {
 #ifdef HAVE_READLINE
@@ -4913,6 +4915,7 @@ server_version_string(MYSQL *con)
   /* Only one thread calls this, so no synchronization is needed */
   if (server_version == NULL)
   {
+	  /*当前未拿到服务端版本，这里通过mysql_query进行请求*/
     MYSQL_RES *result;
 
     /* "limit 1" is protection against SQL_SELECT_LIMIT=0 */

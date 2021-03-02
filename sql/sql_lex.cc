@@ -1199,6 +1199,7 @@ void SELECT_LEX::lex_start(LEX *plex)
   gorder_list.empty();
 }
 
+/*sql词法分析开始*/
 void lex_start(THD *thd)
 {
   DBUG_ENTER("lex_start");

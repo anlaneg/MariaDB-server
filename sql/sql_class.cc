@@ -1476,6 +1476,7 @@ bool THD::set_db(const LEX_CSTRING *new_db)
   /* Do not reallocate memory if current chunk is big enough. */
   if (db.str && new_db->str && db.length >= new_db->length)
   {
+	  //成员db有值，新值长度小于db,故不必申请内存，直接添充即可
     mysql_mutex_lock(&LOCK_thd_data);
     db.length= new_db->length;
     memcpy((char*) db.str, new_db->str, new_db->length+1);
@@ -1483,10 +1484,12 @@ bool THD::set_db(const LEX_CSTRING *new_db)
   }
   else
   {
+	  //空间不足，需要申请临时空间
     const char *org_db= db.str;
     const char *tmp= NULL;
     if (new_db->str)
     {
+    		/*利用new_db填充tmp*/
       if (!(tmp= my_strndup(key_memory_THD_db, new_db->str, new_db->length,
                             MYF(MY_WME | ME_FATAL))))
         result= 1;
@@ -1519,6 +1522,7 @@ void THD::reset_db(const LEX_CSTRING *new_db)
 {
   if (new_db->str != db.str || new_db->length != db.length)
   {
+	  //利用new_db更新db
     if (db.str != 0)
       DBUG_PRINT("QQ", ("Overwriting: %p", db.str));
     mysql_mutex_lock(&LOCK_thd_data);

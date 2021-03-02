@@ -3553,8 +3553,9 @@ get_info:
 */
 
 int STDCALL
-mysql_send_query(MYSQL* mysql, const char* query, ulong length/*query字符串长度*/)
+mysql_send_query(MYSQL* mysql, const char* query/*查询语句*/, ulong length/*query字符串长度*/)
 {
+	//向server端发送查询语句，并解释返回的数据
   DBUG_ENTER("mysql_send_query");
   if (mysql->options.client_flag & CLIENT_LOCAL_FILES &&
       mysql->auto_local_infile == WAIT_FOR_QUERY &&
@@ -3564,11 +3565,12 @@ mysql_send_query(MYSQL* mysql, const char* query, ulong length/*query字符串�
       mysql->auto_local_infile= ACCEPT_FILE_REQUEST;
   }
   /*发送简单命令（查询类）*/
-  DBUG_RETURN(simple_command(mysql, COM_QUERY, (uchar*) query, length, 1));
+  DBUG_RETURN(simple_command(mysql, COM_QUERY/*指定命令为查询*/, (uchar*) query, length, 1));
 }
 
+/*mysql做真正的sql查询*/
 int STDCALL
-mysql_real_query(MYSQL *mysql, const char *query, ulong length)
+mysql_real_query(MYSQL *mysql, const char *query/*查询语句*/, ulong length/*查询语句长度*/)
 {
   DBUG_ENTER("mysql_real_query");
   DBUG_PRINT("enter",("handle: %p", mysql));

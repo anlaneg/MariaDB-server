@@ -717,8 +717,9 @@ void mysql_set_local_infile_default(MYSQL *mysql)
 **************************************************************************/
 
 int STDCALL
-mysql_query(MYSQL *mysql, const char *query)
+mysql_query(MYSQL *mysql, const char *query/*查询语句*/)
 {
+	/*mysql做一个查询*/
   return mysql_real_query(mysql,query, (uint) strlen(query));
 }
 
@@ -1017,13 +1018,14 @@ mysql_get_server_info(MYSQL *mysql)
   return((char*) mysql->server_version);
 }
 
-
+/*检查server版本*/
 my_bool STDCALL mariadb_connection(MYSQL *mysql)
 {
   return (strstr(mysql->server_version, "MariaDB") ||
           strstr(mysql->server_version, "-maria-"));
 }
 
+/*返回mysql版本*/
 const char * STDCALL
 mysql_get_server_name(MYSQL *mysql)
 {

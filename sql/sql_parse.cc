@@ -1798,6 +1798,7 @@ bool dispatch_command(enum enum_server_command command, THD *thd,
   }
   case COM_QUERY:
   {
+	  /*执行client发送过来的query命令*/
     DBUG_ASSERT(thd->m_digest == NULL);
     thd->m_digest= & thd->m_digest_state;
     thd->m_digest->reset(thd->m_token_array, max_digest_length);
@@ -1809,6 +1810,7 @@ bool dispatch_command(enum enum_server_command command, THD *thd,
                       &thd->security_ctx->priv_user[0],
                       (char *) thd->security_ctx->host_or_ip);
     char *packet_end= thd->query() + thd->query_length();
+    /*写日志*/
     general_log_write(thd, command, thd->query(), thd->query_length());
     DBUG_PRINT("query",("%-.4096s",thd->query()));
 #if defined(ENABLED_PROFILING)
@@ -1817,6 +1819,7 @@ bool dispatch_command(enum enum_server_command command, THD *thd,
     MYSQL_SET_STATEMENT_TEXT(thd->m_statement_psi, thd->query(),
                              thd->query_length());
 
+    /*初始化parser*/
     Parser_state parser_state;
     if (unlikely(parser_state.init(thd, thd->query(), thd->query_length())))
       break;
@@ -1837,6 +1840,7 @@ bool dispatch_command(enum enum_server_command command, THD *thd,
     }
     else
 #endif /* WITH_WSREP */
+    	  /*查询语句解析*/
       mysql_parse(thd, thd->query(), thd->query_length(), &parser_state);
 
     while (!thd->killed && (parser_state.m_lip.found_semicolon != NULL) &&
@@ -7835,6 +7839,7 @@ static bool wsrep_mysql_parse(THD *thd, char *rawbuf, uint length,
 void mysql_parse(THD *thd, char *rawbuf, uint length,
                  Parser_state *parser_state)
 {
+	//解析mysql查询
   DBUG_ENTER("mysql_parse");
   DBUG_EXECUTE_IF("parser_debug", turn_parser_debug_on_MYSQLparse(););
   DBUG_EXECUTE_IF("parser_debug", turn_parser_debug_on_ORAparse(););
@@ -7858,10 +7863,12 @@ void mysql_parse(THD *thd, char *rawbuf, uint length,
   lex_start(thd);
   thd->reset_for_next_command();
 
+  /*在cache中进行查询*/
   if (query_cache_send_result_to_client(thd, rawbuf, length) <= 0)
   {
     LEX *lex= thd->lex;
 
+    /*sql查询*/
     bool err= parse_sql(thd, parser_state, NULL, true);
 
     if (likely(!err))
@@ -10267,7 +10274,7 @@ bool parse_sql(THD *thd, Parser_state *parser_state,
   bool mysql_parse_status=
          ((thd->variables.sql_mode & MODE_ORACLE) ?
           ORAparse(thd) :
-          MYSQLparse(thd)) != 0;
+          MYSQLparse(thd)) != 0;/*解析sql*/
   DBUG_ASSERT(opt_bootstrap || mysql_parse_status ||
               thd->lex->select_stack_top == 0);
   thd->lex->current_select= thd->lex->first_select_lex();
